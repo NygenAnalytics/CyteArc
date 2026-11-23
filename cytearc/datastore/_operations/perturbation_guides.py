@@ -811,7 +811,7 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
         array = assay.feats._get_array(column)
         rows = np.arange(int(array.shape[0]), dtype=np.int64)
         item = f"the guides' {column!r}"
-        if np.dtype(array.dtype).kind == "U":
+        if np.dtype(array.dtype).kind in "UT":
             text: np.ndarray = read_text_rows(ledger, array, rows, item=item)
             return text
         values = read_rows(ledger, array, rows, item=item)

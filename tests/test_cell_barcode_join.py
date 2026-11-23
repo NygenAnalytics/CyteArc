@@ -528,6 +528,66 @@ def test_barcodes_of_cells_outside_the_selection_are_unselected_and_give_no_warn
     )
 
 
+@pytest.fixture
+def variable_width_joined(join_template, tmp_path):
+    """A copy of the join store whose cell IDs another tool stored as variable-width text."""
+    import shutil
+
+    import zarr
+
+    from tests.storage_helpers import open_store, store_as_variable_width_text
+
+    target = tmp_path / "store.zarr"
+    shutil.copytree(join_template, target)
+    store_as_variable_width_text(zarr.open_group(target / "cellData", mode="r+"), "ids")
+    return open_store(target)
+
+
+# The importers that read the selected cells' IDs as Python strings; guide
+# calls read them as stored.
+STRING_ID_IMPORTERS = sorted(name for name in IMPORTERS if name != "import_guide_calls")
+
+
+@pytest.mark.parametrize("name", STRING_ID_IMPORTERS)
+def test_barcodes_join_to_cells_whose_ids_are_variable_width_text(
+    variable_width_joined, tmp_path, name
+) -> None:
+    import zarr
+
+    # The file names a selected cell, two cells outside the selection and a
+    # barcode of no cell, which join as they do to fixed-width IDs; the
+    # cells outside the selection are told apart by a pass over the store's
+    # variable-width IDs.
+    store = variable_width_joined
+    stored = zarr.open_group(store.zarr_loc, mode="r")["cellData/ids"]
+    assert stored.dtype.kind == "T"
+    importer = IMPORTERS[name]
+    path = importer.write(
+        tmp_path / "file.txt", ["s2__GGGT", "s1__TTTA", "nowhere", "s1__AAAC"]
+    )
+
+    with pytest.warns(DiagnosticWarning), collect_warnings() as messages:
+        ref = importer.run(
+            store,
+            [path],
+            cell_selection=store.snapshot_cell_selection("s2"),
+            barcode_suffix="-1",
+        )
+
+    assert importer.joined(store, ref) == {"s2__GGGT-1"}
+    saved = _joined(store, ref)
+    for kind in ("unmatchedBarcodeExamples", "unselectedBarcodeExamples"):
+        saved[kind] = sorted(saved[kind])
+    unmatched = ["nowhere -> nowhere-1"]
+    assert saved == _counts(
+        4, unmatched, ["s1__AAAC -> s1__AAAC-1", "s1__TTTA -> s1__TTTA-1"]
+    )
+    # Only the barcode of no cell warns.
+    assert list(messages) == [
+        importer.warning(importer.files[0], 1, 4, unmatched, True)
+    ]
+
+
 @pytest.mark.parametrize("name", sorted(IMPORTERS))
 @pytest.mark.parametrize(
     ("pattern", "error", "message"),
@@ -916,26 +976,28 @@ def test_the_pass_over_the_stores_cell_ids_counts_every_barcode_of_the_file(
     ) == (22_002, 2_000, 20_000)
 
 
+@pytest.mark.parametrize("width", ["fixed", "variable"])
 @pytest.mark.parametrize("letter", ["a", "κ", "\U0001f600"])
 def test_the_join_counts_the_barcodes_beyond_the_selection_over_chunked_store_ids(
-    tmp_path, letter
+    tmp_path, letter, width
 ) -> None:
     import zarr
 
     # 200,000 cells of the store in chunks of 100,000, each hashed in two
     # parts, ten selected; the barcodes name 5,000 cells outside the selection
-    # and 5,000 of no cell.
-    ids = np.asarray([f"s1__{letter}{index:09d}-1" for index in range(200_000)])
+    # and 5,000 of no cell. The IDs differ in length, which variable-width
+    # text stores as they are.
+    names = [f"{letter * (1 + index % 5)}{index:09d}" for index in range(200_000)]
+    ids = np.asarray([f"s1__{name}-1" for name in names])
     group = zarr.open_group(tmp_path / "ids.zarr", mode="w")
     array = group.create_array(
-        "ids", shape=ids.shape, dtype=ids.dtype, chunks=(100_000,)
+        "ids",
+        data=ids if width == "fixed" else ids.astype(np.dtypes.StringDType()),
+        chunks=(100_000,),
     )
-    array[:] = ids
     selected = ids[:10].astype(object)
     barcodes = np.asarray(
-        [f"{letter}{index:09d}" for index in range(10, 5_010)]
-        + [f"none{index}" for index in range(5_000)],
-        dtype=object,
+        names[10:5_010] + [f"none{index}" for index in range(5_000)], dtype=object
     )
     file = _plain(prefix="s1__", suffix="-1")
 
@@ -944,6 +1006,66 @@ def test_the_join_counts_the_barcodes_beyond_the_selection_over_chunked_store_id
     )
     join.cells(file, barcodes)
     assert (join.n_unselected_barcodes, join.n_unmatched_barcodes) == (5_000, 5_000)
+
+
+@pytest.mark.parametrize("chunk_rows", [10_000, 1_000])
+@pytest.mark.parametrize(
+    "first", [0x41, 0xC0, 0x1F600], ids=["ascii", "latin-1", "astral"]
+)
+def test_the_pass_over_variable_width_store_ids_holds_what_it_charges(
+    tmp_path, first, chunk_rows
+) -> None:
+    import zarr
+
+    from cytearc.storage.geometry import variable_text_extent
+    from cytearc.storage.validation_scope import validation_scope
+    from tests.memory_helpers import traced_charge
+
+    # 30,000 IDs of 165 characters in chunks of 10,000 or 1,000, random enough
+    # not to compress, as another tool stores them with Zarr's dtype=str; a
+    # barcode of no cell makes the join measure and hash every one of them.
+    rng = np.random.default_rng(first)
+    letters = rng.integers(first, first + 26, size=(30_000, 150))
+    ids = np.asarray(
+        [
+            f"s1__{index:09d}-" + "".join(map(chr, row))
+            for index, row in enumerate(letters)
+        ]
+    )
+    group = zarr.open_group(tmp_path / "ids.zarr", mode="w")
+    array = group.create_array(
+        "ids", data=ids.astype(np.dtypes.StringDType()), chunks=(chunk_rows,)
+    )
+    selected = ids[:10].astype(object)
+    file = _plain(prefix="s1__", suffix="-1")
+
+    def join(ledger: MemoryLedger) -> None:
+        joined = CellBarcodeJoin(selected, ledger=ledger, store_ids=array)
+        joined.cells(file, np.asarray(["none"], dtype=object))
+        assert joined.n_unmatched_barcodes == 1
+
+    # Measuring the IDs is charged with the pass, and so is the pass alone
+    # in an operation that measured them before, as an import's read of the
+    # selected cells' IDs does.
+    traced = traced_charge(join)
+    assert traced.held <= traced.charged
+    with validation_scope():
+        variable_text_extent(array)
+        traced = traced_charge(join)
+    assert traced.held <= traced.charged
+
+
+def test_the_join_takes_variable_width_store_ids_given_in_memory() -> None:
+    # The store's IDs differ in length and reach beyond ASCII; "c\u00e9" names
+    # a cell outside the selection and "z" no cell.
+    store = np.asarray(["a-1", "bb-1", "c\u00e9-1", "d" * 40 + "-1"]).astype(
+        np.dtypes.StringDType()
+    )
+    join = CellBarcodeJoin(
+        np.asarray(["a-1", "bb-1"]), ledger=MemoryLedger(None, "J"), store_ids=store
+    )
+    join.cells(_plain(suffix="-1"), np.asarray(["a", "c\u00e9", "z"], dtype=object))
+    assert join.diagnostics() == _counts(3, ["z -> z-1"], ["c\u00e9 -> c\u00e9-1"])
 
 
 def test_the_join_reads_the_stores_cell_ids_once_and_only_when_it_needs_them() -> None:

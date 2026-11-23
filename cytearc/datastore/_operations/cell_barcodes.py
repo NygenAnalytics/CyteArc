@@ -25,7 +25,12 @@ import pandas as pd
 from ...metadata.rows import row_read_bytes
 from ...storage.async_execution import zarr_decoding_threads
 from ...storage.diagnostics import EXAMPLES, DiagnosticRule
-from ...storage.geometry import array_geometry
+from ...storage.geometry import (
+    ArrayGeometry,
+    TextExtent,
+    array_geometry,
+    text_extent,
+)
 from ...utils.arrays import union_sorted
 from ...utils.digest import file_sha256
 from ...utils.memory_budget import (
@@ -426,21 +431,46 @@ def _store_block_rows(store_ids: Any) -> int:
     return _HASHED_IDS if geometry is None else geometry.axisChunk(0)
 
 
-def _store_read_bytes(store_ids: Any, n_rows: int) -> int:
-    """What reading ``n_rows`` of the store's cell IDs holds.
+@dataclass(frozen=True, slots=True)
+class _StoreIds:
+    """How the store's cell IDs are read and held.
 
-    A stored array is read as :func:`~cytearc.metadata.rows.read_rows` reads
-    a band of chunks; an array without chunks, such as one given in memory,
-    holds the rows alone.
+    Attributes:
+        geometry: Their stored geometry, variable-width text measured, or
+            None for IDs without chunks, such as IDs given in memory.
+        value_bytes: The bytes that one ID holds once read: its fixed width,
+            or for variable-width text NumPy's element and the characters of
+            the longest ID.
+        text: The extent of variable-width IDs, or None for fixed-width IDs.
     """
-    geometry = array_geometry(store_ids)
-    if geometry is None:
-        return n_rows * int(np.dtype(store_ids.dtype).itemsize)
-    return row_read_bytes(geometry, n_rows)
+
+    geometry: ArrayGeometry | None
+    value_bytes: int
+    text: TextExtent | None
+
+    @classmethod
+    def of(cls, store_ids: Any, ledger: MemoryLedger | None) -> "_StoreIds":
+        """Measure the store's cell IDs, for the charges of a pass over them, the measure charged to ``ledger``."""
+        geometry = array_geometry(store_ids, measure_text=True, ledger=ledger)
+        dtype = np.dtype(store_ids.dtype)
+        if dtype.kind != "T":
+            return cls(geometry, max(1, int(dtype.itemsize)), None)
+        text = text_extent(store_ids, geometry, ledger)
+        return cls(geometry, text.valueBytes(), text)
+
+    def read_bytes(self, n_rows: int) -> int:
+        """What reading ``n_rows`` of the IDs holds.
+
+        A stored array is read as :func:`~cytearc.metadata.rows.read_rows`
+        reads a band of chunks; an array without chunks holds the rows alone.
+        """
+        if self.geometry is None:
+            return n_rows * self.value_bytes
+        return row_read_bytes(self.geometry, n_rows)
 
 
 def id_hashing_bytes(n_ids: int, characters: int, widest: int) -> int:
-    """Return what hashing ``n_ids`` of the store's cell IDs holds, beside them as fixed-width text.
+    """Return what hashing ``n_ids`` of the store's cell IDs holds, beside the IDs as read.
 
     Each ID becomes a Python string, as
     :func:`~cytearc.utils.memory_budget.python_text_bytes` counts it, which
@@ -466,7 +496,9 @@ def id_hashing_bytes(n_ids: int, characters: int, widest: int) -> int:
     )
 
 
-def store_pass_bytes(store_ids: Any, n_selected: int) -> int:
+def store_pass_bytes(
+    store_ids: Any, n_selected: int, *, ledger: MemoryLedger | None = None
+) -> int:
     """Return the most bytes that the join's pass over the store's cell IDs holds.
 
     The join charges this when it starts, unless the selection holds every
@@ -477,21 +509,24 @@ def store_pass_bytes(store_ids: Any, n_selected: int) -> int:
     to four bytes a character, with what hashing it holds.
 
     Args:
-        store_ids: The store's array of cell IDs, as fixed-width text.
+        store_ids: The store's array of cell IDs, as text.
         n_selected: The selected cells.
+        ledger: The ledger that a measure of variable-width IDs charges, as
+            :func:`~cytearc.storage.geometry.variable_text_extent` takes it.
     """
     n_ids = int(store_ids.shape[0])
     if n_selected == n_ids:
         return 0
     rows = min(n_ids, _store_block_rows(store_ids))
     hashed = min(rows, _HASHED_IDS)
-    itemsize = int(np.dtype(store_ids.dtype).itemsize)
-    reading = _store_read_bytes(store_ids, rows)
-    # A character takes up to four bytes in a Python string and four in UTF-8.
+    ids = _StoreIds.of(store_ids, ledger)
+    # An ID's bytes as read bound both its Python string's characters and its
+    # UTF-8 bytes: fixed-width text takes four bytes a character, and
+    # variable-width text more than its UTF-8 bytes.
     hashing = hashed * (
-        _HASHED_BYTES_PER_STORE_ID + _STRING_HEADER_BYTES + 2 * itemsize
+        _HASHED_BYTES_PER_STORE_ID + _STRING_HEADER_BYTES + 2 * ids.value_bytes
     )
-    return 8 * n_ids + max(reading, rows * itemsize + hashing)
+    return 8 * n_ids + max(ids.read_bytes(rows), rows * ids.value_bytes + hashing)
 
 
 def _hashes(values: np.ndarray) -> np.ndarray:
@@ -552,13 +587,14 @@ class CellBarcodeJoin:
     Args:
         cell_ids: The IDs of the selected cells, in selection order.
         ledger: The memory ledger of the import.
-        store_ids: The IDs of every cell of the store, as fixed-width text,
-            such as the store's stored array of them, read in blocks.
+        store_ids: The IDs of every cell of the store, as fixed-width or
+            variable-width text, such as the store's stored array of them,
+            read in blocks.
 
     Raises:
         MemoryBudgetError: If the lookup does not fit the ledger's budget.
         TypeError: If the IDs are neither fixed-width text nor an object
-            array, or the store's IDs are not fixed-width text.
+            array, or the store's IDs are not text.
         ValueError: If a cell ID repeats.
     """
 
@@ -568,9 +604,9 @@ class CellBarcodeJoin:
         given = np.asarray(cell_ids)
         n_cells = len(given)
         self._ledger = ledger
-        if np.dtype(store_ids.dtype).kind != "U" or len(store_ids.shape) != 1:
+        if np.dtype(store_ids.dtype).kind not in "UT" or len(store_ids.shape) != 1:
             raise TypeError(
-                "The store's cell IDs must be one-dimensional fixed-width text, not "
+                "The store's cell IDs must be one-dimensional text, not "
                 f"{store_ids.dtype}"
             )
         self._store_ids = store_ids
@@ -612,7 +648,7 @@ class CellBarcodeJoin:
         else:
             self._reserved = ledger.hold(
                 "the pass over the store's cell IDs",
-                store_pass_bytes(store_ids, n_cells),
+                store_pass_bytes(store_ids, n_cells, ledger=ledger),
                 remedy=_STORE_REMEDY,
             )
         self._named = np.zeros(n_cells, dtype=bool)
@@ -665,30 +701,37 @@ class CellBarcodeJoin:
         self._ledger.hold(item, 8 * n_ids, remedy=_STORE_REMEDY)
         hashes = np.empty(n_ids, dtype=np.uint64)
         step = _store_block_rows(store_ids)
+        ids = _StoreIds.of(store_ids, self._ledger)
         for start in range(0, n_ids, step):
             stop = min(n_ids, start + step)
             self._ledger.peak(
                 "a block of the store's cell IDs",
-                _store_read_bytes(store_ids, stop - start),
+                ids.read_bytes(stop - start),
                 remedy=_STORE_REMEDY,
             )
             # The read decodes on the ledger's codec threads.
             with zarr_decoding_threads(self._ledger.codec_threads):
                 block = np.asarray(store_ids[start:stop])
+            block_bytes = len(block) * ids.value_bytes
             for first in range(0, len(block), _HASHED_IDS):
                 part = block[first : first + _HASHED_IDS]
                 # Each ID becomes a Python string, which hashing encodes as
                 # UTF-8, measured from each ID's length.
                 self._ledger.peak(
                     "a block of the store's cell IDs",
-                    block.nbytes + 8 * len(part),
+                    block_bytes + 8 * len(part),
                     remedy=_STORE_REMEDY,
                 )
-                characters = int(np.char.str_len(part).sum())
-                widest = int(part.view(np.uint32).max()) if part.size else 0
+                characters = int(np.strings.str_len(part).sum())
+                # Variable-width IDs take the widest character of them all.
+                widest = (
+                    int(part.view(np.uint32).max())
+                    if ids.text is None
+                    else ids.text.widest
+                )
                 self._ledger.peak(
                     "a block of the store's cell IDs",
-                    block.nbytes + id_hashing_bytes(len(part), characters, widest),
+                    block_bytes + id_hashing_bytes(len(part), characters, widest),
                     remedy=_STORE_REMEDY,
                 )
                 at = start + first

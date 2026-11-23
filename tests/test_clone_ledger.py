@@ -408,6 +408,49 @@ def test_clones_of_a_column_read_in_blocks_are_the_clones_of_one_read(
     pd.testing.assert_frame_equal(loaded[small].clones, loaded[1 << 34].clones)
 
 
+def test_clones_of_a_column_of_variable_width_text_are_those_of_its_labels(
+    column_store,
+) -> None:
+    import sys
+
+    from tests.storage_helpers import open_store
+
+    # The short and four-byte labels, stored again beside them as the
+    # variable-width text that another tool can store, give the same clones.
+    store = column_store
+    table = store.zw["cellData"]
+    for name in ("short", "four_byte"):
+        stored = table[name]
+        table.create_array(
+            f"{name}_variable",
+            data=np.asarray(stored[:]).astype(np.dtypes.StringDType()),
+            chunks=stored.chunks,
+            overwrite=True,
+        )
+    reopened = open_store(store.zarr_loc)
+    cells = every_cell(reopened)
+    for name in ("short", "four_byte"):
+        fixed = reopened.clones.load_clones(
+            reopened.clones.from_column(name, cell_selection=cells)
+        )
+        variable = reopened.clones.load_clones(
+            reopened.clones.from_column(f"{name}_variable", cell_selection=cells)
+        )
+        pd.testing.assert_frame_equal(variable.cells, fixed.cells)
+        pd.testing.assert_frame_equal(variable.clones, fixed.clones)
+    # A label is planned as NumPy keeps the longest, its 16-byte element and
+    # its UTF-8 bytes behind a byte of size (NEP 55), and as its Python
+    # string, beside its row and its reference.
+    labels = np.asarray(table["four_byte"][:]).tolist()
+    longest = max(labels, key=len)
+    planned = clone_operations._column_label_bytes(
+        reopened.cells._get_array("four_byte_variable"),
+        MemoryLedger(None, "Importing clones"),
+    )
+    utf8 = len(longest.encode("utf-8"))
+    assert planned >= 16 + utf8 + 1 + sys.getsizeof(longest) + 16
+
+
 def test_clone_rows_are_read_in_chunks_that_half_the_room_holds() -> None:
     chunk_rows = clone_operations._chunk_rows
     # Half of 2,000,000 bytes holds 10,000 rows of 100 bytes.

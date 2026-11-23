@@ -101,6 +101,7 @@ from ...storage.artifacts import (
     require_complete_artifact,
 )
 from ...storage.cell_order import CellOrder, cell_order_argument
+from ...storage.geometry import text_extent
 from ...storage.diagnostics import (
     DiagnosticRule,
     ExportSummary,
@@ -506,10 +507,20 @@ def _barcode_import_cause(root: zarr.Group, barcodes: ArtifactRef) -> str | None
     )
 
 
-def _column_label_bytes(array: Any) -> int:
-    """What reading a label of a metadata column and making its text holds: its stored value, its row and its string."""
+def _column_label_bytes(array: Any, ledger: MemoryLedger) -> int:
+    """What reading a label of a metadata column and making its text holds: its stored value, its row and its string.
+
+    Variable-width text counts its longest label and widest character, as
+    :func:`~cytearc.storage.geometry.variable_text_extent` measures them,
+    charged to ``ledger``.
+    """
+    kind = np.dtype(array.dtype).kind
+    if kind == "T":
+        extent = text_extent(array, None, ledger)
+        string = python_text_bytes(1, extent.characters, widest=extent.widest)
+        return extent.valueBytes() + 8 + string + 8
     itemsize = int(np.dtype(array.dtype).itemsize)
-    if np.dtype(array.dtype).kind == "U":
+    if kind == "U":
         return itemsize + 8 + python_text_bytes(1, itemsize // 4, widest=0x10FFFF) + 8
     return itemsize + 8 + _converted_label_bytes(np.zeros(1, dtype=array.dtype))
 
@@ -970,11 +981,11 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         assigner = CloneAssigner(cell_index, multiple="error", ledger=ledger)
         labels_array = self.cells._get_array(column)
         missing_array = metadata_missing_mask(self.cells, column)
-        text = np.dtype(labels_array.dtype).kind == "U"
+        text = np.dtype(labels_array.dtype).kind in "UT"
         # Each label's read and text, its missing flag, and its cell and what
         # the assigner works with while the block is assigned.
         row_bytes = (
-            _column_label_bytes(labels_array)
+            _column_label_bytes(labels_array, ledger)
             + (0 if missing_array is None else 1)
             + 8
             + CLONE_ASSIGNMENT_ROW_BYTES

@@ -35,6 +35,7 @@ from ...metadata.rows import (
     read_whole,
     row_read_bytes,
     text_read_bytes,
+    text_width,
 )
 from ...metadata.selection import (
     NamedCellArtifact,
@@ -2806,7 +2807,12 @@ def _packed_text(
         The text, whose codes are unused, and the bytes of its longest value.
     """
     n_rows = int(array.shape[0]) if rows is None else len(rows)
-    itemsize = int(np.dtype(array.dtype).itemsize)
+    # Variable-width text packs as fixed-width text of its longest value does.
+    itemsize = (
+        4 * text_width(array, ledger=ledger)
+        if np.dtype(array.dtype).kind == "T"
+        else int(np.dtype(array.dtype).itemsize)
+    )
     packing = 3 * itemsize + 24
     step = max(1, slice_bytes // (itemsize + ROW_INDEX_BYTES + packing))
     ledger.hold(f"the offsets of {item}", 8 * (n_rows + 1))
@@ -2816,7 +2822,9 @@ def _packed_text(
     for start in range(0, n_rows, step):
         stop = min(start + step, n_rows)
         chosen = np.arange(start, stop) if rows is None else rows[start:stop]
+        held = ledger.held_bytes
         values = read_rows(ledger, array, chosen, item=item)
+        values_bytes = ledger.held_bytes - held
         ledger.peak(f"packing {item}", (stop - start) * packing)
         data, bounds = pack_text(values)
         offsets[start + 1 : stop + 1] = bounds[1:] + offsets[start]
@@ -2825,7 +2833,6 @@ def _packed_text(
         parts.append(data)
         # The packed slice is charged before the stored rows are let go.
         ledger.hold(item, int(data.nbytes))
-        values_bytes = values.nbytes
         del values, chosen
         ledger.release(values_bytes)
     # The packed slices, and the bytes that they are joined into.

@@ -416,6 +416,83 @@ def test_labels_beyond_ascii_read_in_chunks_form_their_groups(tmp_path, lead) ->
     assert len(result.keys) == 50
 
 
+@pytest.mark.parametrize(
+    "lead", ["", "\u00c9", "\U0001f600"], ids=["ascii", "Latin-1", "four-byte"]
+)
+def test_variable_width_labels_group_and_sample_cells_as_fixed_width_labels_do(
+    tmp_path, lead, monkeypatch
+) -> None:
+    import sys
+
+    import cytearc.datastore._operations.cell_samples as cell_samples
+    from cytearc.datastore._operations.cell_groups import _column_values
+
+    # 2,000 cells of 50 labels, stored as fixed-width text and as the
+    # variable-width text that another tool can store, in chunks of 500.
+    path = tmp_path / "store.zarr"
+    n_cells = 2_000
+    write_count_store(str(path), {"RNA": np.ones((n_cells, 1), dtype=int)}, "uint16")
+    store = open_store(path)
+    store.cells.insert(
+        "every_cell", by_cell_id(store.cells, np.ones(n_cells, dtype=bool))
+    )
+    labels = np.asarray(
+        [lead * 20 + "label-" * 5 + f"{index % 50:02d}" for index in range(n_cells)]
+    )
+    table = store.zw["cellData"]
+    table.create_array("fixed", data=labels, chunks=(500,))
+    table.create_array(
+        "variable", data=labels.astype(np.dtypes.StringDType()), chunks=(500,)
+    )
+    # The same groups as numbers, which are read as stored.
+    table.create_array("numbers", data=np.arange(n_cells) % 50, chunks=(500,))
+    store = open_store(path)
+    fixed = _group(store, group_by="fixed")
+    variable = _group(store, group_by="variable")
+    assert [key["variable"] for key in variable.keys] == [
+        key["fixed"] for key in fixed.keys
+    ]
+    np.testing.assert_array_equal(variable.codes, fixed.codes)
+    numbered = _group(store, group_by="numbers")
+    # Cells of a label share a group of the number of the label.
+    np.testing.assert_array_equal(
+        pd.factorize(numbered.codes)[0], pd.factorize(fixed.codes)[0]
+    )
+    # The labels become Python strings, kept charged by their characters
+    # beside the UTF-8 copy that coding them leaves in a string beyond ASCII.
+    strings = sum(map(sys.getsizeof, labels.tolist())) + 8 * n_cells
+    every = np.arange(n_cells)
+    values, missing, kept = _column_values(
+        MemoryLedger(None, "Grouping cells"), store.cells, "variable", every
+    )
+    assert values.dtype == object and values.tolist() == labels.tolist()
+    assert missing is None and kept >= strings
+    # Samples are numbered from the same strings, charged alike.
+    held_while_numbered: list[int] = []
+    numbered = cell_samples.sample_codes
+
+    def recorded(columns, found, n_rows, *, reason, ledger):
+        held_while_numbered.append(ledger.held_bytes)
+        return numbered(columns, found, n_rows, reason=reason, ledger=ledger)
+
+    monkeypatch.setattr(cell_samples, "sample_codes", recorded)
+    with_fixed = cell_samples.read_cell_samples(
+        store, MemoryLedger(None, "Samples"), "fixed", every, reason="r"
+    )
+    with_variable = cell_samples.read_cell_samples(
+        store, MemoryLedger(None, "Samples"), "variable", every, reason="r"
+    )
+    np.testing.assert_array_equal(with_variable.codes, with_fixed.codes)
+    assert with_variable.names == with_fixed.names
+    assert held_while_numbered[-1] >= strings
+    with_numbers = cell_samples.read_cell_samples(
+        store, MemoryLedger(None, "Samples"), "numbers", every, reason="r"
+    )
+    np.testing.assert_array_equal(
+        pd.factorize(with_numbers.codes)[0], pd.factorize(with_fixed.codes)[0]
+    )
+
+
 def test_kept_apart_labels_follow_the_rows_that_join_groups(store) -> None:
     rows = np.asarray([False, True, True, False, True, True, False, False])
     kinds = np.asarray(["B", "T", "B", "B", "T", "T", "B", "T"], dtype=object)

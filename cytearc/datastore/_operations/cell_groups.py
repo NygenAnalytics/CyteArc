@@ -230,7 +230,7 @@ def _column_values(
         if array.dtype.kind == "U":
             # pandas hashes the categories to check that they differ.
             ledger.hold(item, hashed_text_bytes(array.categories.tolist()))
-    elif np.dtype(array.dtype).kind == "U":
+    elif np.dtype(array.dtype).kind in "UT":
         values = read_text_rows(ledger, array, cell_index, item=item)
         ledger.hold(item, hashed_text_bytes(values))
     else:
