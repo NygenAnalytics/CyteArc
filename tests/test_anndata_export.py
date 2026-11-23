@@ -280,6 +280,101 @@ def test_live_exports_write_masked_metadata_as_missing(export_store, tmp_path) -
     assert anndata.read_h5ad(path).obs["flag"].dtype == "boolean"
 
 
+def _exported_text(column: pd.Series) -> dict[str, str | None]:
+    """Each row of an exported column as text, or None where it is missing, by its index."""
+    return {
+        name: None if pd.isna(value) else str(value)
+        for name, value in column.astype(object).items()
+    }
+
+
+def _stored_text(ids: np.ndarray, values: np.ndarray) -> dict[str, str | None]:
+    """Each row of a stored column as the text that NumPy writes for it, or None for NaT, by its ID."""
+    return {
+        str(name): None if np.isnat(value) else str(value)
+        for name, value in zip(ids, values, strict=True)
+    }
+
+
+def test_exports_write_the_nat_of_dates_and_durations_as_missing(
+    export_store, tmp_path
+) -> None:
+    anndata = pytest.importorskip("anndata")
+    from cytearc.writers import to_h5ad
+
+    rows = np.arange(export_store.cells.N)
+    days = np.datetime64("2026-01-01", "s") + (rows % 5).astype("timedelta64[D]")
+    days[rows % 4 == 1] = np.datetime64("NaT", "s")
+    waits = (rows % 7).astype("timedelta64[ms]")
+    waits[rows % 3 == 2] = np.timedelta64("NaT", "ms")
+    # Dates without NaT, which an export writes as text as before.
+    kept = np.datetime64("2026-02-01", "s") + (rows % 3).astype("timedelta64[h]")
+    for name, values in (("day", days), ("wait", waits), ("kept", kept)):
+        export_store.cells.insert(
+            name, by_cell_id(export_store.cells, values, key=None), key=None
+        )
+    features = export_store.RNA.feats
+    added = np.datetime64("2025-06-01", "ns") + np.arange(features.N).astype(
+        "timedelta64[h]"
+    )
+    added[::2] = np.datetime64("NaT", "ns")
+    features.insert("added", added)
+    path = tmp_path / "dates.h5ad"
+    to_h5ad(export_store.RNA, str(path))
+    exported = anndata.read_h5ad(path)
+
+    # AnnData writes no dates, so the export writes each as the text that
+    # NumPy writes for the value that the store holds, and each NaT, which
+    # the store's readers take as missing, as missing.
+    cell_ids = export_store.cells.fetch_all("ids")
+    for name in ("day", "wait", "kept"):
+        stored = export_store.cells.fetch_all(name)
+        assert _exported_text(exported.obs[name]) == _stored_text(cell_ids, stored)
+        assert int(exported.obs[name].isna().sum()) == int(np.isnat(stored).sum())
+    assert int(exported.obs["day"].isna().sum()) > 0
+    assert not isinstance(exported.obs["kept"].dtype, pd.CategoricalDtype)
+    assert _exported_text(exported.var["added"]) == _stored_text(
+        features.fetch_all("ids"), features.fetch_all("added")
+    )
+    assert int(exported.var["added"].isna().sum()) == (features.N + 1) // 2
+
+
+@pytest.mark.parametrize("text", ["string", "categorical"])
+@pytest.mark.parametrize(
+    "values",
+    [
+        np.asarray(
+            ["2026-01-02", "NaT", "2026-01-01", "2026-01-02", "2026-01-03"],
+            dtype="datetime64[s]",
+        ),
+        np.asarray([5, "NaT", 7, 5, 9], dtype="timedelta64[ms]"),
+    ],
+    ids=["dates", "durations"],
+)
+def test_an_export_writes_nat_and_masked_dates_as_missing(
+    tmp_path, values, text
+) -> None:
+    anndata = pytest.importorskip("anndata")
+    from cytearc.writers.export import H5adColumn, write_h5ad_plan
+
+    # Row 3 holds a value that the column's missing mask flags, and row 1 an
+    # unflagged NaT; both are missing, in a plain export and in a run's.
+    mask = np.asarray([False, False, False, True, False])
+    plan = _text_plan(values)
+    plan = dataclasses.replace(
+        plan, obs=(H5adColumn("t", lambda: (values, mask), text),)
+    )
+    write_h5ad_plan(plan, tmp_path / "dates.h5ad")
+    column = anndata.read_h5ad(tmp_path / "dates.h5ad").obs["t"]
+
+    assert column.isna().tolist() == [False, True, False, True, False]
+    assert [str(value) for value in column[~column.isna()]] == [
+        str(values[0]),
+        str(values[2]),
+        str(values[4]),
+    ]
+
+
 def test_raw_feature_subset_matches_full_raw_columns(shared_export_store) -> None:
     adata = shared_export_store.to_anndata(feature_indexes=[3, 1])
 

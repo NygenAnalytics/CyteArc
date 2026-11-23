@@ -1136,10 +1136,17 @@ def _write_column(
 ) -> tuple[bool, tuple[str, ...] | None]:
     """Write one column; skip one of unsupported dtype with a warning.
 
-    Returns whether the column was written and the colors of its categories,
-    if it has them.
+    AnnData stores no dates or durations, so a column of them is written as
+    text, and each NaT, which a store keeps without a missing mask and its
+    readers take as missing, as a missing row beside those that the mask
+    flags. Returns whether the column was written and the colors of its
+    categories, if it has them.
     """
     values, missing = _read_column(column, n_rows)
+    if isinstance(values, np.ndarray) and values.dtype.kind in "Mm":
+        absent = np.isnat(values)
+        if absent.any():
+            missing = absent if missing is None else missing | absent
     if not isinstance(values, np.ndarray):
         # A categorical keeps its codes, categories, and order as read.
         _write_categorical(
