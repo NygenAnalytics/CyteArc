@@ -462,9 +462,13 @@ def test_the_saved_walk_is_the_one_that_a_fate_map_takes() -> None:
         (reference["walk_data"], reference["walk_indices"], reference["walk_indptr"]),
         shape=(n_cells, n_cells),
     )
-    assert abs(walk - expected).max() == 0.0
+    # One function builds both, so they share their edges and agree to
+    # rounding, which the platform's exponential moves in the last digits.
+    np.testing.assert_array_equal(walk.indptr, expected.indptr)
+    np.testing.assert_array_equal(walk.indices, expected.indices)
+    np.testing.assert_allclose(walk.data, expected.data, rtol=0.0, atol=1e-12)
     np.testing.assert_allclose(
-        walk.toarray(), _fate_walk(graph.toarray(), reference["direction"]), atol=1e-15
+        walk.toarray(), _fate_walk(graph.toarray(), reference["direction"]), atol=1e-12
     )
 
 
@@ -751,12 +755,7 @@ def test_a_walk_that_collects_in_its_initial_state_warns_that_it_found_no_termin
 
 
 def _blocks_and_junction() -> tuple[np.ndarray, np.ndarray]:
-    """Three cliques of 25 cells joined through a clique of 25, and a score for each cell.
-
-    Three states take their 30 most likely cells among 100, and the
-    junction's cells, which every state shares, go to one state each, so a
-    state ends with fewer than 30.
-    """
+    """Three cliques of 25 cells joined through a clique of 25, and a score for each cell."""
     weights = _blocks(
         [25, 25, 25, 25],
         1.0,
@@ -774,28 +773,34 @@ def _blocks_and_junction() -> tuple[np.ndarray, np.ndarray]:
 
 
 def test_a_state_short_of_cells_is_named_in_a_warning() -> None:
-    weights, scores = _blocks_and_junction()
-    trajectory = _trajectory_store(weights)
-    direction = pd.Series(scores, index=trajectory.cell_ids)
+    # Six states of the saved process take their 70 most likely cells each.
+    # One state shares 3 of its cells with others, in which they are
+    # likelier, so it ends with 67. Each state's 70th cell lies at least 9e-4
+    # above its 71st, and each shared cell's memberships at least 0.14 apart,
+    # far from any tie that rounding could tip.
+    trajectory, direction, _labels = _process_store()
 
-    # Every cell holds one label, which names the three states with suffixes.
-    with pytest.warns(
-        DiagnosticWarning,
-        match="^1 state holds fewer than cells_per_state cells, because a cell",
-    ):
+    # Every cell holds one label, which names the six states with suffixes.
+    with pytest.warns(DiagnosticWarning) as warned:
         ref = _states(
             trajectory,
             direction,
-            n_states=3,
-            beta=0.0,
-            labels=trajectory.labels(np.full(100, "same")),
+            n_states=6,
+            cells_per_state=70,
+            labels=trajectory.labels(np.full(len(trajectory.cell_ids), "same")),
         )
 
+    assert any(
+        str(warning.message).startswith(
+            "1 state holds fewer than cells_per_state cells, because a cell"
+        )
+        for warning in warned
+    )
     found = trajectory.store.trajectory.load_states(ref)
-    assert found.names == ("same_1", "same_2", "same_3")
-    assert found.table["label"].tolist() == ["same"] * 3
+    assert found.names == tuple(f"same_{state}" for state in range(1, 7))
+    assert found.table["label"].tolist() == ["same"] * 6
     counts = found.table["cells"].to_numpy()
-    assert sorted(counts.tolist()) == [27, 30, 30]
+    assert sorted(counts.tolist()) == [67, 70, 70, 70, 70, 70]
     np.testing.assert_array_equal(
         counts, [np.count_nonzero(found.labels == name) for name in found.names]
     )
@@ -827,24 +832,27 @@ def test_a_search_covers_the_scored_cells_beside_a_larger_unscored_component() -
 
 def test_eigenvalues_that_tie_at_the_last_state_are_named_in_a_warning() -> None:
     # A start and three identical ends, each a clique of 20 cells joined to
-    # the start alone: the walk's second and third eigenvalues tie.
-    cross = [[0, 0.001, 0.001, 0.001]] + [[0.001, 0, 0, 0]] * 3
+    # the start alone: by symmetry the walk's second and third eigenvalues
+    # tie exactly, and rounding leaves them about 5e-11 of their distance
+    # from one apart, far below the tolerance of 1e-6.
+    cross = [[0, 0.05, 0.05, 0.05]] + [[0.05, 0, 0, 0]] * 3
     weights = _blocks([20] * 4, 1.0, cross)
     trajectory = _trajectory_store(weights)
     direction = pd.Series(np.r_[np.zeros(20), np.ones(60)], index=trajectory.cell_ids)
 
     # The second state is one mix of the three ends' directions among many, so
-    # its role means little: here it holds no more than its share of the walk.
+    # whether it is terminal depends on rounding; only the tie is certain.
     with pytest.warns(DiagnosticWarning) as warned:
         two = _states(trajectory, direction, n_states=2)
-    messages = sorted(str(warning.message) for warning in warned)
-    assert len(messages) == 2
-    assert messages[0].startswith("The state search found no terminal state")
-    assert messages[1].startswith(
-        "The walk's eigenvalue of the last state ties the next one"
+    assert any(
+        str(warning.message).startswith(
+            "The walk's eigenvalue of the last state ties the next one"
+        )
+        for warning in warned
     )
-    assert trajectory.store.artifacts.inspect(two).diagnostics["boundaryGap"] < 1e-6
-    # Four states keep every eigenvalue of the tie.
+    assert trajectory.store.artifacts.inspect(two).diagnostics["boundaryGap"] < 1e-8
+    # Four states keep every eigenvalue of the tie, and each takes its own
+    # clique of 20 cells, so nothing is warned about.
     with warnings.catch_warnings():
         warnings.simplefilter("error", DiagnosticWarning)
         four = _states(trajectory, direction, n_states=4, cells_per_state=20)
