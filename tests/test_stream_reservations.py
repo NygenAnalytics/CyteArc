@@ -129,13 +129,16 @@ def test_a_read_on_cytearcs_pools_holds_its_objects_where_a_plain_pool_keeps_a_c
     # of 1,000 rows at a time: the 160,000,000-byte result, the band's
     # 40,000,000 bytes twice over, each of its ten chunks as stored and
     # decoded, and the four chunks under way, beside the objects of that
-    # read; the ten chunks cover any chunk that a plain pool keeps.
+    # read; the ten chunks cover any chunk that a plain pool keeps. The reads
+    # of the three earlier bands leave their objects: 32 KiB, and 4 KiB for
+    # each of their thirty chunks.
     whole = (
         160_000_000
         + 2 * 40_000_000
         + 10 * (encoded + decoded)
         + 4 * decoded
         + (32_768 + 10 * 4_096 + 4 * 16_384)
+        + (32_768 + 30 * 4_096)
     )
     assert sharded.wholeReadBytes(4) == own_pool.wholeReadBytes(4) == whole
     unsharded = replace(sharded, shards=None, chunks=(1_000, 10_000))

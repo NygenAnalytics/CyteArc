@@ -390,12 +390,6 @@ def test_a_row_read_gives_its_rows(tmp_path, n_rows, shape, chunks, dtype) -> No
     assert np.array_equal(result, values[rows])
 
 
-#: What a read of selected rows holds beside what it charges: Zarr's own
-#: objects and buffers beyond the objects of each band's read, which the
-#: charge counts as ``ArrayGeometry.objectBytes`` does.
-_READ_OBJECT_BYTES = 192 * 1024
-
-
 @pytest.mark.parametrize(
     ("shape", "chunks", "dtype", "n_rows"),
     [
@@ -428,9 +422,10 @@ def test_a_row_read_holds_what_it_charges(tmp_path, shape, chunks, dtype, n_rows
         tracemalloc.stop()
     assert np.array_equal(result, values[rows])
     # Zarr copies the rows that a decoded chunk holds before it places them
-    # in the rows it returns.
+    # in the rows it returns, and each band's read leaves its objects while
+    # the next bands are read, 150 of them for the chunks of 2,000 rows.
     charged = row_read_bytes(array_geometry(array), n_rows)
-    assert peak - before <= charged + _READ_OBJECT_BYTES
+    assert peak - before <= charged
 
 
 @pytest.mark.parametrize("kind", ["ASCII", "four-byte"])
@@ -449,6 +444,118 @@ def test_a_text_row_read_refuses_values_that_are_not_text(tmp_path) -> None:
     array = root.create_array("codes", data=np.arange(5), chunks=(5,))
     with pytest.raises(TypeError, match="the codes must be stored as text"):
         read_text_rows(MemoryLedger(None, "x"), array, np.arange(2), item="the codes")
+
+
+_SMALL_CHUNKS = {
+    # Flags in 40 chunks of 500 rows, in 4 shards and unsharded.
+    "flags-in-shards": (np.ones(20_000, dtype=bool), 500, 5_000),
+    "flags": (np.ones(20_000, dtype=bool), 500, None),
+    # Flags and numbers in 100 chunks of 100 rows, in 10 shards.
+    "flags-in-small-shards": (np.ones(10_000, dtype=bool), 100, 1_000),
+    "numbers-in-small-shards": (np.linspace(0, 1, 10_000), 100, 1_000),
+    # Flags in one shard of 5 chunks, and text of 6 characters in 4 shards.
+    "flags-in-one-shard": (np.ones(20_000, dtype=bool), 4_000, 20_000),
+    "text-in-shards": (np.char.mod("%06d", np.arange(20_000)), 500, 5_000),
+}
+
+
+@pytest.mark.parametrize(
+    "layout",
+    [
+        # A hundred reads of a band each take a few seconds.
+        pytest.param(name, marks=pytest.mark.slow) if "small" in name else name
+        for name in sorted(_SMALL_CHUNKS)
+    ],
+)
+def test_reads_of_many_small_chunks_hold_what_they_charge(tmp_path, layout) -> None:
+    from tests.memory_helpers import least_traced_charge
+
+    # Each band of chunks is a Zarr read of its own, which leaves its objects
+    # while the next bands are read, and a read of part of a local shard
+    # fetches it through a buffered file.
+    values, chunk_rows, shard_rows = _SMALL_CHUNKS[layout]
+    root = zarr.open_group(tmp_path / "store.zarr", mode="w")
+    array = root.create_array(
+        "values",
+        data=values,
+        chunks=(chunk_rows,),
+        **({} if shard_rows is None else {"shards": (shard_rows,)}),
+    )
+    rows = np.sort(np.random.default_rng(2).choice(len(values), len(values) // 3))
+    reads = {
+        "whole": lambda ledger: read_whole(ledger, root, "values", item="the values"),
+        "rows": lambda ledger: read_rows(
+            ledger, array, np.unique(rows), item="the values"
+        ),
+    }
+    for name, read in reads.items():
+        traced = least_traced_charge(read)
+        assert traced.held <= traced.charged, name
+
+
+def test_a_read_of_part_of_a_local_shard_is_charged_its_file_buffer(tmp_path) -> None:
+    import io
+    import tracemalloc
+
+    from zarr.storage import MemoryStore
+
+    root = zarr.open_group(tmp_path / "store.zarr", mode="w")
+    values = np.ones(1_000, dtype=bool)
+    sharded = root.create_array("sharded", data=values, chunks=(100,), shards=(1_000,))
+    plain = root.create_array("plain", data=values, chunks=(100,))
+
+    def fetch(buffering: int) -> int:
+        """What a fetch of a byte range of the shard holds, as Zarr's local store makes it."""
+        tracemalloc.start()
+        try:
+            with open(tmp_path / "store.zarr/sharded/c/0", "rb", buffering) as file:
+                file.seek(0, io.SEEK_END)
+                file.seek(4)
+                file.read(8)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        return peak
+
+    # Each read of part of the shard holds the buffer of its file, which a
+    # file read without a buffer does not hold.
+    buffer = fetch(-1) - fetch(0)
+    assert array_geometry(sharded).readScratchBytes >= buffer > 0
+    # A chunk of an unsharded array is read as a whole file, without that
+    # buffer, and a shard in memory is no file.
+    assert array_geometry(plain).readScratchBytes == 0
+    memory = zarr.open_group(MemoryStore(), mode="w").create_array(
+        "sharded", data=values, chunks=(100,), shards=(1_000,)
+    )
+    assert array_geometry(memory).readScratchBytes == 0
+
+
+def test_the_reads_of_bands_leave_the_objects_of_a_read_and_of_each_chunk() -> None:
+    from cytearc.storage.geometry import ArrayGeometry
+
+    # 1,000 rows in bands of 100, each band of 4 chunks across the columns.
+    geometry = ArrayGeometry((1_000, 40), (100, 10), None, 4)
+    assert geometry.bandCount() == 10
+    assert geometry.bandsLeftoverBytes(0) == 0
+    # 32 KiB of a read and 4 KiB of each chunk, whichever reads take them.
+    assert geometry.bandsLeftoverBytes(3) == 32 * 1024 + 12 * 4 * 1024
+    # A read of some rows takes no more bands than it has rows, nor than the
+    # array has.
+    assert geometry.leftoverBytes(2) == geometry.bandsLeftoverBytes(2)
+    assert geometry.leftoverBytes(5_000) == 32 * 1024 + 40 * 4 * 1024
+    # A read of three rows in three bands holds what the reads of the two
+    # earlier bands leave, which three rows of one band do not.
+    one_band = ArrayGeometry((100, 40), (100, 10), None, 4)
+    assert row_read_bytes(geometry, 3) - row_read_bytes(one_band, 3) == (
+        32 * 1024 + 2 * 4 * 4 * 1024
+    )
+    # A whole read of a sharded array, a band at a time, holds what the reads
+    # of the nine earlier bands leave, which a read of one band does not.
+    sharded = ArrayGeometry((1_000, 40), (100, 10), (500, 40), 4)
+    one_band = ArrayGeometry((100, 40), (100, 10), (500, 40), 4)
+    assert sharded.wholeReadBytes(1) - one_band.wholeReadBytes(1) == (
+        900 * 40 * 4 + 32 * 1024 + 9 * 4 * 4 * 1024
+    )
 
 
 def test_a_sharded_array_reads_whole(tmp_path) -> None:

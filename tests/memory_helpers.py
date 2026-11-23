@@ -148,6 +148,40 @@ def traced_charge(call: Callable[[Any], Any]) -> TracedCharge:
     return TracedCharge(peak - before, ledger.most, current - before, ledger.held_bytes)
 
 
+def least_traced_charge(call: Callable[[Any], Any], runs: int = 3) -> TracedCharge:
+    """Run ``call(ledger)`` once untraced, then ``runs`` times traced, each after a full collection, and return the run that held the least.
+
+    What a call leaves for Python's collector and in CPython's free lists
+    varies from one run to the next with when the collector runs, so a bound
+    that holds for the least of a few runs is not undone by one late
+    collection.
+    """
+    import gc
+    import tracemalloc
+
+    call(recording_ledger())
+    traced = []
+    for _ in range(runs):
+        gc.collect()
+        ledger = recording_ledger()
+        tracemalloc.start()
+        try:
+            before, _ = tracemalloc.get_traced_memory()
+            result = call(ledger)
+            _, peak = tracemalloc.get_traced_memory()
+            gc.collect()
+            current, _ = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        del result
+        traced.append(
+            TracedCharge(
+                peak - before, ledger.most, current - before, ledger.held_bytes
+            )
+        )
+    return min(traced, key=lambda run: run.held)
+
+
 class HandedArrays:
     """Arrays handed to writes, and whether each wait saw them all freed.
 

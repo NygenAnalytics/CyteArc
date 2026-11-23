@@ -1,8 +1,10 @@
 """Stored chunk geometry of a streamed array."""
 
 import importlib
+import io
 import math
 import operator
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -235,16 +237,26 @@ class ArrayGeometry:
     def leftoverBytes(self, rows: int) -> int:
         """Return what a read of ``rows`` rows leaves of its objects once it returns.
 
-        They are counted as :meth:`objectBytes` counts the objects of the read
-        and of each chunk that it takes while it runs.
+        It reads no more bands than it has rows, and they leave what
+        :meth:`bandsLeftoverBytes` counts.
         """
-        chunks = (
-            min(max(0, int(rows)), -(-self.shape[0] // self.axisChunk(0)))
-            * self.bandChunks()
-        )
+        return self.bandsLeftoverBytes(min(max(0, int(rows)), self.bandCount()))
+
+    def bandsLeftoverBytes(self, bands: int) -> int:
+        """Return what the reads of ``bands`` bands of chunks leave of their objects once they return.
+
+        They are counted as :meth:`objectBytes` counts the objects of a read
+        and of each chunk that it takes while it runs, for every chunk of the
+        bands, whether one read takes them or a read of each band does.
+        """
+        chunks = max(0, int(bands)) * self.bandChunks()
         if chunks == 0:
             return 0
         return _READ_OBJECT_BYTES + chunks * _READ_CHUNK_OBJECT_BYTES
+
+    def bandCount(self) -> int:
+        """Return the bands of chunks along the first axis."""
+        return -(-self.shape[0] // self.axisChunk(0))
 
     def rowsBytes(self, rows: int) -> int:
         """Return the bytes of ``rows`` rows as a read returns them.
@@ -340,7 +352,13 @@ class ArrayGeometry:
         """
         result = self.rowsBytes(self.shape[0])
         if self.shards is not None:
-            return result + self.bandReadBytes(self.axisChunk(0), concurrency)
+            # The reads of the earlier bands leave their objects while the
+            # last one runs.
+            return (
+                result
+                + self.bandReadBytes(self.axisChunk(0), concurrency)
+                + self.bandsLeftoverBytes(self.bandCount() - 1)
+            )
         n_chunks = max(1, -(-self.shape[0] // self.axisChunk(0)) * self.bandChunks())
         decoding, _ = self.readsAtOnce(n_chunks, concurrency)
         return (
@@ -482,6 +500,9 @@ def array_geometry(
     scratch = chunk_read_scratch_bytes(array)
     if scratch < 0:
         raise ValueError(f"Array read scratch cannot be negative, got {scratch}")
+    # A store that computes the array's chunks fetches no part of a file.
+    if shards is not None and not scratch:
+        scratch = _range_read_buffer_bytes(array)
     fused_workers, fused_async = _fused_pool(array)
 
     text = (
@@ -701,6 +722,24 @@ def _utf8_lengths(
         del strings, encoded, ascii_bytes
         first = stop
     return utf8, widest, part_bytes
+
+
+def _range_read_buffer_bytes(array: Any) -> int:
+    """Return the buffer that a fetch of part of a shard of ``array`` holds, 0 for a store that reads without one.
+
+    Zarr's local store fetches a byte range of a file through a buffered
+    file from ``open``, which buffers the file system's block size, and from
+    Python 3.14 at least ``io.DEFAULT_BUFFER_SIZE``, 128 KiB, and at most
+    8 MiB; it reads a whole file, as a chunk of an unsharded array, without
+    that buffer. Zarr's wrappers of the store are looked through.
+    """
+    store = getattr(array, "store", None)
+    storage: Any = importlib.import_module("zarr.storage")
+    while isinstance(store, storage.WrapperStore):
+        store = store._store
+    if not isinstance(store, storage.LocalStore):
+        return 0
+    return max(io.DEFAULT_BUFFER_SIZE, int(os.stat(store.root).st_blksize))
 
 
 def _coalesce_gap_bytes(array: Any) -> int:

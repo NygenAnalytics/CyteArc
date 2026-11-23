@@ -380,11 +380,15 @@ def row_read_bytes(geometry: ArrayGeometry | None, n_rows: int) -> int:
     returned_rows = (
         geometry.axisChunk(0) if geometry.text is not None and n_rows > 1 else band_rows
     )
+    # Each band is a read of its own, and what the earlier bands' reads leave
+    # stays while the last one runs.
+    bands = min(n_rows, geometry.bandCount())
     reading = (
         geometry.rowsBytes(n_rows)
         + n_rows * ROW_KEPT_INDEX_BYTES
         + geometry.bandReadBytes(returned_rows, operation_concurrency())
         + (geometry.rowsBytes(band_rows) if geometry.shards is None else 0)
+        + geometry.bandsLeftoverBytes(bands - 1)
     )
     return max(ordering, reading)
 
