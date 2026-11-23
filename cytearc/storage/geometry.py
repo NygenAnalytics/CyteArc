@@ -54,6 +54,16 @@ class ArrayGeometry:
     #: ``FusedCodecPipeline`` with more than one worker. Every other read
     #: decodes on CyteArc's codec pools, which keep none.
     poolKeepsDecodedChunk: bool = False
+    #: The threads of Zarr's own pool that its opt-in ``FusedCodecPipeline``
+    #: reads the array on, ``codec_pipeline.max_workers`` or more, as many
+    #: chunks or shards at once as it has threads, whatever Zarr's async
+    #: concurrency, the store's threads or ``zarr_decoding_threads``; 0 for
+    #: every other pipeline.
+    fusedPoolWorkers: int = 0
+    #: Whether that pipeline reads the array's store asynchronously, as it
+    #: does a store without Zarr's synchronous I/O: it then decodes every
+    #: chunk of an unsharded read before it places any.
+    fusedReadsAsync: bool = False
     #: The most bytes apart that Zarr merges two byte ranges of a read of part
     #: of a shard into one fetch, ``sharding_coalesce_max_gap_bytes`` of the
     #: array's configuration; none for a geometry of no opened array.
@@ -102,6 +112,39 @@ class ArrayGeometry:
             for extent, chunk in zip(self.shape[1:], self.chunks[1:], strict=True)
         )
 
+    def readsAtOnce(
+        self, chunks: int, decodes: int | None, shards: int = 1
+    ) -> tuple[int, int]:
+        """Return the chunks that a read decodes at once in each shard it reads, and the shards it reads at once.
+
+        ``chunks`` counts the chunks that the read takes in one shard, or in
+        the array when it is unsharded, ``shards`` the shards it touches,
+        and ``decodes`` Zarr's async concurrency, which bounds both, or None
+        for all of them. CyteArc's codec pipelines follow that concurrency.
+        Zarr's ``FusedCodecPipeline``, which a user who configures it gets in
+        place of CyteArc's, follows the threads of its own pool instead, as
+        ``fusedPoolWorkers`` counts them: on a store that reads synchronously
+        it reads that many chunks, or shards, at once, each shard decoding
+        its chunks one at a time; on a store that reads asynchronously it
+        decodes every chunk of an unsharded read before it places any, and
+        reads the shards of a sharded one at Zarr's async concurrency, each
+        decoding as many chunks at once as the pool has threads.
+        """
+        touched = max(1, int(chunks))
+        touched_shards = max(1, int(shards))
+        planned = None if decodes is None else max(1, int(decodes))
+        workers = self.fusedPoolWorkers
+        if not workers:
+            if planned is None:
+                return touched, touched_shards
+            return min(touched, planned), min(touched_shards, planned)
+        if self.shards is None:
+            return (touched if self.fusedReadsAsync else min(touched, workers)), 1
+        if not self.fusedReadsAsync:
+            return 1, min(touched_shards, workers)
+        reading = touched_shards if planned is None else min(touched_shards, planned)
+        return min(touched, workers), reading
+
     def objectBytes(self, chunks: int, decodes: int) -> int:
         """Return the objects that one read of ``chunks`` chunks, ``decodes`` at a time, holds beside its buffers.
 
@@ -149,7 +192,7 @@ class ArrayGeometry:
         if self.shards is not None:
             return result + self.bandReadBytes(self.axisChunk(0), concurrency)
         n_chunks = max(1, -(-self.shape[0] // self.axisChunk(0)) * self.bandChunks())
-        decoding = min(max(1, int(concurrency)), n_chunks)
+        decoding, _ = self.readsAtOnce(n_chunks, concurrency)
         return (
             result
             + decoding * self.storedChunkBytes()
@@ -170,6 +213,7 @@ class ArrayGeometry:
         touched = self.bandChunks()
         decoding = min(max(1, int(concurrency)), touched)
         if self.shards is None:
+            decoding, _ = self.readsAtOnce(touched, concurrency)
             band = decoding * self.storedChunkBytes() + self.heldDecodeBytes(
                 touched, decoding
             )
@@ -212,14 +256,16 @@ class ArrayGeometry:
         ``gapBytes`` are the stored bytes that a sharded read of part of a
         shard also fetches between the chunks it touches, as
         :func:`~cytearc.storage.partition.coalesced_gap_bytes` counts them.
-        ``shards`` counts the shards that a sharded read reads at once, as
-        Zarr reads up to its async concurrency of the shards a selection
-        touches together: each holds the compressed bytes of the chunks it
-        touches, its decodes, what :meth:`heldDecodeBytes` counts, scratch and
-        gap, while their shard-level copies together hold the selection once.
+        ``shards`` counts the shards that a sharded read touches, of which
+        Zarr reads as many at once as :meth:`readsAtOnce` gives: each holds
+        the compressed bytes of the chunks it touches, its decodes, what
+        :meth:`heldDecodeBytes` counts, scratch and gap, while their
+        shard-level copies together hold the selection once. The chunks that
+        a read decodes at once, in the array or in each shard, also follow
+        :meth:`readsAtOnce`.
         """
         touched = max(1, int(chunks))
-        decoding = touched if decodes is None else min(touched, max(1, int(decodes)))
+        decoding, reading = self.readsAtOnce(touched, decodes, shards)
         result = max(0, int(resultBytes))
         held = self.heldDecodeBytes(touched, decoding)
         if self.shards is None:
@@ -236,7 +282,7 @@ class ArrayGeometry:
             + self.readScratchBytes
             + max(0, int(gapBytes))
         )
-        return 2 * result + max(1, int(shards)) * shard
+        return 2 * result + reading * shard
 
     def binOf(self, axis: int, indices: np.ndarray) -> np.ndarray:
         """Map indices along one axis to the chunk they live in."""
@@ -279,6 +325,7 @@ def array_geometry(array: Any) -> ArrayGeometry | None:
     scratch = chunk_read_scratch_bytes(array)
     if scratch < 0:
         raise ValueError(f"Array read scratch cannot be negative, got {scratch}")
+    fused_workers, fused_async = _fused_pool(array)
 
     return ArrayGeometry(
         shape=resolved_shape,
@@ -286,8 +333,10 @@ def array_geometry(array: Any) -> ArrayGeometry | None:
         shards=shards,
         itemsize=max(1, int(np.dtype(array.dtype).itemsize)),
         readScratchBytes=scratch,
-        poolKeepsDecodedChunk=_decodes_on_zarrs_own_pool(array),
+        poolKeepsDecodedChunk=fused_workers > 1,
         coalesceGapBytes=_coalesce_gap_bytes(array),
+        fusedPoolWorkers=fused_workers,
+        fusedReadsAsync=fused_async,
     )
 
 
@@ -301,26 +350,44 @@ def _coalesce_gap_bytes(array: Any) -> int:
     return max(0, int(getattr(config, "sharding_coalesce_max_gap_bytes", 0)))
 
 
-def _decodes_on_zarrs_own_pool(array: Any) -> bool:
-    """Return whether Zarr decodes ``array``'s chunks on a pool of its own.
+def _fused_pool(array: Any) -> tuple[int, bool]:
+    """Return the threads of the pool that Zarr's ``FusedCodecPipeline`` reads ``array`` on, and whether it reads the store asynchronously.
 
     An array opened while ``codec_pipeline.path`` names Zarr's opt-in
-    ``FusedCodecPipeline`` keeps that pipeline, which decodes on a plain
-    thread pool of ``codec_pipeline.max_workers`` threads, by default one for
-    each CPU, when that is more than one, and inline otherwise.
+    ``FusedCodecPipeline`` keeps that pipeline in place of CyteArc's
+    ``StoreThreadsCodecPipeline``, which ``ensure_zarr_host_ceiling``
+    installs only in place of Zarr's default. The pipeline reads on a plain
+    pool of ``codec_pipeline.max_workers`` threads, by default one for each
+    CPU, a pool that grows to the most workers any read asked for and never
+    shrinks, and inline with one worker. It reads synchronously when every
+    codec of the array decodes synchronously and the store serves Zarr's
+    synchronous I/O, as local and memory stores do, and asynchronously
+    otherwise. Every other pipeline gives (0, False).
     """
-    pipeline = getattr(getattr(array, "async_array", array), "codec_pipeline", None)
-    fused = getattr(
-        importlib.import_module("zarr.core.codec_pipeline"),
-        "FusedCodecPipeline",
-        None,
-    )
+    async_array = getattr(array, "async_array", array)
+    pipeline = getattr(async_array, "codec_pipeline", None)
+    module = importlib.import_module("zarr.core.codec_pipeline")
+    fused = getattr(module, "FusedCodecPipeline", None)
     if fused is None or not isinstance(pipeline, fused):
-        return False
+        return 0, False
     configured = zarr.config.get("codec_pipeline.max_workers", None)
     try:
         workers = (os.cpu_count() or 1) if configured is None else int(configured)
     except (TypeError, ValueError):
         # Zarr falls back to one worker for each CPU from a value it cannot read.
         workers = os.cpu_count() or 1
-    return workers > 1
+    if workers > 1:
+        # A read of several chunks runs on Zarr's one pool, as many at once
+        # as it has threads; one worker reads inline.
+        workers = max(workers, int(getattr(module, "_pool_size", 0) or 0))
+    workers = max(1, workers)
+    supports_sync_io = getattr(
+        importlib.import_module("zarr.abc.store"), "_store_supports_sync_io", None
+    )
+    store = getattr(getattr(async_array, "store_path", None), "store", None)
+    reads_sync = (
+        getattr(pipeline, "sync_transform", None) is not None
+        and supports_sync_io is not None
+        and bool(supports_sync_io(store))
+    )
+    return workers, not reads_sync

@@ -133,6 +133,91 @@ def test_array_geometry_records_whether_zarr_decodes_on_a_pool_of_its_own(
         assert array_geometry(reopened).poolKeepsDecodedChunk is False
 
 
+_FUSED = "zarr.core.codec_pipeline.FusedCodecPipeline"
+
+
+@pytest.mark.parametrize(
+    ("max_workers", "pool_size", "workers"),
+    [(3, 0, 3), (3, 6, 6), (1, 6, 1), (None, 0, "cpus"), ("many", 0, "cpus")],
+    ids=[
+        "three workers",
+        "a pool that an earlier read grew",
+        "one worker, which reads inline",
+        "a worker per CPU",
+        "an unreadable count",
+    ],
+)
+def test_array_geometry_records_the_pool_that_zarrs_fused_pipeline_reads_on(
+    monkeypatch, max_workers: object, pool_size: int, workers: object
+) -> None:
+    import os
+
+    import zarr.core.codec_pipeline as codec_pipeline
+
+    # Zarr's pipeline reads on one pool of the process, which grows to the
+    # most workers that any read asked for and never shrinks.
+    monkeypatch.setattr(codec_pipeline, "_pool_size", pool_size)
+    with zarr.config.set({"codec_pipeline.path": _FUSED}):
+        array = _array(shape=(20, 20), chunks=(5, 5), shards=(10, 10))
+    with zarr.config.set({"codec_pipeline.max_workers": max_workers}):
+        geometry = array_geometry(array)
+    assert geometry is not None
+    expected = max(1, os.cpu_count() or 1) if workers == "cpus" else workers
+    # A memory store serves Zarr's synchronous I/O.
+    assert (geometry.fusedPoolWorkers, geometry.fusedReadsAsync) == (expected, False)
+    assert array_geometry(_array(shape=(20, 20), chunks=(5, 5))).fusedPoolWorkers == 0
+
+
+def test_a_fused_pipeline_that_a_user_configures_reads_on_its_own_pool_whatever_the_stores_threads(
+    tmp_path, monkeypatch
+) -> None:
+    import zarr.core.codec_pipeline as codec_pipeline
+    from fsspec.implementations.asyn_wrapper import AsyncFileSystemWrapper
+    from fsspec.implementations.local import LocalFileSystem
+    from zarr.storage import FsspecStore, LocalStore
+
+    from cytearc.storage.async_execution import (
+        ensure_zarr_host_ceiling,
+        register_store_threads,
+    )
+
+    monkeypatch.setattr(codec_pipeline, "_pool_size", 0)
+    with zarr.config.set(
+        {"codec_pipeline.path": _FUSED, "codec_pipeline.max_workers": 3}
+    ):
+        # CyteArc's codec pipeline takes the place of Zarr's default only, so
+        # the configured fused pipeline stays, and a DataStore's registration
+        # of one thread for its store does not bound the pool it reads on.
+        ensure_zarr_host_ceiling()
+        assert zarr.config.get("codec_pipeline.path") == _FUSED
+        store = LocalStore(str(tmp_path / "local.zarr"))
+        register_store_threads(store, 1)
+        local = zarr.open_group(store=store, mode="w").create_array(
+            "counts", shape=(20, 20), chunks=(5, 5), dtype=np.uint16
+        )
+        files = AsyncFileSystemWrapper(
+            LocalFileSystem(auto_mkdir=True), asynchronous=True
+        )
+        remote = zarr.open_group(
+            store=FsspecStore(files, path=str(tmp_path / "async.zarr")), mode="w"
+        ).create_array("counts", shape=(20, 20), chunks=(5, 5), dtype=np.uint16)
+        assert (
+            type(local.async_array.codec_pipeline) is codec_pipeline.FusedCodecPipeline
+        )
+        local_geometry = array_geometry(local)
+        remote_geometry = array_geometry(remote)
+    assert local_geometry is not None and remote_geometry is not None
+    assert (local_geometry.fusedPoolWorkers, local_geometry.fusedReadsAsync) == (
+        3,
+        False,
+    )
+    # A store without Zarr's synchronous I/O is read asynchronously.
+    assert (remote_geometry.fusedPoolWorkers, remote_geometry.fusedReadsAsync) == (
+        3,
+        True,
+    )
+
+
 def test_array_geometry_records_shards_and_falls_back_to_chunks() -> None:
     sharded = array_geometry(_array(shape=(20, 20), chunks=(5, 5), shards=(10, 10)))
     plain = array_geometry(_array(shape=(20, 20), chunks=(5, 5)))

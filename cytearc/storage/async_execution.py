@@ -607,9 +607,11 @@ _ZARR_CODEC_PIPELINE = "zarr.core.codec_pipeline.BatchedCodecPipeline"
 def _install_store_threads_pipeline() -> None:
     """Make CyteArc's codec pipeline Zarr's while Zarr's default pipeline is configured.
 
-    A pipeline that a user configured, such as ``FusedCodecPipeline``, stays.
-    Zarr builds each array's pipeline as the array opens, so arrays opened
-    before keep theirs.
+    A pipeline that a user configured, such as ``FusedCodecPipeline``, stays,
+    and reads on its own pool whatever a store's registered threads;
+    ``ArrayGeometry.readsAtOnce`` charges the reads of an array that keeps
+    the fused pipeline at that pool's threads. Zarr builds each array's
+    pipeline as the array opens, so arrays opened before keep theirs.
     """
     if zarr.config.get("codec_pipeline.path") == _ZARR_CODEC_PIPELINE:
         register_pipeline(StoreThreadsCodecPipeline)

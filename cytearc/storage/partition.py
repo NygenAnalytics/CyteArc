@@ -223,7 +223,7 @@ def indexed_read_parts(
             resultBytes,
             touched,
             decodes=reads,
-            shards=min(reads, max(1, int(shards)) * _column_shards(geometry, columns)),
+            shards=max(1, int(shards)) * _column_shards(geometry, columns),
             gapBytes=coalesced_gap_bytes(geometry, columns, chunks=touched),
         )
 
@@ -269,7 +269,7 @@ def row_read_parts(
             0,
             touched,
             decodes=reads,
-            shards=min(reads, max(1, int(shards)) * _column_shards(geometry, columns)),
+            shards=max(1, int(shards)) * _column_shards(geometry, columns),
             gapBytes=coalesced_gap_bytes(geometry, columns, chunks=touched),
         )
     per_row = columns.size * geometry.itemsize if geometry.shards is not None else 0
