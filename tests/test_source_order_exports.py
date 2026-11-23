@@ -768,9 +768,13 @@ def test_closing_a_reorder_early_removes_its_files(tmp_path, monkeypatch) -> Non
 
     next(blocks)
     assert len(list(tmp_path.iterdir())) == 1
+    # The reorder's frame, held past the close, keeps its store from garbage
+    # collection, whose finalizer would remove the files too.
+    frame = blocks.gi_frame
     blocks.close()
 
     assert list(tmp_path.iterdir()) == []
+    assert frame.f_locals["store"] is not None
 
 
 def test_a_reorder_whose_rows_fail_after_its_first_block_removes_its_files(
