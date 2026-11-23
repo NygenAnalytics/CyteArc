@@ -1140,6 +1140,19 @@ def _merged_order_values(
     return values
 
 
+def _most_shard_values(
+    stores: Sequence[tuple[str, np.ndarray]], shard_rows: int
+) -> list[int]:
+    """Count with NumPy the most nonzero values that a stored shard of each source holds."""
+    return [
+        max(
+            int(np.count_nonzero(counts[start : start + shard_rows]))
+            for start in range(0, len(counts), shard_rows)
+        )
+        for _, counts in stores
+    ]
+
+
 def test_merge_counts_signed_values_within_its_budget_or_names_the_budget_it_needs(
     tmp_path, recorded_blocks
 ):
@@ -1170,9 +1183,12 @@ def test_merge_counts_signed_values_within_its_budget_or_names_the_budget_it_nee
 
     def profile(budget: int, held: int = 1_000) -> np.ndarray:
         recorded_blocks.clear()
-        return merge_writer._cumulative_row_nnz(
+        cumulative, shard_values = merge_writer._cumulative_row_nnz(
             assays, row_plan, ResourceBudget(budget, 1), resident_bytes=held
         )
+        # Each source's two shards of 12 cells, counted the same way.
+        assert shard_values == _most_shard_values(stores, 12)
+        return cumulative
 
     np.testing.assert_array_equal(np.diff(profile(10**9)), expected)
     # Each source is read in blocks of a stored band and every column.
@@ -1256,9 +1272,13 @@ def test_merge_refuses_before_it_reads_any_source_when_one_cannot_be_read(
 
     def profile(budget: int) -> np.ndarray:
         recorded_blocks.clear()
-        return merge_writer._cumulative_row_nnz(
+        cumulative, shard_values = merge_writer._cumulative_row_nnz(
             assays, row_plan, ResourceBudget(budget, 1), resident_bytes=1_000
         )
+        # Each source's two shards of 12 cells, counted with NumPy.
+        assert [assay.rawData.chunksize[0] for assay in assays] == [12, 12]
+        assert shard_values == _most_shard_values(stores, 12)
+        return cumulative
 
     with pytest.raises(MemoryBudgetError) as refused:
         profile(2_000)
@@ -1295,9 +1315,15 @@ def test_merge_names_the_count_summaries_that_its_budget_cannot_load(
 
     def profile(budget: int) -> np.ndarray:
         recorded_blocks.clear()
-        return merge_writer._cumulative_row_nnz(
+        cumulative, shard_values = merge_writer._cumulative_row_nnz(
             assays, row_plan, ResourceBudget(budget, 1), resident_bytes=1_000
         )
+        shard_rows = [int(assay.rawData.chunksize[0]) for assay in assays]
+        assert shard_values == [
+            _most_shard_values([store], rows)[0]
+            for store, rows in zip(stores, shard_rows, strict=True)
+        ]
+        return cumulative
 
     # Beside the 1,000 bytes held, a count of each of the 600 merged cells
     # and one more, 8 bytes each, and a whole read of the left source's

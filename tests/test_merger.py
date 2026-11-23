@@ -7808,21 +7808,29 @@ def sparse_band_references():
         ("ids", (), "narrow", True, "8 rows"),
         ("ids", (), "narrow", True, "13 rows"),
         ("ids", (), "narrow", True, "batch"),
+        # Or holds a shard of each source as CSR.
+        ("ids", (), "narrow", True, "CSR"),
+        ("ids", (), "wide", True, "CSR"),
         ("ids", ("dense",), "narrow", False, "block"),
         ("ids", ("dense",), "narrow", False, "8 rows"),
         ("ids", ("dense",), "narrow", False, "batch"),
+        ("ids", ("dense",), "narrow", False, "CSR"),
         ("names", (), "narrow", False, "block"),
         ("names", (), "wide", False, "block"),
         ("names", (), "narrow", False, "8 rows"),
         ("names", (), "narrow", False, "13 rows"),
         ("names", (), "narrow", False, "batch"),
+        ("names", (), "narrow", False, "CSR"),
         ("float", (), "narrow", True, "block"),
         ("float", (), "wide", True, "block"),
         ("float", (), "narrow", True, "8 rows"),
+        ("float", (), "narrow", True, "CSR"),
         ("missing", (), "narrow", True, "block"),
+        ("missing", (), "narrow", True, "CSR"),
         # Sparse batches of cells of the source without antibodies alone
         # hold no coordinates.
         ("missing", ("dense",), "narrow", False, "block"),
+        ("missing", ("dense",), "narrow", False, "CSR"),
     ],
 )
 def test_merged_counts_match_the_sparse_band_write_byte_for_byte(
@@ -7873,7 +7881,7 @@ def test_merged_counts_match_the_sparse_band_write_byte_for_byte(
             "plan_dense_write",
             "scatter_block_dense",
             "remap_block_to_coo",
-            "_held_window_rows",
+            "_held_windows",
             "iter_row_plan_windows",
         )
     }
@@ -7891,15 +7899,22 @@ def test_merged_counts_match_the_sparse_band_write_byte_for_byte(
             )
         return real["plan_dense_write"](*args, **kwargs)
 
-    def held_window_rows(shard_rows, part_rows, fits):
+    def held_windows(shard_rows, part_rows, fits):
         # The budget admits no more held rows of each source than the case
-        # names: a shard, 8 or 13 rows, or none, which reads batch by batch.
-        most = {"block": shard_rows, "8 rows": 8, "13 rows": 13}.get(held, 0)
-        rows = real["_held_window_rows"](
-            shard_rows, part_rows, lambda rows: rows <= most and fits(rows)
+        # names: a shard, 8 or 13 rows, or none, which reads batch by batch,
+        # held dense, or a shard held as CSR and no dense rows.
+        most = {"block": shard_rows, "8 rows": 8, "13 rows": 13, "CSR": shard_rows}
+        rows, sparse = real["_held_windows"](
+            shard_rows,
+            part_rows,
+            lambda rows, sparse: (
+                sparse == (held == "CSR")
+                and rows <= most.get(held, 0)
+                and fits(rows, sparse)
+            ),
         )
-        held_rows.append((part_rows, rows))
-        return rows
+        held_rows.append((part_rows, rows, sparse))
+        return rows, sparse
 
     def windows_of(row_plan, window_rows, **options):
         # The write's batches are its windows of merged rows.
@@ -7915,7 +7930,7 @@ def test_merged_counts_match_the_sparse_band_write_byte_for_byte(
 
     monkeypatch.setattr(merge_writer, "controlled_compute", read)
     monkeypatch.setattr(merge_writer, "plan_dense_write", dense_write)
-    monkeypatch.setattr(merge_writer, "_held_window_rows", held_window_rows)
+    monkeypatch.setattr(merge_writer, "_held_windows", held_windows)
     monkeypatch.setattr(merge_writer, "iter_row_plan_windows", windows_of)
     for name in ("scatter_block_dense", "remap_block_to_coo"):
         monkeypatch.setattr(merge_writer, name, counted(name))
@@ -7940,13 +7955,14 @@ def test_merged_counts_match_the_sparse_band_write_byte_for_byte(
     # refused dense write searches its windows before the sparse write does.
     # A batch takes about 37 / 66 of its cells from the larger source.
     if scenario != "missing":
-        part_rows, rows = held_rows[-1]
+        part_rows, rows, sparse = held_rows[-1]
     else:
-        part_rows, rows = held_rows[1 if "dense" in refused else 0]
+        part_rows, rows, sparse = held_rows[1 if "dense" in refused else 0]
     batch_rows = batches[0 if scenario == "missing" else -1]
     assert batch_rows < 8 if shard_rows == "narrow" else batch_rows >= 16
     assert part_rows == -(-batch_rows * 37 // 66)
-    assert rows == {"block": 16, "8 rows": 8, "13 rows": 13}.get(held, 0)
+    assert rows == {"block": 16, "8 rows": 8, "13 rows": 13, "CSR": 16}.get(held, 0)
+    assert sparse == (held == "CSR")
 
     def windows(n_rows, window):
         """The reads of a source's rows held ``window`` at a time within its shards of 16."""
@@ -8142,14 +8158,23 @@ def _merge_chunk_columns(
     mem_budget=None,
     most_rows=None,
     feature_key="ids",
+    sparse=False,
+    policy=None,
+    nthreads=1,
 ):
     """Merge the chunk-column sources into narrow bands, holding no more than ``most_rows`` rows of each source.
 
-    ``most_rows`` 0 reads batch by batch. Returns the batch rows and held
-    rows of the write, the decodes of each source chunk shape and the
-    columns of each source read while the counts are written, the most held
-    windows alive when a read starts, what the write keeps and reserves for
-    its producer, and the store's files.
+    ``most_rows`` 0 reads batch by batch. ``sparse`` True holds a shard of
+    each source as CSR and False holds dense rows; None leaves the choice to
+    the write, and records the budget that a refusal of CSR windows names.
+    The bands are of 16 cells of 40 features unless ``policy`` sets them,
+    and the merge runs ``nthreads`` workers. Returns the batch rows and held
+    rows of the write, whether it holds them as CSR, the bands that the
+    write would write at once beside dense or CSR windows of a shard, the
+    decodes of each source chunk shape and the columns of each source read
+    while the counts are written, the most held windows alive when a read
+    starts, what the write keeps and reserves for its producer, and the
+    store's files.
     """
     import weakref
     from collections import Counter
@@ -8165,24 +8190,36 @@ def _merge_chunk_columns(
     held: list[tuple[int, int]] = []
     batches: list[int] = []
     kept: dict[str, int] = {}
-    # The held windows that batches were cut from, and the most of them alive
-    # when a read starts.
+    # The held windows that batches were cut from, the windows that refills
+    # held, and the most of these alive when a read starts.
     held_cells: list[weakref.ref] = []
+    windows: list[weakref.ref] = []
     alive = [0]
+    # The shard rows of the source of each refill, and the rows it held.
+    refills: list[tuple[int, int]] = []
+    # The budget that the plan of a write holding CSR windows named when it
+    # refused them, while the write chose its windows.
+    choosing_csr = [False]
+    csr_needed: list[int] = []
+    # The bands written at once beside windows of a shard, dense and CSR.
+    shard_writes: dict[bool, int] = {}
     decode = BloscCodec._decode_single
     write = merge_datasets.write_assay_counts
     real = {
         name: getattr(merge_writer, name)
         for name in (
-            "_held_window_rows",
+            "_held_windows",
             "iter_row_plan_windows",
             "controlled_compute",
             "write_dense_from_row_batches",
             "accumulate_sparse_to_shards",
             "scatter_block_dense",
             "remap_block_to_coo",
+            "plan_dense_write",
+            "resolve_sparse_import_batch",
         )
     }
+    refill = merge_writer._HeldSourceRows._refill
 
     async def counted(self, chunk_bytes, chunk_spec):
         if writing[0]:
@@ -8196,13 +8233,42 @@ def _merge_chunk_columns(
         finally:
             writing[0] = False
 
-    def held_window_rows(shard_rows, part_rows, fits):
+    def held_windows(shard_rows, part_rows, fits):
         most = shard_rows if most_rows is None else most_rows
-        rows = real["_held_window_rows"](
-            shard_rows, part_rows, lambda rows: rows <= most and fits(rows)
-        )
-        held.append((part_rows, rows))
-        return rows
+
+        def admitted(rows, csr):
+            if sparse is not None and csr != sparse or rows > most:
+                return 0
+            choosing_csr[0] = csr
+            try:
+                writes = fits(rows, csr)
+            finally:
+                choosing_csr[0] = False
+            if rows == shard_rows:
+                shard_writes[csr] = writes
+            return writes
+
+        rows, csr = real["_held_windows"](shard_rows, part_rows, admitted)
+        held.append((part_rows, rows, csr))
+        return rows, csr
+
+    def planned(name):
+        def call(*args, **kwargs):
+            try:
+                return real[name](*args, **kwargs)
+            except MemoryBudgetError as refusal:
+                if choosing_csr[0]:
+                    csr_needed.append(refusal.needed_bytes)
+                raise
+
+        return call
+
+    def held_refill(self, row):
+        refill(self, row)
+        # A CSR window holds a piece of each chunk column, which go together.
+        held = self._values[0] if isinstance(self._values, list) else self._values
+        windows.append(weakref.ref(held))
+        refills.append((self._shardRows, self._stop - self._start))
 
     def windows_of(row_plan, window_rows, **options):
         # The write's batches are its windows of merged rows.
@@ -8214,8 +8280,12 @@ def _merge_chunk_columns(
         reads_source = hasattr(array, "compute")
         if reads_source:
             # Many batches are cut from one window, which counts once.
-            windows = {id(cells()) for cells in held_cells if cells() is not None}
-            alive[0] = max(alive[0], len(windows))
+            live = {
+                id(window())
+                for window in [*held_cells, *windows]
+                if window() is not None
+            }
+            alive[0] = max(alive[0], len(live))
         values = real["controlled_compute"](array, nthreads)
         if reads_source:
             widths[int(values.shape[1])] += 1
@@ -8245,9 +8315,12 @@ def _merge_chunk_columns(
     with monkeypatch.context() as patched:
         patched.setattr(BloscCodec, "_decode_single", counted)
         patched.setattr(merge_datasets, "write_assay_counts", watched)
-        patched.setattr(merge_writer, "_held_window_rows", held_window_rows)
+        patched.setattr(merge_writer, "_held_windows", held_windows)
         patched.setattr(merge_writer, "iter_row_plan_windows", windows_of)
         patched.setattr(merge_writer, "controlled_compute", read)
+        patched.setattr(merge_writer._HeldSourceRows, "_refill", held_refill)
+        for name in ("plan_dense_write", "resolve_sparse_import_batch"):
+            patched.setattr(merge_writer, name, planned(name))
         for name in ("write_dense_from_row_batches", "accumulate_sparse_to_shards"):
             patched.setattr(merge_writer, name, recorded(name))
         for name in ("scatter_block_dense", "remap_block_to_coo"):
@@ -8260,18 +8333,22 @@ def _merge_chunk_columns(
             zarr_path=str(path),
             names=["left", "right"],
             prepend_text="",
-            nthreads=1,
+            nthreads=nthreads,
             overwrite=True,
             mem_budget=mem_budget,
             # Bands of 16 cells.
-            policy=CountMatrixPolicy(unitBytes=1280, chunkBytes=640),
+            policy=policy or CountMatrixPolicy(unitBytes=1280, chunkBytes=640),
             feature_key=feature_key,
         ).dump()
-    part_rows, rows = held[-1]
+    part_rows, rows, csr = held[-1]
     return {
         "batch_rows": batches[-1],
         "part_rows": part_rows,
         "held_rows": rows,
+        "sparse": csr,
+        "csr_needed": csr_needed[-1] if csr_needed else None,
+        "shard_writes": dict(shard_writes),
+        "refills": refills,
         "decodes": dict(decodes),
         "widths": dict(widths),
         "alive": alive[0],
@@ -8412,6 +8489,441 @@ def test_a_merge_decodes_each_source_chunk_once_for_each_window_of_cells_it_hold
         )
     }
     assert _rows_by_id(stored, "Counts/counts") == expected
+
+
+# Merged bands of 16 cells of 200 uint16 features.
+_SPARSE_BAND_POLICY = CountMatrixPolicy(unitBytes=16 * 400, chunkBytes=16 * 200)
+
+
+@pytest.fixture(scope="module")
+def sparse_source_stores(tmp_path_factory) -> dict[str, str]:
+    """Prepared stores of 600 and 500 cells by 200 features, 5% of them 1 to 5, which merges only read.
+
+    The left store holds shards of 256 cells; the right store's cells are
+    held in shards of 128 cells, and again in shards of 256 with the name
+    of the first feature given to the last too, so a merge by name sums
+    them.
+    """
+    from cytearc import DataStore
+    from tests.storage_helpers import write_count_store
+
+    root = tmp_path_factory.mktemp("sparse_column_sources")
+    locations = {}
+    for name, n_cells, shard_rows, seed in (
+        ("left", 600, 256, 13),
+        ("right", 500, 128, 14),
+        ("right in shards of 256", 500, 256, 14),
+    ):
+        rng = np.random.default_rng(seed)
+        location = str(root / f"{name.replace(' ', '_')}.zarr")
+        counts = np.zeros((n_cells, 200), dtype=np.uint16)
+        nonzero = rng.random(counts.shape) < 0.05
+        counts[nonzero] = rng.integers(1, 6, size=int(nonzero.sum()))
+        names = [f"Counts{index}" for index in range(200)]
+        if name == "right in shards of 256":
+            names[-1] = names[0]
+        write_count_store(
+            location,
+            {"Counts": counts},
+            "uint16",
+            feature_names={"Counts": names},
+            policy=CountMatrixPolicy(
+                unitBytes=shard_rows * 400, chunkBytes=shard_rows * 100
+            ),
+        )
+        # The first opening prepares the store; tests open it again.
+        DataStore(location, default_assay="Counts", nthreads=1)
+        locations[name] = location
+    return locations
+
+
+@pytest.fixture(scope="module")
+def sparse_column_sources(sparse_source_stores) -> list[str]:
+    """The sparse stores in shards of 256 and of 128 cells."""
+    return [sparse_source_stores["left"], sparse_source_stores["right"]]
+
+
+@pytest.fixture(scope="module")
+def sparse_shard_sources(sparse_source_stores) -> list[str]:
+    """The sparse stores, both in shards of 256 cells."""
+    return [
+        sparse_source_stores["left"],
+        sparse_source_stores["right in shards of 256"],
+    ]
+
+
+def _shard_chunk_reads(locations) -> tuple[dict[tuple[int, int], int], dict[int, int]]:
+    """Return the decodes of each chunk shape, and the reads of each width, when each stored shard of each source is read once, a chunk column at a time."""
+    from collections import Counter
+
+    decodes: Counter = Counter()
+    widths: Counter = Counter()
+    for location in locations:
+        counts = zarr.open_group(location, mode="r")["Counts/counts"]
+        (n_cells, n_features), (chunk_rows, chunk_columns) = counts.shape, counts.chunks
+        assert counts.shards[0] == chunk_rows
+        shards = -(-n_cells // chunk_rows)
+        decodes[tuple(counts.chunks)] += shards * -(-n_features // chunk_columns)
+        for start in range(0, n_features, chunk_columns):
+            widths[min(chunk_columns, n_features - start)] += shards
+    return dict(decodes), dict(widths)
+
+
+def _source_rows(locations) -> dict[str, list]:
+    """Return the rows of the merge sources keyed by merged cell ID, as NumPy reads them."""
+    return {
+        f"{name}__cell{index}": row.tolist()
+        for name, location in zip(("left", "right"), locations, strict=True)
+        for index, row in enumerate(
+            np.asarray(zarr.open_group(location, mode="r")["Counts/counts"][:])
+        )
+    }
+
+
+@pytest.mark.parametrize(
+    ("sources", "feature_key"),
+    [
+        ("chunk_column_sources", "ids"),
+        # A merge by name sums two features of the right source, so it writes
+        # sparse coordinates.
+        ("chunk_column_sources", "names"),
+        ("sparse_column_sources", "ids"),
+    ],
+)
+def test_a_merge_holding_csr_windows_decodes_each_source_chunk_once(
+    tmp_path, monkeypatch, request, sources, feature_key
+):
+    locations = request.getfixturevalue(sources)
+    policy = None if sources == "chunk_column_sources" else _SPARSE_BAND_POLICY
+    merged, reference = (
+        _merge_chunk_columns(
+            locations,
+            tmp_path / f"{name}.zarr",
+            monkeypatch,
+            policy=policy,
+            feature_key=feature_key,
+            **options,
+        )
+        for name, options in (
+            ("merged", {"sparse": True}),
+            ("reference", {"most_rows": 0}),
+        )
+    )
+
+    # The write holds one stored shard of each source at a time as CSR: of
+    # 600 or 500 cells, or of 256 cells of the left source, which has three,
+    # and 128 cells of the right, which has four. Each refill reads a chunk
+    # column at a time, so each chunk is decoded once, where batches that
+    # read their own cells decode each chunk for each batch that holds the
+    # source's cells.
+    decodes, widths = _shard_chunk_reads(locations)
+    assert merged["sparse"] and not reference["sparse"]
+    assert merged["held_rows"] == {"chunk_column_sources": 600}.get(sources, 256)
+    assert {shard for shard, _ in merged["refills"]} == (
+        {600, 500} if sources == "chunk_column_sources" else {256, 128}
+    )
+    assert all(rows <= shard for shard, rows in merged["refills"])
+    assert merged["decodes"] == decodes
+    assert merged["widths"] == widths
+    assert sum(merged["decodes"].values()) < sum(reference["decodes"].values())
+    # Pieces are dense copies of a window's CSR rows, so none is a view of a
+    # window, and a refill lets go of the window that it replaces.
+    assert merged["cut"] == 0
+    assert merged["alive"] <= 1
+    _same_files(merged, reference)
+    if feature_key == "ids":
+        stored = zarr.open_group(str(tmp_path / "merged.zarr"), mode="r")
+        assert _rows_by_id(stored, "Counts/counts") == _source_rows(locations)
+    # Beyond what a write that reads batch by batch keeps, the write keeps a
+    # CSR window of each source's shard of the most values, counted with
+    # NumPy, in a piece for each chunk column: 2 bytes for each uint16 value
+    # and 4 for its column, a spare value in each piece, and 4 bytes for the
+    # offset of each row and one more in each piece. It reserves what a
+    # refill and a piece taken from a window hold.
+    from cytearc import DataStore
+    from cytearc.merge.writer import _chunk_column_runs, _csr_window_bytes
+
+    windows, charges = [], []
+    for location in locations:
+        counts = zarr.open_group(location, mode="r")["Counts/counts"]
+        shard_rows = counts.chunks[0]
+        values = max(
+            int(np.count_nonzero(counts[start : start + shard_rows]))
+            for start in range(0, counts.shape[0], shard_rows)
+        )
+        pieces = -(-counts.shape[1] // counts.chunks[1])
+        windows.append((values + pieces) * (2 + 4) + pieces * (shard_rows + 1) * 4)
+        source = DataStore(location, default_assay="Counts", nthreads=1).Counts
+        charges.append(
+            _csr_window_bytes(
+                source.rawData,
+                _chunk_column_runs(source.rawData),
+                values,
+                merged["batch_rows"],
+            )
+        )
+    assert merged["resident"] - reference["resident"] == sum(windows)
+    assert [window for window, _, _ in charges] == windows
+    reads = max(refill for _, refill, _ in charges) + max(
+        take for _, _, take in charges
+    )
+    assert merged["reserve"] >= reads
+    if (sources, feature_key) == ("chunk_column_sources", "ids"):
+        from cytearc.merge.row_plan import WINDOW_BYTES_PER_ROW
+
+        # Beside them, a batch of 16 cells reserves the 40 uint16 values of
+        # each cell that it assembles, the band of 16 cells that it is copied
+        # into and its window's index arrays, and no cast, as the sources'
+        # counts take the merged type.
+        assert merged["reserve"] == (
+            reads + 2 * 16 * 40 * 2 + 16 * WINDOW_BYTES_PER_ROW
+        )
+
+
+def test_a_merge_holds_csr_windows_from_the_least_budget_that_fits_them(
+    tmp_path, monkeypatch, sparse_shard_sources
+):
+    def merge(path, budget):
+        return _merge_chunk_columns(
+            sparse_shard_sources,
+            path,
+            monkeypatch,
+            mem_budget=budget,
+            sparse=None,
+            policy=_SPARSE_BAND_POLICY,
+        )
+
+    # Each refusal names a budget that passes its step, and each refusal of
+    # CSR windows the budget that fits them, up to the least budget at which
+    # the write holds them.
+    budget = 1 << 16
+    for _ in range(20):
+        try:
+            merged = merge(tmp_path / "merged.zarr", budget)
+        except MemoryBudgetError as refusal:
+            assert refusal.needed_bytes > budget
+            budget = refusal.needed_bytes
+            continue
+        if merged["sparse"]:
+            break
+        assert merged["csr_needed"] > budget
+        budget = merged["csr_needed"]
+    else:
+        raise AssertionError(f"No budget up to {budget} bytes held CSR windows")
+    below = merge(tmp_path / "below.zarr", budget - 1)
+    ample = merge(tmp_path / "ample.zarr", None)
+
+    # A byte below that budget, the refusal of CSR windows names it, and the
+    # write holds dense windows shorter than a shard or reads batch by batch,
+    # which decode chunks again. With room for dense windows of a shard,
+    # which leave the write of one band at a time as many bands as CSR
+    # windows do, the write holds them dense and converts nothing.
+    decodes, _ = _shard_chunk_reads(sparse_shard_sources)
+    assert merged["held_rows"] == 256
+    assert merged["decodes"] == decodes
+    assert not below["sparse"]
+    assert below["csr_needed"] == budget
+    assert below["held_rows"] < 256
+    assert sum(below["decodes"].values()) > sum(decodes.values())
+    assert not ample["sparse"]
+    assert ample["held_rows"] == 256
+    assert ample["decodes"] == decodes
+    _same_files(merged, below)
+    _same_files(merged, ample)
+    stored = zarr.open_group(str(tmp_path / "merged.zarr"), mode="r")
+    assert _rows_by_id(stored, "Counts/counts") == _source_rows(sparse_shard_sources)
+
+
+@pytest.mark.slow
+# A merge by name sums two features of the right source, so it writes sparse
+# coordinates.
+@pytest.mark.parametrize("feature_key", ["ids", "names"])
+def test_a_merge_holds_csr_windows_while_dense_ones_would_write_fewer_bands_at_once(
+    tmp_path, monkeypatch, sparse_shard_sources, feature_key
+):
+    def merge(budget):
+        return _merge_chunk_columns(
+            sparse_shard_sources,
+            tmp_path / f"merged-{budget}.zarr",
+            monkeypatch,
+            mem_budget=budget,
+            sparse=None,
+            policy=_SPARSE_BAND_POLICY,
+            nthreads=2,
+            feature_key=feature_key,
+        )
+
+    # Between a budget at which the write of two workers holds CSR windows
+    # and the default, at which it holds dense ones, the least budget that
+    # holds dense windows of a shard is found by halving.
+    low, high = 1 << 19, 1 << 24
+    assert merge(low)["sparse"]
+    assert not merge(high)["sparse"]
+    while high - low > 1:
+        middle = (low + high) // 2
+        low, high = (middle, high) if merge(middle)["sparse"] else (low, middle)
+    holding_csr, holding_dense = merge(low), merge(high)
+
+    # A byte below it, dense windows of a shard of every source fit beside
+    # the write of one band at a time, and CSR ones beside two, so the write
+    # holds CSR windows; from it on, dense ones leave two bands at once as
+    # well. Both decode each chunk once and store the same files.
+    decodes, _ = _shard_chunk_reads(sparse_shard_sources)
+    assert holding_csr["shard_writes"] == {False: 1, True: 2}
+    assert holding_dense["shard_writes"] == {False: 2, True: 2}
+    assert holding_csr["held_rows"] == holding_dense["held_rows"] == 256
+    assert holding_csr["decodes"] == holding_dense["decodes"] == decodes
+    _same_files(holding_csr, holding_dense)
+
+
+def test_a_merge_bounds_no_shard_of_a_source_without_cells(tmp_path, monkeypatch):
+    import cytearc.merge.writer as merge_writer
+    from cytearc import DataStore
+    from tests.storage_helpers import write_count_store
+
+    counts = np.arange(20, dtype=np.uint16).reshape(5, 4)
+    for name, values in (("full", counts), ("empty", counts[:0])):
+        write_count_store(str(tmp_path / f"{name}.zarr"), {"Counts": values}, "uint16")
+    bounds: list[list[int]] = []
+    real = merge_writer._cumulative_row_nnz
+
+    def recorded(*args, **kwargs):
+        cumulative, shard_values = real(*args, **kwargs)
+        bounds.append(shard_values)
+        return cumulative, shard_values
+
+    monkeypatch.setattr(merge_writer, "_cumulative_row_nnz", recorded)
+    DataStoreMerge(
+        datasets=[
+            DataStore(
+                str(tmp_path / f"{name}.zarr"), default_assay="Counts", nthreads=1
+            )
+            for name in ("full", "empty")
+        ],
+        zarr_path=str(tmp_path / "merged.zarr"),
+        names=["full", "empty"],
+        prepend_text="",
+        overwrite=True,
+        nthreads=1,
+    ).dump()
+
+    # The full source's one shard holds its 19 nonzero values, and the source
+    # without cells holds none; the merge holds the full source's cells alone.
+    assert bounds[-1] == [19, 0]
+    stored = zarr.open_group(str(tmp_path / "merged.zarr"), mode="r")
+    assert _rows_by_id(stored, "Counts/counts") == {
+        f"full__cell{index}": row.tolist() for index, row in enumerate(counts)
+    }
+
+
+def _csr_window_source(location, dtype: str, density: float) -> np.ndarray:
+    """Write 1,000 cells by 2,000 features in shards of 400 cells, ``density`` of them 1 to 9, and return the counts.
+
+    The layout aligns the chunk columns, of up to 500 features, to 400.
+    """
+    from tests.storage_helpers import write_count_store
+
+    rng = np.random.default_rng(5)
+    values = np.zeros((1000, 2000), dtype=dtype)
+    nonzero = rng.random(values.shape) < density
+    values[nonzero] = rng.integers(1, 10, size=int(nonzero.sum()))
+    itemsize = np.dtype(dtype).itemsize
+    write_count_store(
+        location,
+        {"Counts": values},
+        dtype,
+        policy=CountMatrixPolicy(
+            unitBytes=400 * 2000 * itemsize, chunkBytes=400 * 500 * itemsize
+        ),
+    )
+    return values
+
+
+@pytest.mark.parametrize(("dtype", "density"), [("uint16", 0.05), ("float32", 0.4)])
+def test_a_csr_window_holds_no_more_than_its_charge(tmp_path, dtype, density):
+    import tracemalloc
+
+    from cytearc import DataStore
+    from cytearc.merge.writer import (
+        _chunk_column_runs,
+        _csr_window_bytes,
+        _HeldSourceRows,
+    )
+    from cytearc.utils.arrays import sparse_matrix_bytes
+
+    location = str(tmp_path / "source.zarr")
+    values = _csr_window_source(location, dtype, density)
+    counts = DataStore(location, default_assay="Counts", nthreads=1).Counts.rawData
+    runs = _chunk_column_runs(counts)
+    assert counts.chunksize[0] == 400 and len(runs) == 5
+    # The shard of the most values, as NumPy counts them, bounds the window.
+    shard_values = [
+        int(np.count_nonzero(values[start : start + 400]))
+        for start in range(0, 1000, 400)
+    ]
+    first = int(np.argmax(shard_values)) * 400
+    window, refill, take = _csr_window_bytes(counts, runs, max(shard_values), 64)
+    held = _HeldSourceRows(counts, runs, 400, 1, sparse=True)
+    # A refill of another shard first makes the objects that later reads reuse.
+    for _ in held.take((first + 400) % 1200, 64):
+        pass
+    tracemalloc.start()
+    try:
+        offset, rows = next(held.take(first, 64))
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert offset == 0
+    np.testing.assert_array_equal(rows, values[first : first + 64])
+    # The window holds what its charge counts: the values and their columns
+    # and the row offsets of a piece for each chunk column, beside a spare
+    # value and column in each piece.
+    itemsize = np.dtype(dtype).itemsize
+    assert len(held._values) == 5
+    assert sparse_matrix_bytes(*held._values) + 5 * (itemsize + 4) == window
+    # The window, its refill and the first piece taken from it hold no more
+    # than their charge, and more than the window and the piece alone, as
+    # the read of a chunk column holds the chunk's rows.
+    assert peak <= window + refill + take
+    assert peak > window + take + 400 * 400 * itemsize
+    # A piece taken from the window without a refill holds its dense rows,
+    # which its charge counts, and a few objects.
+    tracemalloc.start()
+    try:
+        offset, rows = next(held.take(first + 64, 64))
+        piece = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    np.testing.assert_array_equal(rows, values[first + 64 : first + 128])
+    assert rows.nbytes == take
+    assert take <= piece <= take + 4_096
+
+
+@pytest.mark.parametrize("dtype", ["uint16", "float32"])
+def test_held_csr_windows_give_each_source_row_once_in_order(tmp_path, dtype):
+    from cytearc import DataStore
+    from cytearc.merge.writer import _chunk_column_runs, _HeldSourceRows
+
+    location = str(tmp_path / "source.zarr")
+    values = _csr_window_source(location, dtype, 0.05)
+    counts = DataStore(location, default_assay="Counts", nthreads=1).Counts.rawData
+    held = _HeldSourceRows(counts, _chunk_column_runs(counts), 400, 1, sparse=True)
+    # Takes of 1 to 300 rows, which cross the shards' ends at rows 400 and
+    # 800, come in pieces that each end within one shard.
+    rng = np.random.default_rng(2)
+    first, pieces = 0, []
+    while first < 1000:
+        count = min(int(rng.integers(1, 301)), 1000 - first)
+        for offset, rows in held.take(first, count):
+            start = first + offset
+            assert start // 400 == (start + rows.shape[0] - 1) // 400
+            assert rows.dtype == values.dtype
+            pieces.append((start, rows))
+        first += count
+    starts = [start for start, _ in pieces]
+    assert starts == sorted(starts)
+    np.testing.assert_array_equal(np.vstack([rows for _, rows in pieces]), values)
 
 
 def _batch_reads(locations, batch_rows: int, seed: int = 42) -> list[int]:
@@ -8584,15 +9096,15 @@ def test_a_merge_holds_what_fits_of_one_chunk_column_whose_whole_read_does_not(
             ),
         )
         sources[name] = location, values, names
-    held: list[tuple[int, int, int]] = []
-    real = merge_writer._held_window_rows
+    held: list[tuple[int, int, int, bool]] = []
+    real = merge_writer._held_windows
 
     def recorded(shard_rows, part_rows, fits):
-        rows = real(shard_rows, part_rows, fits)
-        held.append((shard_rows, part_rows, rows))
-        return rows
+        rows, sparse = real(shard_rows, part_rows, fits)
+        held.append((shard_rows, part_rows, rows, sparse))
+        return rows, sparse
 
-    monkeypatch.setattr(merge_writer, "_held_window_rows", recorded)
+    monkeypatch.setattr(merge_writer, "_held_windows", recorded)
     path = tmp_path / "merged.zarr"
     DataStoreMerge(
         datasets=[
@@ -8611,7 +9123,7 @@ def test_a_merge_holds_what_fits_of_one_chunk_column_whose_whole_read_does_not(
     # The write holds a window of each source, of at least a batch's share
     # of the larger source and at most its 1,200-cell shard, whose reads fit
     # as planned.
-    shard_rows, part_rows, rows = held[-1]
+    shard_rows, part_rows, rows, sparse = held[-1]
     assert shard_rows == 1200
     assert part_rows <= rows <= shard_rows
     # Each merged cell holds its source's values summed by feature name.
@@ -8640,7 +9152,7 @@ def test_a_merge_lets_an_allocation_failure_in_its_held_row_search_through(
     plans: list[int] = []
     searches: list[tuple[int, int]] = []
     plan = merge_writer.plan_dense_write
-    search = merge_writer._held_window_rows
+    search = merge_writer._held_windows
 
     def fails_first(*args, **kwargs):
         plans.append(kwargs["residentBytes"])
@@ -8653,7 +9165,7 @@ def test_a_merge_lets_an_allocation_failure_in_its_held_row_search_through(
         return search(shard_rows, part_rows, fits)
 
     monkeypatch.setattr(merge_writer, "plan_dense_write", fails_first)
-    monkeypatch.setattr(merge_writer, "_held_window_rows", recorded)
+    monkeypatch.setattr(merge_writer, "_held_windows", recorded)
     with pytest.raises(MemoryError) as raised:
         DataStoreMerge(
             datasets=[
@@ -8740,38 +9252,55 @@ def test_a_held_read_holds_no_more_than_its_charge(tmp_path, column):
 
 
 @pytest.mark.parametrize(
-    ("shard_rows", "part_rows", "most", "expected"),
+    ("shard_rows", "part_rows", "most", "dense_writes", "csr_writes", "expected"),
     [
-        # A whole shard of each source, or the most rows that fit.
-        (16, 4, 100, 16),
-        (16, 4, 16, 16),
-        (16, 4, 10, 10),
+        # A whole shard of each source held dense, when that leaves the write
+        # two bands at once or as many as CSR windows do, or else as CSR.
+        (16, 4, 100, 4, 4, (16, False)),
+        (16, 4, 16, 4, 2, (16, False)),
+        (16, 4, 16, 2, 4, (16, False)),
+        (16, 4, 16, 1, 2, (16, True)),
+        (16, 4, 16, 1, 1, (16, False)),
+        (16, 4, 16, 1, 0, (16, False)),
+        # A whole shard as CSR where dense windows of a shard do not fit, or
+        # else the most dense rows that fit.
+        (16, 4, 15, 4, 1, (16, True)),
+        (16, 4, 10, 4, 0, (10, False)),
         # At least a batch's share of the largest source, or else batch by
         # batch.
-        (16, 4, 4, 4),
-        (16, 4, 3, 0),
-        (100, 7, 0, 0),
+        (16, 4, 4, 4, 0, (4, False)),
+        (16, 4, 3, 4, 0, (0, False)),
+        (16, 4, 3, 4, 1, (16, True)),
+        (100, 7, 0, 4, 0, (0, False)),
+        (100, 7, 0, 4, 2, (100, True)),
         # A shard shorter than that share is held whole or not at all.
-        (3, 4, 100, 3),
-        (3, 4, 2, 0),
+        (3, 4, 100, 1, 1, (3, False)),
+        (3, 4, 2, 1, 0, (0, False)),
+        (3, 4, 2, 1, 1, (3, True)),
         # Sources without rows hold none.
-        (0, 7, 100, 0),
+        (0, 7, 100, 1, 1, (0, False)),
     ],
 )
 def test_a_merge_holds_the_most_rows_of_each_source_that_fit(
-    shard_rows, part_rows, most, expected
+    shard_rows, part_rows, most, dense_writes, csr_writes, expected
 ):
-    from cytearc.merge.writer import _held_window_rows
+    from cytearc.merge.writer import _held_windows
 
-    asked: list[int] = []
+    asked: list[tuple[int, bool]] = []
 
-    def fits(rows: int) -> bool:
-        asked.append(rows)
-        return rows <= most
+    def writes(rows: int, sparse: bool) -> int:
+        asked.append((rows, sparse))
+        if sparse:
+            return csr_writes
+        return dense_writes if rows <= most else 0
 
-    assert _held_window_rows(shard_rows, part_rows, fits) == expected
-    # No window longer than a shard is asked about.
-    assert all(0 <= rows <= shard_rows for rows in asked)
+    assert _held_windows(shard_rows, part_rows, writes) == expected
+    # No window longer than a shard is asked about, and CSR windows only of
+    # a whole shard, once.
+    assert all(0 <= rows <= shard_rows for rows, _ in asked)
+    assert [rows for rows, sparse in asked if sparse] == (
+        [shard_rows] if shard_rows else []
+    )
 
 
 @pytest.mark.parametrize(

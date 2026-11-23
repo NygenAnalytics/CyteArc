@@ -546,6 +546,141 @@ def test_csr_to_coo_marks_only_rows_sorted_without_repeats():
             csr_to_coo(other)
 
 
+def _dense_rows_cases() -> list[tuple[str, np.ndarray]]:
+    """Dense rows whose CSR form SciPy's conversion gives independently."""
+    rng = np.random.default_rng(3)
+    values = rng.integers(-4, 5, size=(37, 23))
+    values[rng.random(values.shape) < 0.7] = 0
+    # A row without values in the middle, and a zero at the very end, which
+    # the spare slot of the pass takes.
+    values[5] = 0
+    values[-1, -1] = 0
+    floats = values.astype(np.float32)
+    floats[0, 0], floats[1, 1], floats[2, 2], floats[3, 3] = np.nan, -0.0, np.inf, 0.5
+    return [
+        ("uint8", np.abs(values).astype(np.uint8)),
+        ("uint16", np.abs(values).astype(np.uint16)),
+        ("int32", values.astype(np.int32)),
+        ("int64", values.astype(np.int64)),
+        ("float32", floats),
+        ("float64", floats.astype(np.float64)),
+        ("bool", values != 0),
+        ("fortran", np.asfortranarray(values.astype(np.float32))),
+        ("column slice", values.astype(np.uint16)[:, 3:17]),
+        ("all zero", np.zeros((4, 6), dtype=np.float32)),
+        ("all nonzero", np.ones((3, 5), dtype=np.uint16)),
+        ("no rows", np.zeros((0, 5), dtype=np.float32)),
+        ("no columns", np.zeros((4, 0), dtype=np.float32)),
+    ]
+
+
+@pytest.mark.parametrize(
+    "values",
+    [values for _, values in _dense_rows_cases()],
+    ids=[name for name, _ in _dense_rows_cases()],
+)
+def test_csr_from_dense_stores_what_scipy_stores(values):
+    from cytearc.utils.arrays import csr_from_dense
+
+    converted = csr_from_dense(values)
+    expected = csr_matrix(values)
+    assert converted.format == "csr"
+    assert converted.shape == values.shape
+    assert converted.dtype == values.dtype
+    assert converted.has_canonical_format
+    np.testing.assert_array_equal(converted.indptr, expected.indptr)
+    np.testing.assert_array_equal(converted.indices, expected.indices)
+    # NaN is stored and a negative zero left out, as SciPy does.
+    np.testing.assert_array_equal(converted.data, expected.data)
+    assert converted.indices.dtype == converted.indptr.dtype == np.int32
+    np.testing.assert_array_equal(converted.toarray(), np.where(values == 0, 0, values))
+
+
+def test_csr_from_dense_holds_little_beside_its_result():
+    import tracemalloc
+
+    from cytearc.utils.arrays import csr_from_dense, sparse_matrix_bytes
+
+    rng = np.random.default_rng(4)
+    values = np.zeros((2000, 500), dtype=np.float32)
+    values[rng.random(values.shape) < 0.1] = 1.5
+    # The first conversion compiles the pass.
+    csr_from_dense(values)
+    peaks = {}
+    for name, convert in (("compiled", csr_from_dense), ("scipy", csr_matrix)):
+        tracemalloc.start()
+        try:
+            converted = convert(values)
+            peaks[name] = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+    stored = sparse_matrix_bytes(converted)
+    assert converted.nnz > 90_000
+    # Beside its result, the conversion holds one spare value and index and
+    # a few objects, where SciPy's holds more than 16 bytes a value.
+    assert peaks["compiled"] <= stored + 4 + 4 + 16_384
+    assert peaks["scipy"] > stored + 16 * converted.nnz
+
+
+@pytest.mark.parametrize("dtype", ["uint16", "int32", "float32"])
+def test_fill_dense_from_csr_writes_the_rows_that_numpy_slices(dtype):
+    from cytearc.utils.arrays import fill_dense_from_csr
+
+    rng = np.random.default_rng(6)
+    values = rng.integers(-3, 4, size=(30, 9)).astype(dtype)
+    values[rng.random(values.shape) < 0.6] = 0
+    matrix = csr_matrix(values)
+    # Rows 7 to 18 go to columns 4 to 12 of rows that hold -1 elsewhere,
+    # which stay as they are, as do the rows' zeros.
+    out = np.full((11, 15), -1 if dtype != "uint16" else 99, dtype=dtype)
+    expected = out.copy()
+    expected[:, 4:13] = np.where(values[7:18] == 0, expected[:, 4:13], values[7:18])
+    fill_dense_from_csr(matrix, 7, out, 4)
+    np.testing.assert_array_equal(out, expected)
+    # Every row of the matrix, in the first columns of zeroed rows.
+    whole = np.zeros((30, 9), dtype=dtype)
+    fill_dense_from_csr(matrix, 0, whole)
+    np.testing.assert_array_equal(whole, values)
+    # No rows, at the end of the matrix.
+    fill_dense_from_csr(matrix, 30, np.zeros((0, 9), dtype=dtype))
+
+
+@pytest.mark.parametrize(
+    ("start", "rows", "columns", "column"),
+    [(-1, 2, 9, 0), (29, 2, 9, 0), (0, 2, 8, 0), (0, 2, 9, 1), (0, 2, 9, -1)],
+)
+def test_fill_dense_from_csr_refuses_rows_or_columns_outside(
+    start, rows, columns, column
+):
+    from cytearc.utils.arrays import fill_dense_from_csr
+
+    matrix = csr_matrix(np.eye(30, 9, dtype=np.float32))
+    with pytest.raises(ValueError, match="do not fit dense rows of shape"):
+        fill_dense_from_csr(matrix, start, np.zeros((rows, columns)), column)
+
+
+def test_fill_dense_from_csr_kernel_runs_as_python_too():
+    from cytearc.utils import arrays
+
+    matrix = csr_matrix(np.asarray([[0, 3, 0], [0, 0, 0], [7, 0, 2]], dtype=np.int16))
+    out = np.full((2, 5), -1, dtype=np.int16)
+    arrays._fill_dense_kernel(matrix.indptr, matrix.indices, matrix.data, 1, out, 2)
+    assert out.tolist() == [[-1, -1, -1, -1, -1], [-1, -1, 7, -1, 2]]
+
+
+def test_csr_from_dense_kernel_runs_as_python_too():
+    from cytearc.utils import arrays
+
+    values = np.asarray([[0, 3, 0], [0, 0, 0], [7, 0, 2]], dtype=np.int16)
+    indptr = np.zeros(4, dtype=np.int32)
+    indices = np.full(4, -1, dtype=np.int32)
+    data = np.full(4, -1, dtype=np.int16)
+    arrays._fill_csr_kernel(values, indptr, indices, data)
+    assert indptr.tolist() == [0, 1, 1, 3]
+    assert indices[:3].tolist() == [1, 0, 2]
+    assert data[:3].tolist() == [3, 7, 2]
+
+
 def test_canonicalize_sparse_detects_int64_duplicate_overflow():
     maximum = np.iinfo(np.int64).max
     duplicated = coo_matrix(
