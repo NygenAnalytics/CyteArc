@@ -223,8 +223,10 @@ def index_band_bytes(
     ``concurrency``, a band read decodes up to that many chunks of a shard at
     once, and reads up to that many of the ``shards`` rows of shards that the
     rows touch, as :func:`band_shards` counts them, at once in each column
-    shard.
+    shard. A read of no columns reads nothing.
     """
+    if columns.size == 0:
+        return 0, 0
     row_chunks = -(-geometry.axisShard(0) // geometry.axisChunk(0))
     # A column band touches a column chunk of each row chunk in a shard; a
     # row band touches a row chunk of each selected column chunk.

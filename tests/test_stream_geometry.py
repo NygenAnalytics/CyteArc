@@ -16,6 +16,7 @@ from cytearc.storage.partition import (
     checked_indices,
     coalesced_gap_bytes,
     contiguous_ranges,
+    index_band_bytes,
     indexed_read_parts,
     is_contiguous,
     partition_indices,
@@ -602,6 +603,7 @@ def test_band_costs_are_zero_for_empty_selections() -> None:
     # Callers skip empty selections, but the exported helpers answer them.
     assert widest_chunk_span(empty, 1024) == 0
     assert indexed_read_parts(geometry, empty, block_rows=1024) == (0, 0)
+    assert index_band_bytes(geometry, empty, rows=1024, row_span=1024) == (0, 0)
     assert row_read_parts(geometry, empty, rows_contiguous=False) == (0, 0)
     assert row_read_parts(None, np.array([0, 2]), rows_contiguous=False) == (0, 0)
 
