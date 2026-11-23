@@ -53,10 +53,13 @@ from .metadata import (
     SOURCE_LACKS_ASSAY,
     SOURCE_MEASURES_ALL,
     CellMetadataPlan,
+    NestedSources,
     _cell_data_path,
     admit_cell_metadata_plan,
     admit_feature_metadata,
     metadata_chunk_rows,
+    nested_source_names,
+    nested_sources,
     plan_cell_metadata,
     resolve_metadata_schema_scan_rows,
     validate_cell_metadata,
@@ -89,6 +92,9 @@ from ..utils.arguments import bool_argument
 
 _IMPORT_SOURCE = "DataStoreMerge"
 _MANIFEST_ATTR = "cytearc:merge_manifest"
+# The manifest key of the sources of each merged source that a merge records
+# in its place, which only such a merge writes.
+_NESTED_SOURCES_KEY = "nestedSources"
 
 
 def _store_location(value: object) -> str | None:
@@ -170,8 +176,9 @@ class DataStoreMerge:
             writes none, unless the sources measured different features of
             an assay, when the merge writes the column ``dataset``. Beside a
             record of which features each source measured, the column is
-            categorical, and it cannot be overwritten or dropped while the
-            record names it.
+            categorical, it names each cell of a merged source by that
+            source's own source, such as ``inner/left``, and it cannot be
+            overwritten or dropped while the record names it.
         mem_budget: Memory budget for the merge. Accepts bytes, a size such
                     as ``8G``, or a fraction of detected system memory.
                     When None, the tightest source budget is used. The merge
@@ -229,10 +236,18 @@ class DataStoreMerge:
     them. A name with ``/`` or ``\\`` takes ``_`` in their place, and names
     whose columns would differ only in case are refused before anything is
     written. The ADT recipe leaves the antibodies that not every source
-    measured out of its panel and its markers. A source that a merge wrote
-    counts a feature as measured when every one of its own sources measured
-    it, and its own columns are not copied. A source column of the same name
-    as one of these is left out with a warning.
+    measured out of its panel and its markers. A source that a merge or a
+    composite wrote with such a record, such as ``inner``, merged from
+    ``left`` and ``right``, is recorded by its own sources: ``inner/left``
+    and ``inner/right`` become sources of this merge, each with its own
+    column, such as ``measured_in_inner_left``, and each cell keeps its own
+    source in the cell column of sources, so a run of one study's cells
+    keeps that study's antibodies however often its store is merged again.
+    The merged source's own columns are not copied, and a source of this
+    merge that would be recorded under one of those names is refused before
+    anything is written. A merged store without a record, whose sources
+    measured the same features, is recorded as one source. A source column
+    of the same name as one of these columns is left out with a warning.
 
     Merged cells are in an order of their own, neither the sources' order nor
     a uniform random order. The cells of each source are split into blocks,
@@ -338,6 +353,10 @@ class DataStoreMerge:
         # features each source measured, once the sources are prepared.
         self._sourcesColumn: str | None = source_column
         self._recordsSources = False
+        # The sources of each merged source that the merge records in its
+        # place, and None for every other source, once the sources are
+        # prepared.
+        self._nestedSources: list[NestedSources | None] = []
         self._metadataPlan: CellMetadataPlan | None = None
         # The count layout of each assay that a planned dump writes.
         self._countLayouts: dict[str, CountMatrixPolicy] = {}
@@ -402,6 +421,17 @@ class DataStoreMerge:
                 self.names,
                 seed=self.seed,
             )
+            self._nestedSources = [
+                nested_sources(
+                    ds.cells,
+                    [
+                        ds.get_assay(assay_name).feats
+                        for assay_name in self.uniqueAssays
+                        if assay_name in ds.assay_names
+                    ],
+                )
+                for ds in self.datasets
+            ]
             for assay_name in self.uniqueAssays:
                 sources = self._assay_sources(assay_name)
                 self._assaySources[assay_name] = sources
@@ -426,6 +456,7 @@ class DataStoreMerge:
                         self.names,
                         combination="merge",
                         assay_type=self._assayTypes[assay_name],
+                        nested=nested_source_names(self._nestedSources),
                     )
                     if self.features == "union"
                     else shared_features_warning(
@@ -437,6 +468,9 @@ class DataStoreMerge:
             self._sourceMembership = self._source_membership()
             # Known while every alignment is held, which the dump releases.
             self._recordsSources = self._records_measured_features()
+            if not self._recordsSources:
+                # Without a record, no cell column names the sources.
+                self._nestedSources = [None] * len(self.datasets)
             self._sourcesColumn = (
                 DEFAULT_SOURCE_COLUMN
                 if self.sourceColumn is None and self._recordsSources
@@ -459,7 +493,11 @@ class DataStoreMerge:
 
     def _measured_features(self, assay_name: str) -> dict[str, np.ndarray]:
         """Return the record of what each source that holds ``assay_name`` measured, empty when they measured the same features."""
-        return feature_record(self._alignments[assay_name], self.names)
+        return feature_record(
+            self._alignments[assay_name],
+            self.names,
+            nested_source_names(self._nestedSources),
+        )
 
     def _records_measured_features(self) -> bool:
         """Return whether the merge records which features each source measured for some assay."""
@@ -660,6 +698,22 @@ class DataStoreMerge:
             **({} if self.features == "union" else {"features": self.features}),
             "outWorkspace": self.outWorkspace,
             "nCells": self._rowPlan.nCells,
+            # A merge that records the sources of a merged source in its place
+            # names them, so that a resume never reuses a column of sources or
+            # a record that names the merged source. Other merges record none,
+            # as merges written before the record of such sources did.
+            **(
+                {
+                    _NESTED_SOURCES_KEY: [
+                        None
+                        if item is None
+                        else {"column": item.column, "sources": list(item.names)}
+                        for item in self._nestedSources
+                    ]
+                }
+                if any(item is not None for item in self._nestedSources)
+                else {}
+            ),
         }
 
     def _attr_root(self, root: zarr.Group) -> zarr.Group:
@@ -882,8 +936,8 @@ class DataStoreMerge:
             return self._blocked_inspection(
                 assay_plans,
                 "Destination contains an incomplete or completed merge with a "
-                "different configuration. Set overwrite=True to restart the "
-                "merge-owned components.",
+                f"different configuration. {self._nested_change(stored_manifest)}"
+                "Set overwrite=True to restart the merge-owned components.",
             )
 
         assert self._rowPlan is not None
@@ -983,6 +1037,23 @@ class DataStoreMerge:
             needsFinalization=all_complete and not (import_complete and complete),
         )
 
+    def _nested_change(self, stored_manifest: dict[str, Any]) -> str:
+        """Return the sentence that names the merged sources whose sources this merge records in their place, unlike the merge that ``stored_manifest`` describes, or nothing."""
+        if _NESTED_SOURCES_KEY in stored_manifest:
+            return ""
+        merged = [
+            name
+            for name, item in zip(self.names, self._nestedSources, strict=True)
+            if item is not None
+        ]
+        if not merged:
+            return ""
+        return (
+            "This merge records each source of the merged sources "
+            f"{', '.join(map(repr, merged))} in their place, which the merge "
+            "that wrote the destination did not. "
+        )
+
     def _completed_counts_policy(
         self, existing: zarr.Group | None, assay_name: str
     ) -> CountMatrixPolicy | None:
@@ -1056,6 +1127,7 @@ class DataStoreMerge:
                 source_column=self._sourcesColumn,
                 record_sources=self._recordsSources,
                 default_source_column=self.sourceColumn is None,
+                nested=self._nestedSources,
                 membership=self._sourceMembership,
                 block_rows=preferred_rows,
                 scan_rows=scan_rows,
@@ -1533,5 +1605,6 @@ class DataStoreMerge:
         self._sourceMembership = {}
         self._sourcesColumn = self.sourceColumn
         self._recordsSources = False
+        self._nestedSources = []
         self._metadataPlan = None
         self._countLayouts = {}

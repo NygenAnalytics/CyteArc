@@ -393,6 +393,144 @@ def test_a_record_of_measured_features_round_trips_through_h5ad(tmp_path) -> Non
     assert "role" not in protein["Protein/featureData/measured_in_x"].attrs
 
 
+def _unmeasured(store: DataStore, feature: str) -> dict[str, bool]:
+    """Return whether each cell of a store, by ID, has no value of ``feature``."""
+    return dict(
+        zip(
+            store.cells.fetch_all("ids").astype(str),
+            np.isnan(store.get_cell_vals("ADT", "I", feature)).tolist(),
+            strict=True,
+        )
+    )
+
+
+@pytest.mark.slow
+def test_a_merge_of_merged_stores_keeps_its_sources_through_h5ad(tmp_path) -> None:
+    def opened(name: str) -> DataStore:
+        return DataStore(
+            str(tmp_path / f"{name}.zarr"),
+            default_assay="ADT",
+            min_features_per_cell=-1,
+            nthreads=1,
+        )
+
+    # Source y holds ADT2, which x lacks, and z holds ADT3 too.
+    _store(tmp_path / "x.zarr", {"ADT": _counts(3, 2, 1)}, "x")
+    _store(tmp_path / "y.zarr", {"ADT": _counts(2, 3, 2)}, "y")
+    _store(tmp_path / "z.zarr", {"ADT": _counts(2, 4, 3)}, "z")
+    _store(tmp_path / "w.zarr", {"ADT": _counts(2, 1, 4)}, "w")
+    DataStoreMerge(
+        [opened("x"), opened("y")], str(tmp_path / "inner.zarr"), ["x", "y"], nthreads=1
+    ).dump()
+    DataStoreMerge(
+        [opened("inner"), opened("z")],
+        str(tmp_path / "outer.zarr"),
+        ["inner", "z"],
+        nthreads=1,
+    ).dump()
+    outer = opened("outer")
+    record = {
+        "measured_in_inner_x": "inner/x",
+        "measured_in_inner_y": "inner/y",
+        "measured_in_z": "z",
+    }
+    assert measured_feature_columns(outer.ADT.feats) == record
+    sources = dict(
+        zip(
+            outer.cells.fetch_all("ids").astype(str),
+            outer.cells.fetch_all("dataset").astype(str).tolist(),
+            strict=True,
+        )
+    )
+    assert sorted(sources.items()) == [
+        ("inner__x__x0", "inner/x"),
+        ("inner__x__x1", "inner/x"),
+        ("inner__x__x2", "inner/x"),
+        ("inner__y__y0", "inner/y"),
+        ("inner__y__y1", "inner/y"),
+        ("z__z0", "z"),
+        ("z__z1", "z"),
+    ]
+    # Only the cells of y and z measured ADT2, and those of z alone ADT3.
+    lacking = {feature: _unmeasured(outer, feature) for feature in ("ADT2", "ADT3")}
+    assert lacking == {
+        "ADT2": {cell: source == "inner/x" for cell, source in sources.items()},
+        "ADT3": {cell: source != "z" for cell, source in sources.items()},
+    }
+
+    exported = tmp_path / "outer.h5ad"
+    cytearc.to_h5ad(outer.ADT, str(exported))
+    for name, categorical in (("categories", True), ("text", False)):
+        reader = H5adReader(str(exported))
+        try:
+            assert reader.measured_features() == {"ADT": record}
+            assert reader.cell_sources() == "dataset"
+            H5adToZarr(
+                reader,
+                str(tmp_path / f"{name}.zarr"),
+                assay_name="ADT",
+                categorical_columns=categorical,
+                nthreads=1,
+            ).dump()
+        finally:
+            reader.close()
+        imported = opened(name)
+        # The import keeps the record of each source of the inner store, and
+        # the cells' sources, as codes or as text.
+        assert measured_feature_columns(imported.ADT.feats) == record
+        assert (
+            dict(
+                zip(
+                    imported.cells.fetch_all("ids").astype(str),
+                    imported.cells.fetch_all("dataset").astype(str).tolist(),
+                    strict=True,
+                )
+            )
+            == sources
+        )
+        assert {
+            feature: _unmeasured(imported, feature) for feature in ("ADT2", "ADT3")
+        } == lacking
+        # A merge of the import records each of its sources in turn.
+        DataStoreMerge(
+            [imported, opened("w")],
+            str(tmp_path / f"{name}_merged.zarr"),
+            ["outer", "w"],
+            nthreads=1,
+        ).dump()
+        merged = opened(f"{name}_merged")
+        assert measured_feature_columns(merged.ADT.feats) == {
+            "measured_in_outer_inner_x": "outer/inner/x",
+            "measured_in_outer_inner_y": "outer/inner/y",
+            "measured_in_outer_z": "outer/z",
+            "measured_in_w": "w",
+        }
+        assert merged.cells._get_array("dataset").categories.tolist() == [
+            "outer/inner/x",
+            "outer/inner/y",
+            "outer/z",
+            "w",
+        ]
+        merged_sources = {
+            f"outer__{cell}": f"outer/{source}" for cell, source in sources.items()
+        } | {"w__w0": "w", "w__w1": "w"}
+        assert (
+            dict(
+                zip(
+                    merged.cells.fetch_all("ids").astype(str),
+                    merged.cells.fetch_all("dataset").astype(str).tolist(),
+                    strict=True,
+                )
+            )
+            == merged_sources
+        )
+        # w measured ADT0 alone, so it has no value of ADT2 either.
+        assert _unmeasured(merged, "ADT2") == {
+            cell: source in {"outer/inner/x", "w"}
+            for cell, source in merged_sources.items()
+        }
+
+
 def _var_h5ad(path: Path, var: dict[str, object], uns: dict) -> Path:
     import anndata
 

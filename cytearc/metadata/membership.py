@@ -315,6 +315,23 @@ def _linked_column(arrays: Iterable[Any]) -> str | None:
     return column if len(linked) == 1 and isinstance(column, str) else None
 
 
+def recorded_sources(table: Any) -> tuple[list[str], str | None]:
+    """Return the sources of a feature table's record of which features each source measured, and the cell column of sources that it names.
+
+    The sources come in the order of the record's columns. A table without a
+    record gives no sources, and a record whose columns name no cell column,
+    or different ones, gives None. Only the columns' attributes are read.
+
+    Raises:
+        ValueError: As :func:`measured_feature_columns` raises.
+    """
+    record = _record_arrays(table)
+    return (
+        [source for _name, source, _array in record],
+        _linked_column(array for _name, _source, array in record),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class FeatureRecord:
     """Which features each source of a merge measured, as a feature table records it.

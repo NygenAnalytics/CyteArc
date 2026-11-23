@@ -1250,6 +1250,76 @@ def test_adt_run_of_one_studys_cells_keeps_the_antibodies_that_study_measured(
 
 
 @pytest.mark.slow
+def test_adt_run_of_one_studys_cells_keeps_its_panel_when_its_merge_is_merged_again(
+    tmp_path: Path,
+) -> None:
+    from cytearc.merge import DataStoreMerge
+
+    shared = ["CD3", "CD4", "CD8", "CD14", "IgG1_isotype"]
+    panels = {"left": [*shared, "CD45RA", "CD27"], "right": [*shared, "CD19"]}
+    inner = _merged_panels(tmp_path, panels, "union")
+    write_count_store(
+        str(tmp_path / "third.zarr"),
+        {"ADT": np.random.default_rng(5).poisson(20, size=(60, 3))},
+        "uint16",
+        feature_ids={"ADT": ["CD3", "CD4", "CD56"]},
+    )
+
+    def opened(name: str) -> DataStore:
+        return DataStore(
+            str(tmp_path / f"{name}.zarr"),
+            default_assay="ADT",
+            min_features_per_cell=0,
+            nthreads=1,
+        )
+
+    DataStoreMerge(
+        [inner, opened("third")],
+        str(tmp_path / "outer.zarr"),
+        ["inner", "third"],
+        nthreads=1,
+    ).dump()
+    outer = opened("outer")
+    ids = outer.cells.fetch_all("ids").astype(str)
+    left = np.char.startswith(ids, "inner__left__")
+    assert int(left.sum()) == 60
+    outer.cells.insert("left_cells", by_cell_id(outer.cells, left))
+    settings: dict[str, Any] = {
+        "neighbors": {"k": 5},
+        "leiden": False,
+        "umap": False,
+        "markers": False,
+    }
+
+    run = outer.pipeline.adt(cells="left_cells", **settings)
+
+    # The oracle is the left study's own store, which holds the same counts of
+    # the same cells: the run keeps its panel, and leaves out CD19, which only
+    # the right study stained, and CD56, which only the third store stained.
+    own = opened("left")
+    alone = own.pipeline.adt(**settings)
+    assert _config(run)["stages"]["panel"]["unmeasured"] == ["CD19", "CD56"]
+    for result in (run, alone):
+        names = result.features.fetch_all("names")
+        assert names[result.features.fetch_all("panel")].tolist() == [
+            "CD3",
+            "CD4",
+            "CD8",
+            "CD14",
+            "CD45RA",
+            "CD27",
+        ]
+    row_of = {
+        cell: row for row, cell in enumerate(own.cells.fetch_all("ids").astype(str))
+    }
+    rows = [row_of[cell.split("__", 2)[2]] for cell in ids[left]]
+    np.testing.assert_allclose(
+        outer.artifacts.load(run["normalized"])["data"][:],
+        own.artifacts.load(alone["normalized"])["data"][:][rows],
+    )
+
+
+@pytest.mark.slow
 def test_multimodal_markers_rank_the_antibodies_every_source_of_its_cells_measured(
     tmp_path: Path,
 ) -> None:

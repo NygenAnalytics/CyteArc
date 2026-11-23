@@ -31,6 +31,8 @@ from ..merge.metadata import (
     admit_cell_metadata_plan,
     admit_feature_metadata,
     metadata_chunk_rows,
+    nested_source_names,
+    nested_sources,
     plan_cell_metadata,
     resolve_metadata_schema_scan_rows,
     write_cell_metadata,
@@ -538,7 +540,13 @@ def _feature_alignment(
     names: list[str],
     features: FeatureSet,
     assay_type: str,
+    nested: list[tuple[str, ...] | None],
 ) -> tuple[FeatureAlignment, np.ndarray, str]:
+    """Return the composite's alignment of ``assay``, the source column of each of its features, and its counts dtype, after logging the warning of the features that the sources share or lack.
+
+    ``nested`` gives the sources of each merged source that the composite
+    records in its place, and None for every other source.
+    """
     union = align_features(assays, names, require_overlap=False)
     dtype = resolve_merge_dtype(assays, union.featOrderMap)
     alignment = select_features(assay, union, features)
@@ -549,7 +557,12 @@ def _feature_alignment(
     # features out, and warns when it keeps under a tenth of the union.
     if features == "union":
         unshared = unshared_features_warning(
-            assay, alignment, names, combination="composite", assay_type=assay_type
+            assay,
+            alignment,
+            names,
+            combination="composite",
+            assay_type=assay_type,
+            nested=nested,
         )
         if unshared is not None:
             logger.warning(unshared)
@@ -809,7 +822,8 @@ def create_composite(
                   When the sources measured different features, the feature
                   table records which features each source measured, in a
                   Boolean column ``measured_in_<name>`` for each, as a merge
-                  does.
+                  does, and records a merged source with such a record by
+                  each of its own sources, such as ``inner/left``.
         assay: Assay to combine, which every source holds as one type.
         rows: Positions of the cells to include, by source name. The
               positions select cells and don't order them. A source left
@@ -825,8 +839,10 @@ def create_composite(
                          with ``source_storage_options`` for its sources.
         source_column: Cell metadata column that holds each cell's source
                        name. Beside a record of which features each source
-                       measured, it is categorical, and it cannot be
-                       overwritten or dropped while the record names it.
+                       measured, it is categorical, it names each cell of a
+                       merged source by that source's own source, and it
+                       cannot be overwritten or dropped while the record
+                       names it.
         relative_sources: If True, the default, record a source in the
                           directory that holds ``at``, or below it, by its
                           path relative to that directory, when both are
@@ -979,12 +995,18 @@ def _write_composite(
         prefetch_metadata_listing(source.cells._group)
         prefetch_metadata_listing(source_assay.feats._group)
     (assay_type,) = assay_types
+    # A merged source is recorded by its own sources, as a merge records it.
+    nested = [
+        nested_sources(source.cells, [source_assay.feats])
+        for source, source_assay in zip(datasets, assays, strict=True)
+    ]
+    nested_names = nested_source_names(nested)
     alignment, feature_columns, dtype = _feature_alignment(
-        assay, assays, names, features, assay_type
+        assay, assays, names, features, assay_type, nested_names
     )
     # Names whose record columns would collide fail here, before anything is
     # written.
-    measured_record = feature_record(alignment, names)
+    measured_record = feature_record(alignment, names, nested_names)
     row_plan = build_row_plan(
         [source.cells.N for source in datasets],
         [int(source.rawData.chunksize[0]) for source in assays],
@@ -1108,6 +1130,7 @@ def _write_composite(
             n_cells=row_plan.nCells,
             row_plan=row_plan,
             record_sources=bool(measured_record),
+            nested=nested,
         )
         metadata_plan = admit_cell_metadata_plan(
             metadata_plan, row_plan, resources, resident_bytes=resident
