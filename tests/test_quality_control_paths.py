@@ -614,7 +614,7 @@ def test_doublet_detection_on_an_integrated_graph_scores_its_rna_source(
 
     with pytest.raises(ValueError, match="from_assay is required"):
         store.qc.doublets(refs["clusters"], refs["wnn"])
-    with pytest.raises(TypeError, match="RNA assays; received ADTassay"):
+    with pytest.raises(TypeError, match="RNA and ATAC assays; received ADTassay"):
         store.qc.doublets(refs["clusters"], refs["wnn"], from_assay="ADT")
 
 

@@ -105,7 +105,7 @@ def test_simulated_doublets_keep_every_pair_and_add_parent_libraries(
         results.append(
             doublets._simulate_sample(
                 assay,
-                reference,
+                doublets.PcaDoubletProjection(reference),
                 np.random.default_rng(5),
                 members,
                 plan,
@@ -300,21 +300,27 @@ def _exact_simulated_neighbors(
 
     The bounds are equal unless the k-th distance ties others, to within the
     float32 rounding of hnswlib's distances; a tie may then go either way.
+    The distances are taken from the differences, in blocks of rows, so a few
+    thousand points stay small.
     """
     values = points.astype(np.float64)
-    distances = ((values[:, None, :] - values[None, :, :]) ** 2).sum(axis=2)
-    np.fill_diagonal(distances, np.inf)
-    kth = np.sort(distances, axis=1)[:, k - 1 : k]
-    tolerance = 1e-5 * np.maximum(kth, 1e-12)
-    certain = distances < kth - tolerance
-    tied = np.abs(distances - kth) <= tolerance
     simulated = np.arange(len(points)) >= n_observed
-    known = np.count_nonzero(certain & simulated, axis=1)
-    free = k - np.count_nonzero(certain, axis=1)
-    tied_simulated = np.count_nonzero(tied & simulated, axis=1)
-    tied_observed = np.count_nonzero(tied & ~simulated, axis=1)
-    low = known + np.maximum(0, free - tied_observed)
-    high = known + np.minimum(tied_simulated, free)
+    low = np.empty(len(points), dtype=np.int64)
+    high = np.empty(len(points), dtype=np.int64)
+    for start in range(0, len(points), 64):
+        rows = np.arange(start, min(start + 64, len(points)))
+        distances = ((values[rows, None, :] - values[None, :, :]) ** 2).sum(axis=2)
+        distances[np.arange(len(rows)), rows] = np.inf
+        kth = np.sort(distances, axis=1)[:, k - 1 : k]
+        tolerance = 1e-5 * np.maximum(kth, 1e-12)
+        certain = distances < kth - tolerance
+        tied = np.abs(distances - kth) <= tolerance
+        known = np.count_nonzero(certain & simulated, axis=1)
+        free = k - np.count_nonzero(certain, axis=1)
+        tied_simulated = np.count_nonzero(tied & simulated, axis=1)
+        tied_observed = np.count_nonzero(tied & ~simulated, axis=1)
+        low[rows] = known + np.maximum(0, free - tied_observed)
+        high[rows] = known + np.minimum(tied_simulated, free)
     return low, high
 
 
@@ -381,7 +387,7 @@ def test_streamed_doublets_match_materialized_doublets(
     monkeypatch.setattr(doublets, "count_simulated_neighbors", capture)
     actual = doublets.score_synthetic_doublets(
         store.RNA,
-        reference,
+        doublets.PcaDoubletProjection(reference),
         rows,
         labels,
         np.zeros(len(rows), dtype=np.int64),
@@ -449,7 +455,7 @@ def test_streamed_doublets_match_materialized_doublets(
     monkeypatch.setattr(doublets, "_doublet_batch_rows", smaller_batches)
     repeated = doublets.score_synthetic_doublets(
         store.RNA,
-        reference,
+        doublets.PcaDoubletProjection(reference),
         rows,
         labels,
         np.zeros(len(rows), dtype=np.int64),
@@ -466,7 +472,7 @@ def test_streamed_doublets_match_materialized_doublets(
     with pytest.raises(MemoryError, match="operation limit is 1000 bytes"):
         doublets.score_synthetic_doublets(
             store.RNA,
-            reference,
+            doublets.PcaDoubletProjection(reference),
             rows,
             labels,
             np.zeros(len(rows), dtype=np.int64),
@@ -484,7 +490,7 @@ def test_streamed_doublets_match_materialized_doublets(
     with pytest.raises(MemoryError, match="operation limit is 1000000 bytes"):
         doublets.score_synthetic_doublets(
             store.RNA,
-            reference,
+            doublets.PcaDoubletProjection(reference),
             rows,
             labels,
             np.zeros(len(rows), dtype=np.int64),
@@ -538,7 +544,7 @@ def test_doublets_without_selected_feature_counts_are_scored(tmp_path, monkeypat
     rows = np.arange(len(counts))
     scores = doublets.score_synthetic_doublets(
         store.RNA,
-        reference,
+        doublets.PcaDoubletProjection(reference),
         rows,
         labels,
         np.zeros(len(rows), dtype=np.int64),
@@ -586,7 +592,7 @@ def test_doublets_without_selected_feature_counts_are_scored(tmp_path, monkeypat
     with pytest.raises(ValueError, match="Reference coordinates do not match"):
         doublets.score_synthetic_doublets(
             store.RNA,
-            reference,
+            doublets.PcaDoubletProjection(reference),
             rows[:-1],
             labels[:-1],
             np.zeros(len(rows) - 1, dtype=np.int64),
@@ -662,7 +668,7 @@ def _score_samples(
 ) -> doublets.DoubletScores:
     return doublets.score_synthetic_doublets(
         samples.store.RNA,
-        samples.reference,
+        doublets.PcaDoubletProjection(samples.reference),
         np.arange(len(samples.codes)),
         samples.labels,
         samples.codes if codes is None else codes,
@@ -845,10 +851,10 @@ def test_a_failed_sample_stops_the_samples_scored_at_once(four_samples, monkeypa
     # once they finish.
     monkeypatch.setattr(doublets, "count_simulated_neighbors", count_neighbors)
 
-    def fail_third(assay, reference, rng, members, plan, **kwargs):
+    def fail_third(assay, projection, rng, members, plan, **kwargs):
         if members[0] == 2 * _SAMPLE_CELLS:
             raise RuntimeError("injected simulation failure")
-        return simulate(assay, reference, rng, members, plan, **kwargs)
+        return simulate(assay, projection, rng, members, plan, **kwargs)
 
     monkeypatch.setattr(doublets, "_simulate_sample", fail_third)
     with pytest.raises(RuntimeError, match="injected simulation failure"):

@@ -669,6 +669,40 @@ def cell_snapshots(
     )
 
 
+def resolve_doublet_samples(
+    store: Any,
+    settings: Mapping[str, Any],
+    harmony_columns: tuple[str, ...],
+    *,
+    reduction: str,
+) -> tuple[str, ...]:
+    """Return the cell metadata columns whose labels split doublet scoring.
+
+    The doublets ``sample_column`` setting names one column. Without it, a run
+    with Harmony scores doublets within each batch, the cells that share every
+    Harmony batch label, and a run without Harmony scores every cell together.
+    ``reduction`` names the reduction that Harmony corrects, such as PCA,
+    on which each sample is scored.
+    """
+    if "sample_column" not in settings:
+        return harmony_columns
+    column = settings["sample_column"]
+    if column is None:
+        if harmony_columns:
+            raise ValueError(
+                "A run with Harmony scores doublets within each sample on the "
+                f"uncorrected {reduction}, so doublets['sample_column'] cannot be "
+                "None; set it to the column of each cell's capture, or omit it "
+                "to use the Harmony batch columns"
+            )
+        return ()
+    if not isinstance(column, str) or not column:
+        raise TypeError("doublets['sample_column'] must be a non-empty string or None")
+    if column not in store.cells.columns:
+        raise KeyError(f"Doublet sample column {column!r} was not found")
+    return (column,)
+
+
 def check_tsne(embeddings: EmbeddingSettings) -> None:
     if embeddings.tsne:
         # Once the recipe is valid, so the warning precedes every stage.

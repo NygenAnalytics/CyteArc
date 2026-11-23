@@ -575,6 +575,48 @@ def test_a_run_of_an_earlier_release_replays_the_settings_it_recorded(
     assert set(_dispositions(again).values()) <= {"reused", "skipped"}
 
 
+@pytest.mark.slow
+def test_an_atac_run_recorded_before_doublet_scoring_replays_without_it(
+    tmp_path,
+) -> None:
+    location = tmp_path / "data.zarr"
+    with tarfile.open(full_path("500_pbmc_atac.zarr.tar.gz"), "r:gz") as archive:
+        archive.extractall(location, filter="data")
+    recorded = DataStore(str(location), default_assay="ATAC").pipeline.atac(
+        label="recorded", **ATAC_SETTINGS
+    )
+
+    def before_doublets(config: dict[str, Any]) -> None:
+        # A run recorded before the ATAC recipe could score doublets.
+        del config["stages"]["doublets"]
+        del config["doubletSampleColumns"]
+
+    _record_as_an_earlier_release(location, recorded.run_id, before_doublets)
+    datastore = DataStore(str(location), default_assay="ATAC")
+    earlier = datastore.pipeline.open(run_id=recorded.run_id)
+
+    assert "doublets" not in earlier.settings()
+    # Doublet scoring is off by default, so the run's plan reuses every stage,
+    # as a call with the run's settings does, and resolves the settings that
+    # a run records today.
+    plan = datastore.pipeline.plan(earlier)
+    call = datastore.pipeline.plan("atac", **ATAC_SETTINGS)
+    assert [(stage.stage, stage.status, stage.outputs) for stage in plan.stages] == [
+        (stage.stage, stage.status, stage.outputs) for stage in call.stages
+    ]
+    assert plan.computed == ()
+    assert plan.config == call.config
+    assert (plan.config["stages"]["doublets"], plan.config["doubletSampleColumns"]) == (
+        False,
+        [],
+    )
+    again = datastore.pipeline.rerun(earlier, label="again")
+    assert again.status == "completed"
+    assert set(_dispositions(again).values()) <= {"reused", "skipped"}
+    # A call turns the stage on, and only that stage computes.
+    assert datastore.pipeline.plan(earlier, doublets=True).computed == ("doublets",)
+
+
 def test_a_run_that_records_a_keyword_the_recipe_no_longer_takes_is_refused(
     completed,
 ) -> None:

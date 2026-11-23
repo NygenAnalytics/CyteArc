@@ -260,7 +260,7 @@ _DECLARED: Mapping[tuple[str, ...], _Declared] = MappingProxyType(
             ),
             recipe_key=True,
         ),
-        ("rna", "doublets", "sample_column"): _Declared(
+        ("*", "doublets", "sample_column"): _Declared(
             rule=(
                 "the Harmony batch_columns when the run corrects batches with "
                 "Harmony, else None"

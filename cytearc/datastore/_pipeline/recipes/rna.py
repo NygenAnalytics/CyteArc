@@ -7,14 +7,9 @@ import numpy as np
 
 from ....quality_control.hto import checked_hashtag_mapping, checked_hashtags
 from ....assay import ADTassay, NormMethod, RNAassay, norm_lib_size
-from ....metadata.rows import apply_missing_mask
 from ....storage.artifacts import ArtifactRef, artifact_group, inspect_artifact
-from ....storage.selections import (
-    read_stored_selection_indices,
-    resolve_generated_selection_artifact,
-)
+from ....storage.selections import resolve_generated_selection_artifact
 from ..._operations.cell_samples import require_cell_column
-from ..cluster_selection import cluster_label_values
 from ..executor import FEATURE_NAMES, PlannedStage, RecipePlan, RunState
 from ..fields import cell_fields, feature_fields
 from ..filtering import default_filter_columns, hashtag_labels, snapshot_column_values
@@ -29,6 +24,7 @@ from ..settings import (
 from ..stages import (
     Outputs,
     clustering_tail,
+    doublet_stage,
     filtering_stage,
     graph_output_keys,
     graph_stages,
@@ -47,6 +43,7 @@ from .common import (
     resolve_embeddings,
     resolve_graph,
     resolve_label,
+    resolve_doublet_samples,
     resolve_rna_head,
     count_stages,
     require_counts_for_stages,
@@ -64,14 +61,6 @@ OPERATION = "pipeline.rna"
 # reads when its settings name no columns.
 FILTER_SUFFIXES = ("nCounts", "nFeatures", "percentMito", "percentRibo")
 
-# The settings that make doublet scoring possible when the saved clustering
-# has one cluster. Silhouette selection never picks such a partition.
-ONE_CLUSTER_DOUBLET_REMEDY = (
-    "Select a Leiden partition with two or more clusters with "
-    "leiden={'selected': ...}, or omit 'selected' so that cluster selection "
-    "chooses one; set doublets={'heterotypic_fraction': 0} to simulate "
-    "doublets from any two sampled cells; or pass doublets=False."
-)
 # What a capture column labels every cell for.
 _CAPTURE_PURPOSE = "Cell calling per capture"
 
@@ -269,36 +258,6 @@ def _check_hashing_samples(
         settings["hashtags"] = checked_hashtags(hashtags, hashtag_ids)
 
 
-def _resolve_doublet_samples(
-    store: Any,
-    settings: Mapping[str, Any],
-    harmony_columns: tuple[str, ...],
-) -> tuple[str, ...]:
-    """Return the cell metadata columns whose labels split doublet scoring.
-
-    The doublets ``sample_column`` setting names one column. Without it, a run
-    with Harmony scores doublets within each batch, the cells that share every
-    Harmony batch label, and a run without Harmony scores every cell together.
-    """
-    if "sample_column" not in settings:
-        return harmony_columns
-    column = settings["sample_column"]
-    if column is None:
-        if harmony_columns:
-            raise ValueError(
-                "A run with Harmony scores doublets within each sample on the "
-                "uncorrected PCA, so doublets['sample_column'] cannot be None; "
-                "set it to the column of each cell's capture, or omit it to use "
-                "the Harmony batch columns"
-            )
-        return ()
-    if not isinstance(column, str) or not column:
-        raise TypeError("doublets['sample_column'] must be a non-empty string or None")
-    if column not in store.cells.columns:
-        raise KeyError(f"Doublet sample column {column!r} was not found")
-    return (column,)
-
-
 def _check_doublet_normalization(assay: str, normalizer: NormMethod) -> None:
     """Refuse doublet scoring of a run that does not normalize by library size.
 
@@ -335,74 +294,6 @@ def _cell_cycle_stage(enabled: bool, settings: Mapping[str, Any]) -> PlannedStag
         action,
         inputs=("analysis_cell_selection", "feature_snapshot", FEATURE_NAMES),
         outputs=("cell_cycle",),
-    )
-
-
-def _doublet_stage(
-    enabled: bool,
-    settings: Mapping[str, Any],
-    sample_columns: tuple[str, ...],
-) -> PlannedStage:
-    if not enabled:
-        return PlannedStage("doublets", None)
-    # The recipe resolved the sample columns, Harmony's included.
-    scoring = {key: value for key, value in settings.items() if key != "sample_column"}
-
-    def action(state: RunState) -> Outputs:
-        store = state.store
-        analysis_selection = state.artifacts["analysis_cell_selection"]
-        clusters = state.artifacts["clusters"]
-        sample_labels = None
-        if sample_columns:
-            rows = read_stored_selection_indices(
-                store.zw,
-                analysis_selection,
-                kind="cell_selection",
-                scope="datastore",
-                assay=None,
-                table_path="cellData",
-            )
-            snapshot = artifact_group(
-                store.zw, state.artifacts["doublet_sample_snapshot"]
-            )
-            sample_labels = []
-            for column in sample_columns:
-                values, missing = snapshot_column_values(snapshot, column)
-                sample_labels.append(
-                    apply_missing_mask(
-                        values[rows],
-                        None if missing is None else missing[rows],
-                        labels=True,
-                    )
-                )
-        # With Harmony the graph is the corrected one, and each sample is
-        # scored on the uncorrected PCA that Harmony took as input, so no
-        # other graph is built.
-        ref = store._run_doublet_detection_artifact(
-            source_assay=state.assay,
-            cell_selection=analysis_selection,
-            clusters=clusters,
-            cluster_values=cluster_label_values(store.zw, clusters),
-            connectivity=state.artifacts["connectivity_map"],
-            feature_snapshot=state.artifacts["feature_snapshot"],
-            sample_column=sample_columns or None,
-            sample_labels=sample_labels,
-            one_cluster_remedy=ONE_CLUSTER_DOUBLET_REMEDY,
-            **scoring,
-        )
-        return (("doublets", ref),)
-
-    return PlannedStage(
-        "doublets",
-        action,
-        inputs=(
-            "analysis_cell_selection",
-            "clusters",
-            "connectivity_map",
-            "feature_snapshot",
-            *(("doublet_sample_snapshot",) if sample_columns else ()),
-        ),
-        outputs=("doublets",),
     )
 
 
@@ -531,7 +422,9 @@ def resolve_rna(
         ),
     )
     doublet_samples = (
-        _resolve_doublet_samples(store, doublet_settings, head.harmony_columns)
+        resolve_doublet_samples(
+            store, doublet_settings, head.harmony_columns, reduction="PCA"
+        )
         if doublets_enabled
         else ()
     )
@@ -626,7 +519,7 @@ def resolve_rna(
         ),
         *first_tail,
         *tsne_tail,
-        _doublet_stage(doublets_enabled, doublet_settings, doublet_samples),
+        doublet_stage(doublets_enabled, doublet_settings, doublet_samples),
         markers_stage(markers),
     )
     config = {

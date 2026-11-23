@@ -7,9 +7,11 @@ from typing import Any
 import numpy as np
 
 from ...metadata.membership import require_measured_cells
+from ...metadata.rows import apply_missing_mask
 from ...storage.artifacts import ArtifactRef, artifact_group
 from ...storage.pipeline_runs import load_pipeline_run_record
 from ...storage.selections import (
+    read_stored_selection_indices,
     read_stored_selection_mask,
     resolve_stored_selection_artifact,
     snapshot_run_metadata,
@@ -20,9 +22,19 @@ from ...utils.logging import logger
 from ..pipeline_run import PipelineRun, open_pipeline_run
 from .cluster_selection import cluster_label_values, run_cluster_selection
 from .executor import COORDINATES, FEATURE_NAMES, PlannedStage, RunState, StageOutput
-from .filtering import filter_pipeline_selection
+from .filtering import filter_pipeline_selection, snapshot_column_values
 
 type Outputs = tuple[StageOutput, ...]
+
+
+# The settings that make doublet scoring possible when the saved clustering
+# has one cluster. Silhouette selection never picks such a partition.
+ONE_CLUSTER_DOUBLET_REMEDY = (
+    "Select a Leiden partition with two or more clusters with "
+    "leiden={'selected': ...}, or omit 'selected' so that cluster selection "
+    "chooses one; set doublets={'heterotypic_fraction': 0} to simulate "
+    "doublets from any two sampled cells; or pass doublets=False."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -646,6 +658,80 @@ def tsne_stage(
         action,
         inputs=(graph_key, "embedding_initialization"),
         outputs=("tsne",),
+    )
+
+
+def doublet_stage(
+    enabled: bool,
+    settings: Mapping[str, Any],
+    sample_columns: tuple[str, ...],
+) -> PlannedStage:
+    """Return the ``doublets`` stage, which scores the run's saved clustering.
+
+    ``sample_columns`` are the columns that the recipe resolved with
+    ``recipes.common.resolve_doublet_samples``, whose labels the run froze in
+    ``doublet_sample_snapshot``.
+    """
+    if not enabled:
+        return PlannedStage("doublets", None)
+    # The recipe resolved the sample columns, Harmony's included.
+    scoring = {key: value for key, value in settings.items() if key != "sample_column"}
+
+    def action(state: RunState) -> Outputs:
+        store = state.store
+        analysis_selection = state.artifacts["analysis_cell_selection"]
+        clusters = state.artifacts["clusters"]
+        sample_labels = None
+        if sample_columns:
+            rows = read_stored_selection_indices(
+                store.zw,
+                analysis_selection,
+                kind="cell_selection",
+                scope="datastore",
+                assay=None,
+                table_path="cellData",
+            )
+            snapshot = artifact_group(
+                store.zw, state.artifacts["doublet_sample_snapshot"]
+            )
+            sample_labels = []
+            for column in sample_columns:
+                values, missing = snapshot_column_values(snapshot, column)
+                sample_labels.append(
+                    apply_missing_mask(
+                        values[rows],
+                        None if missing is None else missing[rows],
+                        labels=True,
+                    )
+                )
+        # With Harmony the graph is the corrected one, and each sample is
+        # scored on the uncorrected PCA or LSI that Harmony took as input, so
+        # no other graph is built.
+        ref = store._run_doublet_detection_artifact(
+            source_assay=state.assay,
+            cell_selection=analysis_selection,
+            clusters=clusters,
+            cluster_values=cluster_label_values(store.zw, clusters),
+            connectivity=state.artifacts["connectivity_map"],
+            feature_snapshot=state.artifacts["feature_snapshot"],
+            sample_column=sample_columns or None,
+            sample_labels=sample_labels,
+            one_cluster_remedy=ONE_CLUSTER_DOUBLET_REMEDY,
+            **scoring,
+        )
+        return (("doublets", ref),)
+
+    return PlannedStage(
+        "doublets",
+        action,
+        inputs=(
+            "analysis_cell_selection",
+            "clusters",
+            "connectivity_map",
+            "feature_snapshot",
+            *(("doublet_sample_snapshot",) if sample_columns else ()),
+        ),
+        outputs=("doublets",),
     )
 
 

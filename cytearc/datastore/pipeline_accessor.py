@@ -603,6 +603,7 @@ class PipelineAccessor:
         leiden: StageSwitch = True,
         paris: StageSwitch = False,
         membership_strength: bool = False,
+        doublets: StageSwitch = False,
         markers: bool = True,
         snapshot_columns: Sequence[str] = (),
         species: str | None = None,
@@ -615,13 +616,14 @@ class PipelineAccessor:
         The recipe filters cells on their counts and accessible peaks,
         selects the most prevalent peaks, normalizes them with TF-IDF, reduces
         them with LSI, optionally corrects batches with Harmony, and then
-        builds, embeds, and clusters a graph as the RNA recipe does:
+        builds, embeds, and clusters a graph as the RNA recipe does, and
+        optionally scores doublets:
 
         ``input_snapshot``, ``filtering``, ``prevalent_peaks``,
         ``normalization``, ``lsi``, ``harmony``, ``ann_index``, ``neighbors``,
         ``connectivity``, ``embedding_initialization``, ``umap``,
         ``localmap``, ``leiden``, ``paris``, ``cluster_selection``,
-        ``membership_strength``, ``tsne``, ``markers``.
+        ``membership_strength``, ``tsne``, ``doublets``, ``markers``.
 
         Args:
             assay: The ATAC assay. Defaults to the default assay when it is an
@@ -641,6 +643,14 @@ class PipelineAccessor:
                 ``prevalent_peaks`` ``top_n``. Cluster selection scores
                 candidates in the LSI coordinates, or in their Harmony
                 correction when the run has Harmony.
+            doublets: Doublet scoring, with the keywords of ``qc.doublets``;
+                off by default. It weights simulated doublets by TF-IDF and
+                projects them onto the LSI, so it needs the run to normalize
+                with ``"tf_idf"``, the ATAC default, and it scores cells by
+                Euclidean distances in the LSI whatever ``ann_index``
+                ``ann_metric`` is. A run with Harmony scores doublets within
+                each batch unless ``doublets`` names another
+                ``sample_column``.
 
         The other arguments mean what they mean for :meth:`rna`. The run
         records the selected peaks as its ``prevalent_peaks`` feature field.
@@ -668,6 +678,7 @@ class PipelineAccessor:
             leiden=leiden,
             paris=paris,
             membership_strength=membership_strength,
+            doublets=doublets,
             markers=markers,
             snapshot_columns=snapshot_columns,
             species=species,

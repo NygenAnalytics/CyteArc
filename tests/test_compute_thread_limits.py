@@ -652,7 +652,7 @@ def _doublet_call(_tmp_path: Path) -> Callable[[], object]:
     )
     return lambda: doublets._simulate_sample(
         assay,
-        reference,
+        doublets.PcaDoubletProjection(reference),
         np.random.default_rng(6),
         members,
         plan,
