@@ -826,37 +826,28 @@ def test_of_two_processes_that_resume_one_run_at_once_one_wins(
     paused, tmp_path, monkeypatch
 ) -> None:
     store = _paused_copy(paused, tmp_path)
-    resume_record = executor_module.resume_pipeline_run_record
+    paused_record = _attrs(store, paused.run_id)
     claim = pipeline_run_storage._claim_pipeline_run_resume
-    replayed = threading.Barrier(2, timeout=60)
+    at_claim = threading.Barrier(2, timeout=60)
     claimed, tried = threading.Event(), threading.Event()
     seen: dict[str, Any] = {}
 
-    def staged(*args: Any, **kwargs: Any) -> Any:
-        # Both processes have replayed the finished stages and read the pause
-        # before either claims it.
-        replayed.wait()
+    def claim_in_order(root: Any, run_id: str, segment: int) -> bool:
+        # Both processes have replayed the finished stages and read the
+        # paused run before either claims it.
+        at_claim.wait()
         if threading.current_thread().name == "winner":
-            seen["winner"] = resume_record(*args, **kwargs)
-            return seen["winner"]
-        claimed.wait(timeout=60)
-        before = _files(store)
-        try:
-            return resume_record(*args, **kwargs)
-        finally:
-            seen["untouched"] = _files(store) == before
-            tried.set()
-
-    def claim_first(root: Any, run_id: str, segment: int) -> bool:
-        won = claim(root, run_id, segment)
-        if threading.current_thread().name == "winner":
-            # The loser tries between the winner's claim and its record.
+            won = claim(root, run_id, segment)
             claimed.set()
+            # The winner records its resume once the loser has tried.
             tried.wait(timeout=60)
-        return won
+            return won
+        claimed.wait(timeout=60)
+        return claim(root, run_id, segment)
 
-    monkeypatch.setattr(executor_module, "resume_pipeline_run_record", staged)
-    monkeypatch.setattr(pipeline_run_storage, "_claim_pipeline_run_resume", claim_first)
+    monkeypatch.setattr(
+        pipeline_run_storage, "_claim_pipeline_run_resume", claim_in_order
+    )
     outcomes: dict[str, object] = {}
 
     def resume() -> None:
@@ -866,6 +857,11 @@ def test_of_two_processes_that_resume_one_run_at_once_one_wins(
             outcomes[name] = resumer.pipeline.resume(paused.run_id).status
         except RuntimeError as error:
             outcomes[name] = error
+        finally:
+            if name == "loser":
+                # Neither process has written to the run record yet.
+                seen["after the loser"] = _attrs(store, paused.run_id)
+                tried.set()
 
     threads = [
         threading.Thread(target=resume, name=name) for name in ("winner", "loser")
@@ -877,12 +873,13 @@ def test_of_two_processes_that_resume_one_run_at_once_one_wins(
 
     assert outcomes["winner"] == "completed"
     assert isinstance(outcomes["loser"], RuntimeError)
-    assert "is claimed by another resume" in str(outcomes["loser"])
-    # The loser wrote nothing, so the run holds the winner's resume.
-    assert seen["untouched"] is True
+    assert "is claimed by another resume that has not yet recorded itself" in str(
+        outcomes["loser"]
+    )
+    # The loser left the run record as the pause wrote it, for the winner.
+    assert seen["after the loser"] == paused_record
     record = load_pipeline_run_record(store.zw, paused.run_id)
-    assert len(record.segments) == 2
-    assert record.segments[1].started_at_ns == seen["winner"].segments[1].started_at_ns
+    assert (record.status, len(record.segments)) == ("completed", 2)
 
 
 @pytest.mark.parametrize("rival_runs", [False, True], ids=["paused_again", "running"])
