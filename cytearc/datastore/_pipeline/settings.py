@@ -102,6 +102,9 @@ LSI_DIMS_DEFAULT: int = keyword_default(_GraphOperationsMixin._reduction_lsi, "d
 LSI_SKIP_FIRST_DEFAULT: bool = keyword_default(
     _GraphOperationsMixin._reduction_lsi, "skip_first"
 )
+ANN_METRIC_DEFAULT: str = keyword_default(
+    _GraphOperationsMixin._graph_ann_index, "ann_metric"
+)
 # The graph-loading keywords of embeddings.tsne, embeddings.umap, and
 # clusters.leiden, which graph_load_flags and umap_graph_flags check.
 _GRAPH_FLAGS = ("symmetric_graph", "graph_upper_only")

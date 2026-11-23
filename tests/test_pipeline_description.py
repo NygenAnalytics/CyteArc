@@ -208,7 +208,7 @@ _OWN: dict[tuple[str, str, str], tuple[str | None, str | None, Any, str | None]]
         None,
         "the only partition; a call with several partitions must select one of them",
     ),
-    ("rna", "doublets", "sample_column"): (
+    (_ALL, "doublets", "sample_column"): (
         "qc.doublets",
         "str | None",
         None,

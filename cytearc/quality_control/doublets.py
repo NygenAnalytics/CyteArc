@@ -2,11 +2,13 @@
 
 Each sample's doublets are simulated by adding the counts of two of its cells.
 They are normalized like the observed cells and projected onto the observed
-cells' PCA. Every observed cell and every simulated doublet is then scored by
-the simulated doublets among its nearest neighbors in its own sample, and the
-score is turned into the probability that the cell is a doublet, given an
-expected doublet rate, following Scrublet (Wolock, Lopez and Klein, Cell
-Systems 2019, doi:10.1016/j.cels.2018.11.005).
+cells' reduction: the PCA of an RNA assay (:class:`PcaDoubletProjection`) or
+the LSI of an ATAC assay (:class:`LsiDoubletProjection`). Every observed cell
+and every simulated doublet is then scored by the simulated doublets among
+its nearest neighbors in its own sample, and the score is turned into the
+probability that the cell is a doublet, given an expected doublet rate,
+following Scrublet (Wolock, Lopez and Klein, Cell Systems 2019,
+doi:10.1016/j.cels.2018.11.005).
 """
 
 import threading
@@ -14,12 +16,13 @@ from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from numbers import Real
+from typing import Any, Protocol
 
 import numpy as np
-from numpy.typing import NDArray
+from numpy.typing import ArrayLike, NDArray
 from scipy.sparse import csr_matrix, vstack
 
-from ..assay import RNAassay
+from ..assay import Assay
 from ..assay.persistence import _read_block
 from ..mapping.features import normalize_reference_counts
 from ..mapping.reference import MappingReference
@@ -51,10 +54,13 @@ from ..utils.compute import process_thread_limit
 
 __all__ = [
     "DoubletIndexSettings",
+    "DoubletProjection",
     "DoubletSamplePlan",
     "DoubletSampleResult",
     "DoubletScores",
     "DoubletSettings",
+    "LsiDoubletProjection",
+    "PcaDoubletProjection",
     "count_simulated_neighbors",
     "doublet_likelihood",
     "doublet_settings",
@@ -940,9 +946,186 @@ def count_simulated_neighbors(
     return counts
 
 
+class DoubletProjection(Protocol):
+    """Map simulated doublets to the coordinates of the cells they are scored among.
+
+    ``coordinates`` is the Zarr array of the observed cells' coordinates, one
+    row of ``n_dims`` values per selected cell. :meth:`project` maps a block
+    of summed parent counts of the selected features, one doublet per row,
+    and each doublet's denominator, the sum of its parents' totals, to its
+    coordinates; the denominators are None when the projection normalizes
+    over the selected features alone, as ``renormalize_subset`` says.
+    """
+
+    n_dims: int
+    renormalize_subset: bool
+
+    @property
+    def coordinates(self) -> Any:
+        """Return the Zarr array of the observed cells' coordinates."""
+        ...
+
+    def resident_bytes(self) -> int:
+        """Return the bytes that the projection holds while doublets are scored."""
+        ...
+
+    def row_bytes(self, counts: csr_matrix) -> int:
+        """Return what projecting one doublet of parents from ``counts`` holds."""
+        ...
+
+    def project(
+        self,
+        summed: csr_matrix,
+        denominators: NDArray[np.float64] | None,
+        *,
+        source: str,
+    ) -> NDArray[np.floating]:
+        """Return the coordinates of the doublets whose counts ``summed`` holds."""
+        ...
+
+
+class PcaDoubletProjection:
+    """Normalize simulated doublets by library size and project them onto a PCA.
+
+    The mapping reference of the PCA gives the size factor, the log
+    transform, and whether totals cover the selected features alone; each
+    doublet's values are then scaled and centered as the PCA's cells were
+    before they are multiplied by the loadings.
+    """
+
+    def __init__(self, reference: MappingReference) -> None:
+        self.reference = reference
+        self.n_dims = int(reference.model.n_dims)
+        self.renormalize_subset = bool(
+            reference.normalization_parameters["renormalize_subset"]
+        )
+
+    @property
+    def coordinates(self) -> Any:
+        """Return the Zarr array of the PCA coordinates of the reference's cells."""
+        return as_zarr_array(
+            artifact_group(self.reference.datastore.zw, self.reference.reduction)[
+                "data"
+            ],
+            name="data",
+        )
+
+    def resident_bytes(self) -> int:
+        model = self.reference.model
+        return sum(
+            np.asarray(values).nbytes
+            for values in (
+                model.loadings,
+                model.feature_means,
+                model.feature_scales,
+                model.center,
+            )
+        )
+
+    def row_bytes(self, counts: csr_matrix) -> int:
+        # A dense copy of each doublet's counts, its normalized values with
+        # their scaled and centered copies, and its coordinates.
+        n_features = int(self.reference.model.n_features)
+        itemsize = int(counts.dtype.itemsize)
+        return n_features * (max(8, itemsize) + 3 * 8) + self.n_dims * 32 + 64
+
+    def project(
+        self,
+        summed: csr_matrix,
+        denominators: NDArray[np.float64] | None,
+        *,
+        source: str,
+    ) -> NDArray[np.floating]:
+        parameters = self.reference.normalization_parameters
+        raw = summed.toarray()
+        normalized = normalize_reference_counts(
+            raw,
+            size_factor=parameters["size_factor"],
+            log_transform=parameters["log_transform"],
+            source=source,
+            denominator=denominators,
+        )
+        del raw
+        return np.asarray(project_pca(normalized, self.reference.model))
+
+
+class LsiDoubletProjection:
+    """Weight simulated doublets by TF-IDF and project them onto an LSI.
+
+    A doublet's term frequencies are its summed counts of the selected peaks
+    over its denominator: the sum of its parents' totals, or its own total
+    over the selected peaks when the LSI's TF-IDF renormalized over them,
+    and 1 for a doublet without counts, as for a cell. They are weighted by
+    ``idf``, the inverse document frequency of each peak among the LSI's
+    cells, and multiplied by the LSI ``loadings``, without centering or
+    scaling, as the LSI coordinates of the cells are. The rows stay sparse.
+    """
+
+    def __init__(
+        self,
+        loadings: ArrayLike,
+        idf: ArrayLike,
+        coordinates: Any,
+        *,
+        renormalize_subset: bool,
+    ) -> None:
+        values = np.asarray(loadings, dtype=np.float64)
+        weights = np.asarray(idf, dtype=np.float64)
+        if values.ndim != 2 or values.shape[1] < 1:
+            raise ValueError("LSI loadings must be a matrix of features by dimensions")
+        if weights.shape != (values.shape[0],):
+            raise ValueError(
+                "The inverse document frequencies must hold one value per LSI feature"
+            )
+        if not (np.isfinite(values).all() and np.isfinite(weights).all()):
+            raise ValueError(
+                "LSI loadings and inverse document frequencies must be finite"
+            )
+        if len(coordinates.shape) != 2 or coordinates.shape[1] != values.shape[1]:
+            raise ValueError("LSI coordinates must hold one column per LSI dimension")
+        self.loadings = np.ascontiguousarray(values)
+        self.idf = weights
+        self.coordinates = coordinates
+        self.renormalize_subset = bool_argument(
+            renormalize_subset, "renormalize_subset"
+        )
+        self.n_dims = int(values.shape[1])
+
+    def resident_bytes(self) -> int:
+        return self.loadings.nbytes + self.idf.nbytes
+
+    def row_bytes(self, counts: csr_matrix) -> int:
+        # A doublet holds at most its two parents' values: their float64 term
+        # frequencies and column indices, and a copy weighted by the IDF,
+        # beside its coordinates.
+        values = 2 * int(np.diff(counts.indptr).max(initial=0))
+        return values * (2 * 8 + 8) + self.n_dims * 16 + 64
+
+    def project(
+        self,
+        summed: csr_matrix,
+        denominators: NDArray[np.float64] | None,
+        *,
+        source: str,
+    ) -> NDArray[np.floating]:
+        rows = summed.shape[0]
+        totals = (
+            np.asarray(summed.sum(axis=1, dtype=np.float64)).ravel()
+            if denominators is None
+            else np.array(denominators, dtype=np.float64)
+        )
+        if totals.shape != (rows,):
+            raise ValueError(f"{source} needs one denominator per doublet")
+        totals[totals == 0] = 1
+        values = csr_matrix(summed, dtype=np.float64, copy=True)
+        values.data /= np.repeat(totals, np.diff(values.indptr))
+        values.data *= self.idf[values.indices]
+        return np.asarray(values @ self.loadings)
+
+
 def _simulate_sample(
-    assay: RNAassay,
-    reference: MappingReference,
+    assay: Assay,
+    projection: DoubletProjection,
     rng: np.random.Generator,
     members: np.ndarray,
     plan: DoubletSamplePlan,
@@ -958,7 +1141,7 @@ def _simulate_sample(
     resident_bytes: int,
     room: _ScoringRoom | None = None,
 ) -> tuple[np.ndarray, np.ndarray, float]:
-    """Simulate one sample's doublets and project them onto the reference PCA.
+    """Simulate one sample's doublets and project them with ``projection``.
 
     Each step also waits for its bytes in ``room``, when one is given.
 
@@ -967,7 +1150,6 @@ def _simulate_sample(
         parents among the selected cells, and the heterotypic fraction used:
         0 when every parent has the same cluster label.
     """
-    model = reference.model
     member_labels = labels[members]
     if cluster_sample_fraction >= 1 and max_cells_per_cluster is None:
         pool = np.arange(len(members), dtype=np.int64)
@@ -1003,46 +1185,34 @@ def _simulate_sample(
         room,
     )
     totals = None if cell_totals is None else cell_totals[pool_positions]
-    coordinates = np.empty((plan.simulated, model.n_dims), dtype=np.float32)
+    coordinates = np.empty((plan.simulated, projection.n_dims), dtype=np.float32)
     resident += coordinates.nbytes + sparse_matrix_bytes(counts)
     resident += 0 if totals is None else totals.nbytes
-    row_bytes = (
-        _pair_row_bytes(counts)
-        + model.n_features * (max(8, counts.dtype.itemsize) + 3 * 8)
-        + model.n_dims * 32
-        + 64
-    )
+    row_bytes = _pair_row_bytes(counts) + projection.row_bytes(counts)
     preferred = row_band(
         array_geometry(assay.rawData._backing), unit="chunk", fallback=1_000
     )
     batch_rows = _doublet_batch_rows(
         resources, min(preferred, plan.simulated), row_bytes, resident, room=room
     )
-    parameters = reference.normalization_parameters
     with process_thread_limit(resources.workers):
         for start in range(0, plan.simulated, batch_rows):
             stop = min(start + batch_rows, plan.simulated)
             first, second = left[start:stop], right[start:stop]
             simulated = sum_doublet_pairs(counts, first, second)
-            raw = simulated.toarray()
-            del simulated
-            normalized = normalize_reference_counts(
-                raw,
-                size_factor=parameters["size_factor"],
-                log_transform=parameters["log_transform"],
-                source=f"The doublet simulation of {assay.name}",
+            coordinates[start:stop] = projection.project(
+                simulated,
                 # A doublet's library is the libraries of its two parents.
-                denominator=None if totals is None else totals[first] + totals[second],
+                None if totals is None else totals[first] + totals[second],
+                source=f"The doublet simulation of {assay.name}",
             )
-            del raw
-            coordinates[start:stop] = project_pca(normalized, model)
-            del normalized
+            del simulated
     return coordinates, parents, fraction
 
 
 def score_synthetic_doublets(
-    assay: RNAassay,
-    reference: MappingReference,
+    assay: Assay,
+    projection: DoubletProjection,
     active_indices: np.ndarray,
     labels: np.ndarray,
     sample_codes: np.ndarray,
@@ -1065,11 +1235,11 @@ def score_synthetic_doublets(
     Each sample draws parent pairs from its own cells, every cell by default,
     with its own random generator: the sample's child of
     ``numpy.random.SeedSequence(random_seed)``, spawned in sample code order.
-    Parent counts are added, normalized like the reference, with each
-    doublet's library size the sum of its parents' ``cell_totals`` unless the
-    reference renormalizes the selected features, and projected onto the
-    reference PCA. The sample's observed coordinates are its rows of the
-    reference reduction. Each observed cell and simulated doublet is scored
+    Parent counts of the selected features are added and mapped by
+    ``projection``, with each doublet's denominator the sum of its parents'
+    ``cell_totals`` unless the projection normalizes over the selected
+    features alone. The sample's observed coordinates are its rows of the
+    projection's coordinates. Each observed cell and simulated doublet is scored
     by :func:`doublet_likelihood` on its neighbors in the sample
     (:func:`count_simulated_neighbors`), and a cell is called a doublet when
     its score is above the sample's threshold: ``threshold``, or the one
@@ -1086,15 +1256,18 @@ def score_synthetic_doublets(
     threshold are the same for any number of workers.
 
     Args:
-        assay: The RNA assay whose counts the parents are read from.
-        reference: The mapping reference of the scored cells' PCA.
+        assay: The assay whose counts the parents are read from.
+        projection: The map from summed counts to the coordinates of the
+            selected cells: :class:`PcaDoubletProjection` for the PCA of an
+            RNA assay or :class:`LsiDoubletProjection` for the LSI of an
+            ATAC assay.
         active_indices: Physical rows of the selected cells, in selection order.
         labels: The cluster label of each selected cell.
         sample_codes: The sample of each selected cell, from 0 to the number of
             samples minus 1; every code must occur.
-        feature_indices: Physical rows of the reference features.
-        cell_totals: Library sizes of the selected cells, or None when the
-            reference renormalizes its features.
+        feature_indices: Physical rows of the projection's features.
+        cell_totals: Total counts of the selected cells, or None when the
+            projection normalizes over its features alone.
         index: Settings of each sample's neighbor index.
         cluster_sample_fraction: The fraction of each cluster of a sample that
             may parent doublets.
@@ -1126,40 +1299,32 @@ def score_synthetic_doublets(
     sizes = np.bincount(codes)
     if not sizes.all():
         raise ValueError("Every sample code up to the largest must hold a cell")
-    # Settings are checked before the reference or any count is read.
+    # Settings are checked before any coordinate or count is read.
     plans = plan_doublet_samples(
         sizes, simulation_ratio=simulation_ratio, n_neighbors=n_neighbors
     )
     _doublet_rate(expected_doublet_rate)
     if threshold is not None and not np.isfinite(float(threshold)):
         raise ValueError("threshold must be a finite number or None")
-    parameters = reference.normalization_parameters
-    if bool(parameters["renormalize_subset"]) != (cell_totals is None):
+    if projection.renormalize_subset != (cell_totals is None):
         raise ValueError(
-            "Cell totals are needed exactly when the reference normalizes by "
-            "library size over every feature"
+            "Cell totals are needed exactly when the projection normalizes by "
+            "the total counts of every feature"
         )
     if cell_totals is not None and np.shape(cell_totals) != (n_cells,):
         raise ValueError("Cell totals must hold one value per selected cell")
-    model = reference.model
-    coordinates = as_zarr_array(
-        artifact_group(reference.datastore.zw, reference.reduction)["data"],
-        name="data",
-    )
-    if coordinates.shape != (n_cells, model.n_dims):
+    dims = projection.n_dims
+    coordinates = projection.coordinates
+    if coordinates.shape != (n_cells, dims):
         raise ValueError("Reference coordinates do not match the selected cells")
     n_simulated = sum(plan.simulated for plan in plans)
-    resident = sum(
+    resident = projection.resident_bytes() + sum(
         np.asarray(values).nbytes
         for values in (
             active_indices,
             labels,
             codes,
             feature_indices,
-            model.loadings,
-            model.feature_means,
-            model.feature_scales,
-            model.center,
             *(() if cell_totals is None else (cell_totals,)),
         )
     )
@@ -1193,7 +1358,7 @@ def score_synthetic_doublets(
         members = np.flatnonzero(codes == code)
         simulated, parents, fraction = _simulate_sample(
             assay,
-            reference,
+            projection,
             np.random.default_rng(seeds[code]),
             members,
             plan,
@@ -1208,7 +1373,7 @@ def score_synthetic_doublets(
             resident_bytes=resident + members.nbytes,
             room=room,
         )
-        observed_bytes = plan.cells * model.n_dims * 4
+        observed_bytes = plan.cells * dims * 4
         _admit(
             resources,
             block_bytes=2 * observed_bytes + simulated.nbytes,
@@ -1259,7 +1424,7 @@ def score_synthetic_doublets(
         )
 
     samples_at_once, threads = _samples_in_flight(
-        plans, model.n_dims, index, resources, resident
+        plans, dims, index, resources, resident
     )
     results: list[DoubletSampleResult] = []
     if samples_at_once == 1:
@@ -1288,7 +1453,7 @@ def score_synthetic_doublets(
             threads=threads,
             resources=resources,
             resident_bytes=resident,
-            dims=model.n_dims,
+            dims=dims,
         )
     return DoubletScores(
         scores=scores,

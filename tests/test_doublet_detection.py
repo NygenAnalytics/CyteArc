@@ -10,6 +10,7 @@ and scores doublets alone, and that the scores are stable across seeds.
 import inspect
 import math
 import shutil
+import tarfile
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
@@ -17,12 +18,13 @@ from typing import Any
 
 import numpy as np
 import pytest
+from scipy.sparse import csr_matrix
 from scipy.stats import spearmanr
 from sklearn.metrics import roc_auc_score
 
 import cytearc.storage.operation_revisions as operation_revisions
 from cytearc import DataStore, DiagnosticWarning
-from cytearc.assay import norm_lib_size, norm_pearson_residuals
+from cytearc.assay import norm_clr, norm_lib_size, norm_pearson_residuals, norm_tf_idf
 from cytearc.datastore._pipeline.recipes import rna as rna_recipe
 from cytearc.datastore.pipeline_accessor import PipelineAccessor
 from cytearc.quality_control import doublets
@@ -30,6 +32,7 @@ from cytearc.storage.artifacts import ArtifactRef, artifact_group
 from cytearc.storage.budget import ResourceBudget
 from cytearc.storage.selections import read_stored_selection_mask
 from cytearc.utils.logging import logger
+from tests import full_path
 from tests.storage_helpers import (
     by_cell_id,
     insert_nullable_cell_column,
@@ -455,12 +458,13 @@ def test_sample_cluster_pool_without_a_cap_keeps_each_cluster_fraction():
 def test_score_synthetic_doublets_validates_samples_before_reading(
     codes, labels, totals, threshold, message
 ):
-    # The reference renormalizes its features, so it takes no cell totals.
-    reference = SimpleNamespace(normalization_parameters={"renormalize_subset": True})
+    # The projection renormalizes its features, so it takes no cell totals.
+    # It has nothing else to read, so a check that read it would fail.
+    renormalizing = SimpleNamespace(renormalize_subset=True)
     with pytest.raises(ValueError, match=message):
         doublets.score_synthetic_doublets(
             None,
-            reference,
+            renormalizing,
             np.arange(2),
             labels,
             codes,
@@ -480,7 +484,7 @@ def test_score_synthetic_doublets_validates_samples_before_reading(
     with pytest.raises(ValueError, match="expected_doublet_rate must be above 0"):
         doublets.score_synthetic_doublets(
             None,
-            reference,
+            renormalizing,
             np.arange(2),
             np.zeros(2),
             np.zeros(2, dtype=int),
@@ -497,7 +501,7 @@ def test_score_synthetic_doublets_validates_samples_before_reading(
             random_seed=0,
             resources=ResourceBudget(1_000_000, 1),
         )
-    library = SimpleNamespace(normalization_parameters={"renormalize_subset": False})
+    library = SimpleNamespace(renormalize_subset=False)
     with pytest.raises(ValueError, match="one value per selected cell"):
         doublets.score_synthetic_doublets(
             None,
@@ -544,24 +548,40 @@ class _SyntheticDoublets:
     truth: np.ndarray
     samples: np.ndarray
     types: np.ndarray
+    assay: str = "RNA"
 
 
 def _synthetic_counts(
     seed: int,
     design: dict[str, dict[str, Any]],
+    *,
+    peaks: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return counts of the design's singlets and doublets, and their truth.
+
+    Genes have a shared expression profile and twelve markers of each cell
+    type. With ``peaks``, each cell type opens 50 of 400 peaks, which it
+    covers with a mean of one fragment against 0.03 elsewhere.
+    """
     rng = np.random.default_rng(seed)
-    n_genes, n_types = 120, 5
-    profiles = np.tile(rng.gamma(0.6, 0.5, size=n_genes), (n_types, 1))
-    for cell_type in range(n_types):
-        markers = rng.choice(n_genes, 12, replace=False)
-        profiles[cell_type, markers] += rng.uniform(2.0, 6.0, size=12)
+    n_types = 5
+    if peaks:
+        n_genes, scale = 400, 1.0
+        profiles = np.full((n_types, n_genes), 0.03)
+        for cell_type in range(n_types):
+            profiles[cell_type, rng.choice(n_genes, 50, replace=False)] = 1.0
+    else:
+        n_genes, scale = 120, 3.0
+        profiles = np.tile(rng.gamma(0.6, 0.5, size=n_genes), (n_types, 1))
+        for cell_type in range(n_types):
+            markers = rng.choice(n_genes, 12, replace=False)
+            profiles[cell_type, markers] += rng.uniform(2.0, 6.0, size=12)
     counts, truth, samples, types = [], [], [], []
     for position, (sample, capture) in enumerate(design.items()):
         batch = np.ones(n_genes) if position == 0 else rng.uniform(0.7, 1.4, n_genes)
         sample_types = np.repeat(capture["types"], capture["sizes"])
         depth = rng.lognormal(0.0, 0.25, size=len(sample_types))
-        singlets = rng.poisson(profiles[sample_types] * batch * depth[:, None] * 3)
+        singlets = rng.poisson(profiles[sample_types] * batch * depth[:, None] * scale)
         n = len(sample_types)
         left = rng.integers(0, n, capture["het"] + capture["hom"])
         right = np.empty_like(left)
@@ -587,22 +607,33 @@ def _synthetic_counts(
 
 
 def _build_synthetic(
-    path: Path, design: dict[str, dict[str, Any]]
+    path: Path, design: dict[str, dict[str, Any]], *, assay: str = "RNA"
 ) -> _SyntheticDoublets:
-    counts, truth, samples, types = _synthetic_counts(3, design)
-    write_count_store(str(path), {"RNA": counts}, "uint32")
+    """Write the design's counts with a graph and the cell types as clusters.
+
+    An RNA graph is built on a PCA of library-size values, and an ATAC graph
+    on an LSI of TF-IDF values.
+    """
+    counts, truth, samples, types = _synthetic_counts(3, design, peaks=assay == "ATAC")
+    write_count_store(str(path), {assay: counts}, "uint32")
     store = DataStore(
-        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=2
+        str(path), default_assay=assay, min_features_per_cell=0, nthreads=2
     )
     store.cells.insert("sample", by_cell_id(store.cells, samples))
     store.cells.insert("cell_type", by_cell_id(store.cells, types.astype(str)))
     cells = store.snapshot_cell_selection("I")
     normalized = store.features.normalize(cells, store.features.universe())
-    pca = store.reduction.pca(normalized, dims=10, local_cache=False)
-    neighbors = store.graph.neighbors(store.graph.ann_index(pca), coordinates=pca, k=10)
+    reduction = (
+        store.reduction.lsi(normalized, dims=8, local_cache=False)
+        if assay == "ATAC"
+        else store.reduction.pca(normalized, dims=10, local_cache=False)
+    )
+    neighbors = store.graph.neighbors(
+        store.graph.ann_index(reduction), coordinates=reduction, k=10
+    )
     store.graph.connectivity(neighbors)
     store.snapshot_cluster_labels("cell_type", cell_selection=cells)
-    return _SyntheticDoublets(path, truth, samples, types)
+    return _SyntheticDoublets(path, truth, samples, types, assay)
 
 
 @pytest.fixture(scope="module")
@@ -638,9 +669,9 @@ def _open_synthetic(synthetic: _SyntheticDoublets, tmp_path: Path) -> SimpleName
     target = tmp_path / "data.zarr"
     shutil.copytree(synthetic.path, target)
     store = DataStore(
-        str(target), default_assay="RNA", min_features_per_cell=0, nthreads=2
+        str(target), default_assay=synthetic.assay, min_features_per_cell=0, nthreads=2
     )
-    (graph,) = store.artifacts.list(kind="connectivity_map", from_assay="RNA")
+    (graph,) = store.artifacts.list(kind="connectivity_map", from_assay=synthetic.assay)
     (clusters,) = store.artifacts.list(kind="cluster_labels", scope="datastore")
     return SimpleNamespace(store=store, graph=graph, clusters=clusters)
 
@@ -1545,3 +1576,557 @@ def test_doublet_scores_saved_without_diagnostics_are_computed_anew(
         ),
         ~_payload(store, anew)["predicted_doublets"][:],
     )
+
+
+# ATAC doublets, projected onto an LSI by TF-IDF ------------------------------
+
+_TF_IDF = {"identity": "cytearc.assay.norm_tf_idf:selected-cell-df:total-count-tf"}
+_LSI_REDUCTION = (
+    "The graph was built on a reduction other than an LSI, but doublet scoring "
+    "of an ATAC assay projects its simulated doublets onto the graph's LSI; "
+    "build the graph on reduction.lsi"
+)
+_DOUBLET_ARRAYS = (
+    "values",
+    "raw_scores",
+    "predicted_doublets",
+    "simulated_scores",
+    "simulated_parents",
+)
+
+
+@pytest.fixture(scope="module")
+def one_capture_peaks(tmp_path_factory) -> _SyntheticDoublets:
+    """One capture of peak counts, with a graph on an LSI of TF-IDF values."""
+    path = tmp_path_factory.mktemp("one_capture_peaks") / "data.zarr"
+    return _build_synthetic(path, _ONE_CAPTURE, assay="ATAC")
+
+
+@pytest.fixture(scope="module")
+def two_captures_peaks(tmp_path_factory) -> _SyntheticDoublets:
+    """Two captures of peak counts, with a batch effect between them."""
+    path = tmp_path_factory.mktemp("two_captures_peaks") / "data.zarr"
+    return _build_synthetic(path, _TWO_CAPTURES, assay="ATAC")
+
+
+def _lsi_projection(
+    loadings: np.ndarray, idf: np.ndarray, *, renormalize_subset: bool = False
+) -> doublets.LsiDoubletProjection:
+    return doublets.LsiDoubletProjection(
+        loadings,
+        idf,
+        np.zeros((1, loadings.shape[1]), dtype=np.float32),
+        renormalize_subset=renormalize_subset,
+    )
+
+
+def test_lsi_projection_weights_summed_counts_by_tf_idf_by_hand():
+    # Three selected peaks, two LSI dimensions, and each peak's IDF.
+    loadings = np.array([[1.0, 0.0], [0.5, -1.0], [0.0, 2.0]])
+    idf = np.array([1.0, 2.0, 0.5])
+    # A doublet whose parents hold 3, 2 and 1 counts of the peaks together,
+    # and one whose parents hold none.
+    summed = csr_matrix(np.array([[3, 2, 1], [0, 0, 0]], dtype=np.uint32))
+    before = summed.copy()
+
+    # Its TF-IDF values are [3 * 1, 2 * 2, 1 * 0.5] / T, so its coordinates
+    # are [3 + 4 * 0.5, -4 + 0.5 * 2] / T = [5, -3] / T, where T is the sum
+    # of its parents' totals over every peak, here 16.
+    by_totals = _lsi_projection(loadings, idf).project(
+        summed, np.array([16.0, 0.0]), source="test"
+    )
+    np.testing.assert_allclose(by_totals, [[5 / 16, -3 / 16], [0, 0]], rtol=1e-12)
+    # Renormalized over the selected peaks, T is the doublet's own 6 counts.
+    renormalized = _lsi_projection(loadings, idf, renormalize_subset=True).project(
+        summed, None, source="test"
+    )
+    np.testing.assert_allclose(renormalized, [[5 / 6, -3 / 6], [0, 0]], rtol=1e-12)
+    # The counts are left as they were.
+    assert summed.dtype == np.uint32
+    assert (summed != before).nnz == 0
+    # A stored zero of a doublet without counts divides by 1, as a cell's
+    # zero total does, and stays at the origin.
+    stored_zero = csr_matrix(
+        (np.array([0], dtype=np.uint32), np.array([1]), np.array([0, 1])),
+        shape=(1, 3),
+    )
+    for projection, denominators in (
+        (_lsi_projection(loadings, idf), np.zeros(1)),
+        (_lsi_projection(loadings, idf, renormalize_subset=True), None),
+    ):
+        np.testing.assert_array_equal(
+            projection.project(stored_zero, denominators, source="test"), [[0, 0]]
+        )
+    with pytest.raises(ValueError, match="test needs one denominator per doublet"):
+        _lsi_projection(loadings, idf).project(summed, np.ones(3), source="test")
+
+
+@pytest.mark.parametrize(
+    ("loadings", "idf", "shape", "message"),
+    [
+        (np.ones(3), np.ones(3), (1, 1), "matrix of features by dimensions"),
+        (np.ones((3, 0)), np.ones(3), (1, 0), "matrix of features by dimensions"),
+        (np.ones((3, 2)), np.ones(2), (1, 2), "one value per LSI feature"),
+        (np.full((3, 2), np.nan), np.ones(3), (1, 2), "must be finite"),
+        (np.ones((3, 2)), np.array([1.0, np.inf, 1.0]), (1, 2), "must be finite"),
+        (np.ones((3, 2)), np.ones(3), (1, 3), "one column per LSI dimension"),
+        (np.ones((3, 2)), np.ones(3), (2,), "one column per LSI dimension"),
+    ],
+)
+def test_lsi_projection_checks_its_loadings_weights_and_coordinates(
+    loadings, idf, shape, message
+):
+    with pytest.raises(ValueError, match=message):
+        doublets.LsiDoubletProjection(
+            loadings, idf, np.zeros(shape), renormalize_subset=False
+        )
+
+
+def test_lsi_projection_holds_its_loadings_and_charges_each_doublet():
+    loadings = np.arange(12, dtype=np.float32).reshape(4, 3)
+    projection = doublets.LsiDoubletProjection(
+        loadings, np.ones(4), np.zeros((2, 3)), renormalize_subset=True
+    )
+
+    assert (projection.n_dims, projection.renormalize_subset) == (3, True)
+    # The loadings are held in float64, beside the float64 weights.
+    assert projection.loadings.dtype == np.float64
+    assert projection.resident_bytes() == 4 * 3 * 8 + 4 * 8
+    # Rows of at most 2 values give doublets of at most 4: their float64
+    # values and int64 indices and a weighted copy, and the coordinates.
+    counts = csr_matrix(np.array([[1, 0, 2, 0], [0, 3, 0, 0]]))
+    assert projection.row_bytes(counts) == 4 * (2 * 8 + 8) + 3 * 16 + 64
+    with pytest.raises(TypeError, match="renormalize_subset must be a boolean"):
+        doublets.LsiDoubletProjection(
+            loadings, np.ones(4), np.zeros((2, 3)), renormalize_subset=1
+        )
+
+
+@pytest.mark.parametrize("renormalize", [False, True], ids=["totals", "renormalized"])
+def test_lsi_projection_of_the_cells_reproduces_their_stored_lsi(
+    one_capture_peaks, tmp_path, renormalize
+):
+    from cytearc.graph.feature_projection import resolve_graph_assay_inputs
+    from cytearc.storage.feature_selection import read_feature_selection_indices
+    from cytearc.storage.selections import read_stored_selection_indices
+
+    opened = _open_synthetic(one_capture_peaks, tmp_path)
+    store = opened.store
+    graph = opened.graph
+    if renormalize:
+        # TF over 150 prevalent peaks, and IDF over the cells that are not
+        # homotypic doublets, so that neither is that of every peak or cell.
+        keep = one_capture_peaks.truth != 2
+        store.cells.insert("kept", by_cell_id(store.cells, keep))
+        cells = store.snapshot_cell_selection("kept")
+        peaks = store.features.prevalent_peaks(cells, top_n=150)
+        normalized = store.features.normalize(cells, peaks, renormalize_subset=True)
+        lsi = store.reduction.lsi(normalized, dims=8, local_cache=False)
+        graph = store.graph.connectivity(
+            store.graph.neighbors(store.graph.ann_index(lsi), coordinates=lsi, k=10)
+        )
+    lineage = resolve_graph_assay_inputs(store.zw, graph, "ATAC")
+    rows = read_stored_selection_indices(
+        store.zw,
+        lineage.cell_selection,
+        kind="cell_selection",
+        scope="datastore",
+        assay=None,
+        table_path="cellData",
+    ).astype(np.int64)
+    features = read_feature_selection_indices(
+        store.zw, "ATAC", lineage.feature_selection
+    )
+    truth = one_capture_peaks.truth
+    np.testing.assert_array_equal(
+        rows, np.flatnonzero(truth != 2) if renormalize else np.arange(len(truth))
+    )
+    assert len(features) == (150 if renormalize else 400)
+
+    projection, totals = store._lsi_doublet_projection(
+        store.ATAC, lineage, rows, features, resident_bytes=0
+    )
+
+    assert projection.renormalize_subset is renormalize
+    assert (totals is None) is renormalize
+    # The counts that the store was written with, apart from its reads.
+    counts, *_ = _synthetic_counts(3, _ONE_CAPTURE, peaks=True)
+    if totals is not None:
+        np.testing.assert_array_equal(totals, counts[rows].sum(axis=1))
+    coordinates = projection.project(
+        csr_matrix(counts[rows][:, features]), totals, source="test"
+    )
+    # The LSI holds float32 coordinates of float32 TF-IDF values.
+    stored = np.asarray(artifact_group(store.zw, lineage.reduction)["data"][:])
+    np.testing.assert_allclose(
+        coordinates, stored, rtol=0, atol=1e-6 * np.abs(stored).max()
+    )
+
+
+def test_atac_doublet_scores_count_simulated_doublets_among_exact_lsi_neighbors(
+    one_capture_peaks, tmp_path
+):
+    opened = _open_synthetic(one_capture_peaks, tmp_path)
+    store = opened.store
+    ref = store.qc.doublets(opened.clusters, opened.graph)
+    payload = _payload(store, ref)
+    (sample,) = payload.attrs["samples"]
+    k = sample["adjustedNeighbors"]
+    lsi = artifact_group(store.zw, _graph_pca(store, opened.graph))
+
+    # The doublets of the parents that the scores record, rebuilt from the
+    # written counts as TF-IDF defines them: summed counts over the parents'
+    # summed totals, times log2(1 + n / (df + 1)) of each peak among the n
+    # cells, times the LSI loadings.
+    counts, *_ = _synthetic_counts(3, _ONE_CAPTURE, peaks=True)
+    counts = counts.astype(np.float64)
+    idf = np.log2(1 + len(counts) / ((counts > 0).sum(axis=0) + 1))
+    parents = payload["simulated_parents"][:]
+    summed = counts[parents[:, 0]] + counts[parents[:, 1]]
+    simulated = (summed / summed.sum(axis=1, keepdims=True) * idf) @ lsi["loadings"][:]
+    points = np.vstack([lsi["data"][:], simulated]).astype(np.float32)
+    # Each cell's simulated doublets among its k nearest other points, by
+    # Euclidean distance.
+    values = points.astype(np.float64)
+    squared = (values**2).sum(axis=1)
+    distances = squared[:, None] + squared[None, :] - 2 * values @ values.T
+    np.fill_diagonal(distances, np.inf)
+    nearest = np.argsort(distances[: len(counts)], axis=1, kind="stable")[:, :k]
+    exact = np.count_nonzero(nearest >= len(counts), axis=1)
+
+    np.testing.assert_array_equal(np.rint(payload["raw_scores"][:] * k), exact)
+
+
+def test_atac_doublets_recover_injected_heterotypic_doublets(
+    one_capture_peaks, two_captures_peaks, tmp_path
+):
+    for synthetic, options in (
+        (one_capture_peaks, {}),
+        (two_captures_peaks, {"sample_column": "sample"}),
+    ):
+        opened = _open_synthetic(synthetic, tmp_path / synthetic.path.parent.name)
+        ref = opened.store.qc.doublets(opened.clusters, opened.graph, **options)
+
+        assert (ref.kind, ref.assay) == ("doublet_score", "ATAC")
+        _assert_recovered(
+            _payload(opened.store, ref), synthetic.truth, synthetic.samples
+        )
+
+
+def test_atac_doublet_scores_are_the_same_for_any_nthreads(
+    two_captures_peaks, tmp_path
+):
+    scored = []
+    for nthreads in (1, 4):
+        target = tmp_path / f"threads_{nthreads}" / "data.zarr"
+        shutil.copytree(two_captures_peaks.path, target)
+        store = DataStore(
+            str(target),
+            default_assay="ATAC",
+            min_features_per_cell=0,
+            nthreads=nthreads,
+        )
+        (graph,) = store.artifacts.list(kind="connectivity_map", from_assay="ATAC")
+        (clusters,) = store.artifacts.list(kind="cluster_labels", scope="datastore")
+        # Two samples, which four threads score at once.
+        ref = store.qc.doublets(clusters, graph, sample_column="sample")
+        payload = _payload(store, ref)
+        scored.append({name: payload[name][:] for name in _DOUBLET_ARRAYS})
+
+    single, parallel = scored
+    for name in _DOUBLET_ARRAYS:
+        np.testing.assert_array_equal(single[name], parallel[name])
+
+
+def test_the_lsi_doublet_graph_check_names_what_it_needs(monkeypatch):
+    from cytearc.datastore._operations import quality_control
+
+    statuses = {
+        "normalized": SimpleNamespace(
+            parameters={"normalization_method": {"external_hook": True, **_TF_IDF}}
+        ),
+        "reduction": SimpleNamespace(operation="run_lsi"),
+        "ann_index": SimpleNamespace(parameters={"ann_metric": "l2"}),
+    }
+    monkeypatch.setattr(
+        quality_control, "inspect_artifact", lambda _root, ref: statuses[ref]
+    )
+    lineage = SimpleNamespace(
+        normalized="normalized", reduction="reduction", ann_index="ann_index"
+    )
+
+    def refusal() -> str:
+        with pytest.raises(ValueError) as caught:
+            quality_control._require_lsi_doublet_graph(None, lineage)
+        return str(caught.value)
+
+    # TF-IDF passes, recorded with or without its external_hook key.
+    quality_control._require_lsi_doublet_graph(None, lineage)
+    statuses["normalized"].parameters = {"normalization_method": _TF_IDF}
+    quality_control._require_lsi_doublet_graph(None, lineage)
+    # A cosine index, or one that records no metric, is refused last.
+    statuses["ann_index"].parameters = {"ann_metric": "cosine"}
+    assert refusal() == (
+        "The graph's ANN index measures 'cosine' distances, but doublet scoring "
+        "of an ATAC assay scores cells by Euclidean distances in the LSI; build "
+        "the ANN index with ann_metric='l2' and the graph on it"
+    )
+    statuses["ann_index"].parameters = None
+    assert refusal().startswith("The graph's ANN index measures None distances")
+    # A reduction other than an LSI is refused before the index.
+    statuses["reduction"].operation = "run_pca"
+    assert refusal() == _LSI_REDUCTION
+    # The normalizer is checked first and named as provenance records it.
+    statuses["normalized"].parameters = {
+        "normalization_method": {
+            "external_hook": True,
+            "identity": "cytearc.assay.norm_clr:feature-axis",
+        }
+    }
+    assert refusal() == (
+        "The graph was built on values normalized with "
+        "cytearc.assay.norm_clr:feature-axis, but doublet scoring of an ATAC "
+        "assay weights its simulated doublets by TF-IDF and needs a graph of "
+        "norm_tf_idf values; normalize with cytearc.assay.norm_tf_idf and build "
+        "the LSI and graph again"
+    )
+    statuses["normalized"].parameters = None
+    assert refusal().startswith("The graph was built on values normalized with None")
+    # An explicit error, not an assertion, so it holds under python -O.
+    for incomplete in (
+        SimpleNamespace(normalized="normalized", reduction=None),
+        SimpleNamespace(normalized=None, reduction="reduction"),
+    ):
+        lineage = incomplete
+        assert refusal() == (
+            "Doublet scoring of an ATAC assay projects its simulated doublets "
+            "onto the LSI of the graph's normalized values, but the graph's "
+            "lineage names no LSI or no normalized values; build the graph on "
+            "reduction.lsi"
+        )
+
+
+@pytest.mark.slow
+def test_atac_doublets_refuse_a_graph_whose_lsi_they_cannot_project_onto(
+    two_captures_peaks, tmp_path
+):
+    opened = _open_synthetic(two_captures_peaks, tmp_path)
+    store = opened.store
+    cells = store.snapshot_cell_selection("I")
+    peaks = store.features.universe()
+
+    def graph_on(coordinates: ArtifactRef, **index: Any) -> ArtifactRef:
+        ann_index = store.graph.ann_index(coordinates, **index)
+        return store.graph.connectivity(
+            store.graph.neighbors(ann_index, coordinates=coordinates, k=10)
+        )
+
+    def lsi(normalized: ArtifactRef) -> ArtifactRef:
+        return store.reduction.lsi(normalized, dims=8, local_cache=False)
+
+    tf_idf = store.features.normalize(cells, peaks)
+    store.ATAC.normMethod = norm_clr
+    clr = store.features.normalize(cells, peaks)
+    store.ATAC.normMethod = norm_tf_idf
+    loadings = np.random.default_rng(0).normal(size=(int(store.ATAC.feats.N), 8))
+    cases = [
+        (
+            graph_on(lsi(clr)),
+            {},
+            "The graph was built on values normalized with "
+            "cytearc.assay.norm_clr:feature-axis, but doublet scoring of an ATAC "
+            "assay weights its simulated doublets by TF-IDF and needs a graph of "
+            "norm_tf_idf values; normalize with cytearc.assay.norm_tf_idf and "
+            "build the LSI and graph again",
+        ),
+        (
+            graph_on(store.reduction.pca(tf_idf, dims=8, local_cache=False)),
+            {},
+            _LSI_REDUCTION,
+        ),
+        (graph_on(store.reduction.custom(loadings, tf_idf)), {}, _LSI_REDUCTION),
+        (
+            graph_on(lsi(tf_idf), ann_metric="cosine"),
+            {},
+            "The graph's ANN index measures 'cosine' distances, but doublet "
+            "scoring of an ATAC assay scores cells by Euclidean distances in the "
+            "LSI; build the ANN index with ann_metric='l2' and the graph on it",
+        ),
+        (graph_on(tf_idf), {}, "Doublet detection requires an uncorrected LSI graph"),
+        (
+            graph_on(store.reduction.harmony(lsi(tf_idf), ["sample"])),
+            {},
+            "Doublet detection on a batch-corrected graph needs sample_column, the "
+            "column of each cell's capture: doublets are then simulated and scored "
+            "within each sample, on the LSI that the correction started from. To "
+            "score every cell together, pass an uncorrected LSI graph",
+        ),
+        # A Harmony graph is scored on the LSI that it corrected.
+        (
+            graph_on(store.reduction.harmony(lsi(clr), ["sample"])),
+            {"sample_column": "sample"},
+            "The graph was built on values normalized with "
+            "cytearc.assay.norm_clr:feature-axis",
+        ),
+    ]
+    before = store.artifacts.list(kind="doublet_score", from_assay="ATAC")
+
+    for graph, options, message in cases:
+        with pytest.raises(ValueError) as caught:
+            store.qc.doublets(opened.clusters, graph, **options)
+        assert str(caught.value).startswith(message)
+
+    # Nothing was planned or written, and the LSI graph of TF-IDF values
+    # still scores.
+    assert store.artifacts.list(kind="doublet_score", from_assay="ATAC") == before
+    assert store.qc.doublets(opened.clusters, opened.graph).kind == "doublet_score"
+
+
+def test_a_harmony_graph_scores_each_sample_on_the_lsi_it_corrected(
+    two_captures_peaks, tmp_path
+):
+    opened = _open_synthetic(two_captures_peaks, tmp_path)
+    store = opened.store
+    correction = store.reduction.harmony(_graph_pca(store, opened.graph), ["sample"])
+    corrected = store.graph.connectivity(
+        store.graph.neighbors(
+            store.graph.ann_index(correction), coordinates=correction, k=10
+        )
+    )
+
+    ref = store.qc.doublets(opened.clusters, corrected, sample_column="sample")
+    uncorrected = store.qc.doublets(
+        opened.clusters, opened.graph, sample_column="sample"
+    )
+
+    assert ref != uncorrected
+    for name in _DOUBLET_ARRAYS:
+        np.testing.assert_array_equal(
+            _payload(store, ref)[name][:], _payload(store, uncorrected)[name][:]
+        )
+
+
+def test_doublets_refuse_an_assay_that_is_neither_rna_nor_atac(tmp_path):
+    counts, _truth, _samples, types = _synthetic_counts(3, _SMALL_CAPTURES)
+    path = tmp_path / "data.zarr"
+    write_count_store(str(path), {"ADT": counts[:, :20]}, "uint32")
+    store = DataStore(str(path), default_assay="ADT", min_features_per_cell=0)
+    store.cells.insert("cell_type", by_cell_id(store.cells, types.astype(str)))
+    cells = store.snapshot_cell_selection("I")
+    normalized = store.features.normalize(cells, store.features.universe())
+    pca = store.reduction.pca(normalized, dims=5, local_cache=False)
+    graph = store.graph.connectivity(
+        store.graph.neighbors(store.graph.ann_index(pca), coordinates=pca, k=10)
+    )
+    clusters = store.snapshot_cluster_labels("cell_type", cell_selection=cells)
+
+    with pytest.raises(TypeError) as caught:
+        store.qc.doublets(clusters, graph)
+
+    assert str(caught.value) == (
+        "Doublet detection is only supported for RNA and ATAC assays; received ADTassay"
+    )
+    assert store.artifacts.list(kind="doublet_score", from_assay="ADT") == []
+
+
+@pytest.mark.slow
+def test_atac_doublets_of_an_integrated_graph_score_its_atac_lsi(tmp_path):
+    rna, _truth, _samples, types = _synthetic_counts(3, _SMALL_CAPTURES)
+    peaks, *_ = _synthetic_counts(3, _SMALL_CAPTURES, peaks=True)
+    path = tmp_path / "data.zarr"
+    write_count_store(str(path), {"RNA": rna, "ATAC": peaks}, "uint32")
+    store = DataStore(
+        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=2
+    )
+    store.cells.insert("cell_type", by_cell_id(store.cells, types.astype(str)))
+    cells = store.snapshot_cell_selection("I")
+
+    def graph(assay: str, reduction: str) -> tuple[ArtifactRef, ArtifactRef]:
+        normalized = store.features.normalize(
+            cells, store.features.universe(from_assay=assay)
+        )
+        reduce = getattr(store.reduction, reduction)
+        coordinates = reduce(normalized, dims=8, local_cache=False)
+        neighbors = store.graph.neighbors(
+            store.graph.ann_index(coordinates), coordinates=coordinates, k=10
+        )
+        return neighbors, store.graph.connectivity(neighbors)
+
+    rna_neighbors, rna_graph = graph("RNA", "pca")
+    atac_neighbors, atac_graph = graph("ATAC", "lsi")
+    _neighbors, atac_pca_graph = graph("ATAC", "pca")
+    clusters = store.snapshot_cluster_labels("cell_type", cell_selection=cells)
+    wnn = store.integration.modalities([rna_neighbors, atac_neighbors])
+
+    # Without smoothing, the scores read only the ATAC branch of the graph.
+    integrated = store.qc.doublets(clusters, wnn, from_assay="ATAC")
+    native = store.qc.doublets(clusters, atac_graph)
+
+    assert integrated != native and integrated.assay == "ATAC"
+    for name in _DOUBLET_ARRAYS:
+        np.testing.assert_array_equal(
+            _payload(store, integrated)[name][:], _payload(store, native)[name][:]
+        )
+    # The RNA branch of the same graph is scored on its PCA, as before.
+    assert store.qc.doublets(clusters, wnn, from_assay="RNA").assay == "RNA"
+    # An integrated graph whose ATAC branch has no LSI is refused.
+    snn = store.integration.modalities([rna_graph, atac_pca_graph], method="snn")
+    with pytest.raises(ValueError) as caught:
+        store.qc.doublets(clusters, snn, from_assay="ATAC")
+    assert str(caught.value) == _LSI_REDUCTION
+
+
+@pytest.mark.slow  # Two ATAC runs of the 500-cell PBMC fixture and a planted copy.
+def test_atac_doublets_rank_planted_doublets_of_distinct_types_above_singlets(
+    tmp_path,
+):
+    # The fixture's cells, their clusters and LSI, from a default run.
+    source = tmp_path / "source"
+    with tarfile.open(full_path("500_pbmc_atac.zarr.tar.gz"), "r:gz") as archive:
+        archive.extractall(source, filter="data")
+    store = DataStore(str(source))
+    run = store.pipeline.atac(label="cells", umap=False, markers=False)
+    rows = np.flatnonzero(run.cells.fetch_all("I"))
+    names, code = np.unique(
+        np.asarray(run.cells.fetch("clusters")), return_inverse=True
+    )
+    lsi = np.asarray(store.artifacts.load(run["lsi"])["data"][:], dtype=np.float64)
+    counts = store.ATAC.rawData[rows, :].compute(nthreads=1, msg="Reading counts")
+    # Clusters whose LSI centroids lie farther apart than the median pair are
+    # distinct types; a doublet of two such cells is one that simulated
+    # doublets can stand for.
+    centroids = np.array(
+        [lsi[code == index].mean(axis=0) for index in range(len(names))]
+    )
+    apart = np.linalg.norm(centroids[:, None] - centroids[None], axis=2)
+    distinct = apart > np.median(apart[np.triu_indices(len(names), 1)])
+    rng = np.random.default_rng(0)
+    first = rng.choice(np.flatnonzero(distinct[code].any(axis=1)), 60, replace=False)
+    second = [rng.choice(np.flatnonzero(distinct[code[cell]][code])) for cell in first]
+    # 30 doublets hold both cells' fragments and 30 half of them, as many as
+    # a singlet holds.
+    summed = counts[first].astype(np.int64) + counts[second]
+    planted = np.vstack([summed[:30], rng.binomial(summed[30:], 0.5)])
+    truth = np.repeat([0, 1, 2], [len(rows), 30, 30])
+    location = tmp_path / "planted.zarr"
+    write_count_store(str(location), {"ATAC": np.vstack([counts, planted])}, "uint32")
+    planted_store = DataStore(str(location), min_features_per_cell=0)
+
+    planted_run = planted_store.pipeline.atac(
+        label="planted", filtering=False, umap=False, markers=False, doublets=True
+    )
+
+    scores = np.asarray(planted_run.cells.fetch("doublet_score"))
+    features = np.asarray(planted_store.cells.fetch_all("ATAC_nFeatures"))
+
+    def auroc(values: np.ndarray, kinds: tuple[int, ...]) -> float:
+        keep = np.isin(truth, (0, *kinds))
+        return float(roc_auc_score(truth[keep] > 0, values[keep]))
+
+    # The score ranks the planted doublets above the singlets, and above
+    # what their detected peaks do, also those at a singlet's depth, whose
+    # peaks barely set them apart.
+    assert auroc(scores, (1, 2)) > 0.9
+    assert auroc(scores, (2,)) > 0.9
+    assert auroc(scores, (1, 2)) > auroc(features, (1, 2)) + 0.05
+    assert auroc(scores, (2,)) > auroc(features, (2,)) + 0.1

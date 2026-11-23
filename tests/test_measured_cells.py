@@ -285,6 +285,7 @@ _ATAC: dict[str, Any] = {
     "leiden": False,
     "paris": False,
     "membership_strength": False,
+    "doublets": False,
     "markers": False,
     "snapshot_columns": (),
     "species": None,

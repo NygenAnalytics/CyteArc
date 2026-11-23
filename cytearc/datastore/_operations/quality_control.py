@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import numpy as np
 import pandas as pd
 
-from ...assay import ATACassay, RNAassay, norm_lib_size
+from ...assay import ATACassay, RNAassay, norm_lib_size, norm_tf_idf
 from ...assay.feature_summary import (
     ensure_feature_summary,
     feature_summary_selected_count,
@@ -112,7 +112,7 @@ from ...utils.logging import logger
 from .cell_samples import read_cell_samples, require_cell_column
 
 if TYPE_CHECKING:
-    from ...quality_control.doublets import DoubletSampleResult
+    from ...quality_control.doublets import DoubletSampleResult, LsiDoubletProjection
     from ..mapping_datastore import MappingDatastore as _QualityControlOperationsBase
 else:
     _QualityControlOperationsBase = object
@@ -136,6 +136,22 @@ def _normalizer_text(identity: object) -> str:
     return quoted_value(identity)
 
 
+def _recorded_normalizer(root: Any, normalized: ArtifactRef) -> object:
+    """Return the identity of the normalizer that produced ``normalized``.
+
+    Provenance adds ``external_hook`` to the identity of every normalizer that
+    a call hands in, so it is left out for the comparison.
+    """
+    identity = (inspect_artifact(root, normalized).parameters or {}).get(
+        "normalization_method"
+    )
+    if isinstance(identity, Mapping):
+        identity = {
+            key: value for key, value in identity.items() if key != "external_hook"
+        }
+    return identity
+
+
 def _require_doublet_graph(root: Any, lineage: NativeGraphInputs) -> None:
     """Refuse a graph whose PCA doublet scoring cannot project its doublets onto.
 
@@ -151,13 +167,7 @@ def _require_doublet_graph(root: Any, lineage: NativeGraphInputs) -> None:
             "the graph's normalized values, but the graph's lineage names no "
             "PCA or no normalized values; build the graph on reduction.pca"
         )
-    identity = (inspect_artifact(root, lineage.normalized).parameters or {}).get(
-        "normalization_method"
-    )
-    if isinstance(identity, Mapping):
-        identity = {
-            key: value for key, value in identity.items() if key != "external_hook"
-        }
+    identity = _recorded_normalizer(root, lineage.normalized)
     if identity != callable_identity(norm_lib_size):
         raise ValueError(
             "The graph was built on values normalized with "
@@ -179,6 +189,49 @@ def _require_doublet_graph(root: Any, lineage: NativeGraphInputs) -> None:
             "doublet scoring projects its simulated doublets onto the PCA "
             "through a mapping reference, which needs feature scaling; fit the "
             "PCA again with feat_scaling=True and build the graph on it"
+        )
+
+
+def _require_lsi_doublet_graph(root: Any, lineage: NativeGraphInputs) -> None:
+    """Refuse a graph whose LSI ATAC doublet scoring cannot project its doublets onto.
+
+    Doublet scoring weights the counts of the simulated doublets of an ATAC
+    assay by TF-IDF and multiplies them by the loadings of the graph's LSI,
+    so the LSI must be fitted on values that ``norm_tf_idf`` normalized. The
+    graph's index must measure Euclidean distances, on which the scores are
+    validated. The normalizer is checked first, as for a PCA graph.
+    """
+    if lineage.reduction is None or lineage.normalized is None:
+        raise ValueError(
+            "Doublet scoring of an ATAC assay projects its simulated doublets "
+            "onto the LSI of the graph's normalized values, but the graph's "
+            "lineage names no LSI or no normalized values; build the graph on "
+            "reduction.lsi"
+        )
+    identity = _recorded_normalizer(root, lineage.normalized)
+    if identity != callable_identity(norm_tf_idf):
+        raise ValueError(
+            "The graph was built on values normalized with "
+            f"{_normalizer_text(identity)}, but doublet scoring of an ATAC assay "
+            "weights its simulated doublets by TF-IDF and needs a graph of "
+            "norm_tf_idf values; normalize with cytearc.assay.norm_tf_idf and "
+            "build the LSI and graph again"
+        )
+    if inspect_artifact(root, lineage.reduction).operation != "run_lsi":
+        raise ValueError(
+            "The graph was built on a reduction other than an LSI, but doublet "
+            "scoring of an ATAC assay projects its simulated doublets onto the "
+            "graph's LSI; build the graph on reduction.lsi"
+        )
+    metric = (inspect_artifact(root, lineage.ann_index).parameters or {}).get(
+        "ann_metric"
+    )
+    if metric != "l2":
+        raise ValueError(
+            f"The graph's ANN index measures {quoted_value(metric)} distances, "
+            "but doublet scoring of an ATAC assay scores cells by Euclidean "
+            "distances in the LSI; build the ANN index with ann_metric='l2' "
+            "and the graph on it"
         )
 
 
@@ -1856,10 +1909,61 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         _warn_hto_identity(self.zw, arguments, planned.ref, positive_quantile)
         return planned.ref
 
+    def _lsi_doublet_projection(
+        self,
+        assay: ATACassay,
+        lineage: NativeGraphInputs,
+        active_idx: np.ndarray,
+        feature_indices: np.ndarray,
+        *,
+        resident_bytes: int,
+    ) -> tuple["LsiDoubletProjection", np.ndarray | None]:
+        """Return the TF-IDF projection onto a graph's LSI, and its cells' totals.
+
+        Each peak's inverse document frequency is the one that the LSI's
+        normalization applied: from the graph's cells with counts of the
+        peak, counted in one pass over their counts of the LSI's peaks while
+        ``resident_bytes`` stay held. The totals are each cell's total counts,
+        or None when the normalization renormalized over the selected peaks,
+        so that each doublet's term frequencies divide by its own total of
+        them.
+        """
+        from ...assay.normalization import (
+            inverse_document_frequency,
+            stream_document_frequency,
+        )
+        from ...quality_control.doublets import LsiDoubletProjection
+
+        # _require_lsi_doublet_graph checked that the lineage names both.
+        assert lineage.reduction is not None and lineage.normalized is not None
+        renormalize = bool_argument(
+            (inspect_artifact(self.zw, lineage.normalized).parameters or {}).get(
+                "renormalize_subset"
+            ),
+            "renormalize_subset",
+        )
+        document_frequency, _ = stream_document_frequency(
+            assay.rawData[:, feature_indices][active_idx, :],
+            memory_bytes=int(self.resources.memoryBytes),
+            nthreads=self.nthreads,
+            msg=f"({assay.name}) Counting the cells of each peak for doublet scoring",
+            operation="Doublet detection",
+            resident_bytes=resident_bytes,
+        )
+        group = artifact_group(self.zw, lineage.reduction)
+        projection = LsiDoubletProjection(
+            as_zarr_array(group["loadings"], name="loadings")[:],
+            inverse_document_frequency(len(active_idx), document_frequency),
+            as_zarr_array(group["data"], name="data"),
+            renormalize_subset=renormalize,
+        )
+        totals = None if renormalize else assay._cell_count_totals(active_idx)
+        return projection, totals
+
     def _run_doublet_detection_artifact(
         self,
         *,
-        source_assay: RNAassay,
+        source_assay: RNAassay | ATACassay,
         cell_selection: ArtifactRef,
         clusters: ArtifactRef,
         cluster_values: np.ndarray,
@@ -1882,6 +1986,11 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
     ) -> ArtifactRef:
         """Create doublet scores and calls without creating metadata columns.
 
+        The simulated doublets of an RNA assay are projected onto the graph's
+        PCA through a mapping reference, and those of an ATAC assay onto its
+        LSI by TF-IDF weights, with each peak's document frequency counted
+        once over the graph's cells and peaks.
+
         ``sample_column`` names one cell metadata column, or several, and
         ``sample_labels`` holds their labels for the selected cells, one array
         per column: the cells that share every label form one sample.
@@ -1891,6 +2000,8 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         """
         from ...quality_control.doublets import (
             DoubletIndexSettings,
+            DoubletProjection,
+            PcaDoubletProjection,
             doublet_settings,
             minmax_doublet_scores,
             plan_doublet_samples,
@@ -1947,20 +2058,27 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         )
         neighbors = lineage.neighbors
         coordinates = lineage.coordinates
+        atac = isinstance(source_assay, ATACassay)
+        reduction_name = "LSI" if atac else "PCA"
         if coordinates.kind == "batch_correction":
             # Within one sample there is no batch to correct, so samples are
-            # scored on the PCA that the correction started from.
+            # scored on the reduction that the correction started from.
             if not columns:
                 raise ValueError(
                     "Doublet detection on a batch-corrected graph needs "
                     "sample_column, the column of each cell's capture: doublets "
                     "are then simulated and scored within each sample, on the "
-                    "PCA that the correction started from. To score every cell "
-                    "together, pass an uncorrected PCA graph"
+                    f"{reduction_name} that the correction started from. To score "
+                    f"every cell together, pass an uncorrected {reduction_name} graph"
                 )
         elif coordinates.kind != "reduction":
-            raise ValueError("Doublet detection requires an uncorrected PCA graph")
-        _require_doublet_graph(self.zw, lineage)
+            raise ValueError(
+                f"Doublet detection requires an uncorrected {reduction_name} graph"
+            )
+        if atac:
+            _require_lsi_doublet_graph(self.zw, lineage)
+        else:
+            _require_doublet_graph(self.zw, lineage)
         active_idx = read_stored_selection_indices(
             self.zw,
             cell_selection,
@@ -2055,43 +2173,71 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         feature_selection = lineage.feature_selection
         # A reduction's lineage always names its normalized feature selection.
         assert feature_selection is not None
-        reference_ref = self._mapping_build_reference(neighbors)
-        reference = self._mapping_load_reference(reference_ref)
-
-        feature_indices = read_feature_selection_indices(
-            self.zw,
-            assay_name,
-            feature_selection,
-        )
-        feature_ids = read_metadata_rows_chunkwise(
-            source_assay.feats,
-            "ids",
-            feature_indices,
-        )
-        if not np.array_equal(
-            np.asarray(feature_ids).astype(str), reference.feature_ids
-        ):
-            raise ValueError(
-                "Doublet features do not match the mapping reference order"
+        projection: DoubletProjection
+        if isinstance(source_assay, ATACassay):
+            feature_indices = read_feature_selection_indices(
+                self.zw,
+                assay_name,
+                feature_selection,
             )
+            # The features are kept by their row positions alone.
+            feature_bytes = feature_indices.nbytes
+            projection, totals = self._lsi_doublet_projection(
+                source_assay,
+                lineage,
+                active_idx,
+                feature_indices,
+                resident_bytes=active_idx.nbytes
+                + labels.nbytes
+                + codes.nbytes
+                + feature_bytes,
+            )
+            # The graph's index measures Euclidean distances, which
+            # _require_lsi_doublet_graph checked.
+            ann = self._artifacts_inspect(lineage.ann_index).parameters or {}
+            metric = "l2"
+        else:
+            reference_ref = self._mapping_build_reference(neighbors)
+            reference = self._mapping_load_reference(reference_ref)
+
+            feature_indices = read_feature_selection_indices(
+                self.zw,
+                assay_name,
+                feature_selection,
+            )
+            feature_ids = read_metadata_rows_chunkwise(
+                source_assay.feats,
+                "ids",
+                feature_indices,
+            )
+            if not np.array_equal(
+                np.asarray(feature_ids).astype(str), reference.feature_ids
+            ):
+                raise ValueError(
+                    "Doublet features do not match the mapping reference order"
+                )
+            feature_bytes = feature_ids.nbytes + feature_indices.nbytes
+            ann = self._artifacts_inspect(reference.ann_index).parameters or {}
+            metric = reference.ann_metric
+            totals = (
+                None
+                if reference.normalization_parameters["renormalize_subset"]
+                else source_assay._cell_count_totals(active_idx)
+            )
+            projection = PcaDoubletProjection(reference)
+            del reference
         # Each sample's index follows the settings of the graph's ANN index,
         # which records every one of them.
-        ann = self._artifacts_inspect(reference.ann_index).parameters or {}
         index = DoubletIndexSettings(
-            metric=reference.ann_metric,
+            metric=metric,
             m=ann["ann_m"],
             ef_construction=ann["ann_efc"],
             ef=ann["ann_ef"],
             parallel=ann["ann_parallel"],
         )
-        totals = (
-            None
-            if reference.normalization_parameters["renormalize_subset"]
-            else source_assay._cell_count_totals(active_idx)
-        )
         result = score_synthetic_doublets(
             source_assay,
-            reference,
+            projection,
             active_idx,
             labels,
             codes,
@@ -2108,7 +2254,7 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             random_seed=settings.random_seed,
             resources=self.resources,
         )
-        del reference
+        del projection
         if result.scores.shape != (n_active,):
             raise RuntimeError("Doublet scores do not match the selected cells")
         # A sample whose parents share one cluster label pairs any two of its
@@ -2140,8 +2286,7 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
                 + 3 * result.scores.nbytes
                 + result.simulated_scores.nbytes
                 + result.simulated_parents.nbytes
-                + feature_ids.nbytes
-                + feature_indices.nbytes,
+                + feature_bytes,
                 requested=1,
             )
             graph = self._load_graph_artifact(
@@ -2210,17 +2355,19 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         Doublets are simulated by adding the counts of two cells of one
         sample, every cell of the sample by default, so their cell types are
         as common as in the sample. They are normalized like the graph's
-        cells and projected onto its PCA. Every cell and simulated doublet is
-        then scored on its ``k`` nearest neighbors among the cells and
-        simulated doublets of its own sample, with ``k = round(save_k * (1 +
-        r))`` for ``r`` simulated doublets per cell: the score is the
-        probability that the cell is a doublet given the fraction of
-        simulated doublets among those neighbors and ``expected_doublet_rate``,
-        Scrublet's doublet score (Wolock, Lopez and Klein, 2019). A cell is a
-        predicted doublet when its score is above its sample's threshold:
-        ``threshold``, or the minimum between the two modes of the sample's
-        simulated-doublet scores (Otsu's threshold when they are not
-        bimodal).
+        cells and projected onto its reduction: the PCA of an RNA assay, or
+        the LSI of an ATAC assay, whose doublets are weighted by TF-IDF with
+        each peak's document frequency among the graph's cells. Every cell
+        and simulated doublet is then scored on its ``k`` nearest neighbors
+        among the cells and simulated doublets of its own sample, with ``k =
+        round(save_k * (1 + r))`` for ``r`` simulated doublets per cell: the
+        score is the probability that the cell is a doublet given the
+        fraction of simulated doublets among those neighbors and
+        ``expected_doublet_rate``, Scrublet's doublet score (Wolock, Lopez
+        and Klein, 2019). A cell is a predicted doublet when its score is
+        above its sample's threshold: ``threshold``, or the minimum between
+        the two modes of the sample's simulated-doublet scores (Otsu's
+        threshold when they are not bimodal).
 
         Samples are scored at once on the store's workers, as many as the
         memory budget holds, and each sample's index is built on one thread
@@ -2254,12 +2401,15 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             clusters: Cluster labels over the graph's cell selection. They
                 matter only with ``heterotypic_fraction`` above 0 or a parent
                 pool smaller than every cell.
-            graph: A connectivity map built on a PCA with feature scaling of
-                values that ``norm_lib_size`` normalized, since the simulated
-                doublets are normalized by library size and projected onto
-                that PCA. A map built on a Harmony correction of one needs
+            graph: For an RNA assay, a connectivity map built on a PCA with
+                feature scaling of values that ``norm_lib_size`` normalized,
+                since the simulated doublets are normalized by library size
+                and projected onto that PCA. For an ATAC assay, a map built
+                on an LSI of values that ``norm_tf_idf`` normalized, with an
+                index of Euclidean distances (``ann_metric='l2'``). A map
+                built on a Harmony correction of either needs
                 ``sample_column``.
-            from_assay: The RNA assay of the graph; required for an
+            from_assay: The RNA or ATAC assay of the graph; required for an
                 integrated graph.
             cluster_sample_fraction: The fraction of each cluster of a sample
                 that may parent doublets, drawn at random.
@@ -2296,10 +2446,15 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             A complete assay-scoped ``doublet_score`` artifact.
 
         Raises:
-            ValueError: If ``graph`` was built on values of a normalizer other
-                than ``norm_lib_size``, such as Pearson residuals, or on a PCA
-                without feature scaling, which is checked before anything is
-                planned. Also if ``heterotypic_fraction`` is above 0 with one
+            TypeError: If the graph's assay is neither an RNA nor an ATAC
+                assay.
+            ValueError: If the graph of an RNA assay was built on values of a
+                normalizer other than ``norm_lib_size``, such as Pearson
+                residuals, or on a PCA without feature scaling, or the graph
+                of an ATAC assay on values of a normalizer other than
+                ``norm_tf_idf``, on a reduction other than an LSI, or with a
+                cosine index, which is checked before anything is planned.
+                Also if ``heterotypic_fraction`` is above 0 with one
                 cluster, a sample has fewer than two cells or a missing
                 label, or an argument is out of range.
             UnmeasuredCellsError: If the assay did not measure a cell of the graph.
@@ -2340,9 +2495,9 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             assay=None,
             table_path="cellData",
         )
-        if not isinstance(assay, RNAassay):
+        if not isinstance(assay, RNAassay | ATACassay):
             raise TypeError(
-                "Doublet detection is only supported for RNA assays; "
+                "Doublet detection is only supported for RNA and ATAC assays; "
                 f"received {type(assay).__name__}"
             )
         self._require_measured_cells(

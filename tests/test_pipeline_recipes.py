@@ -128,6 +128,7 @@ ATAC_STAGES = [
     "cluster_selection",
     "membership_strength",
     "tsne",
+    "doublets",
     "markers",
 ]
 ADT_STAGES = [
@@ -369,6 +370,14 @@ def atac(tmp_path_factory) -> SimpleNamespace:
 
 
 @pytest.fixture(scope="module")
+def atac_doublets(atac: SimpleNamespace) -> PipelineRun:
+    """The ATAC run's settings with doublet scoring, which reuses its other stages."""
+    return atac.datastore.pipeline.atac(
+        label="atac_doublets", doublets=True, **ATAC_SETTINGS
+    )
+
+
+@pytest.fixture(scope="module")
 def atac_harmony(atac: SimpleNamespace) -> PipelineRun:
     """The ATAC run's settings with Harmony over a batch column of the store."""
     datastore = atac.datastore
@@ -466,6 +475,7 @@ def test_atac_runs_its_stages_in_order_and_records_its_recipe(atac) -> None:
         "paris",
         "membership_strength",
         "tsne",
+        "doublets",
         "markers",
     }
     assert _statuses(run) == {
@@ -490,10 +500,55 @@ def test_atac_runs_its_stages_in_order_and_records_its_recipe(atac) -> None:
     assert stages["prevalent_peaks"] == {"top_n": 2000}
     assert stages["lsi"] == {"dims": 6}
     assert stages["filtering"]["attrs"] == ["ATAC_nCounts", "ATAC_nFeatures"]
+    # Doublet scoring is off unless the call turns it on.
+    assert stages["doublets"] is False
+    assert report["run"]["config"]["doubletSampleColumns"] == []
     lsi = atac.datastore.artifacts.inspect(run["lsi"])
     assert (run["lsi"].kind, lsi.operation) == ("reduction", "run_lsi")
     cells = int(run.cells.fetch_all("I").sum())
     assert atac.datastore.artifacts.load(run["lsi"])["data"].shape == (cells, 6)
+
+
+def test_atac_scores_the_doublets_of_its_saved_clustering(atac, atac_doublets) -> None:
+    datastore, base, run = atac.datastore, atac.run, atac_doublets
+
+    # The run computes the doublet stage alone and reuses every other one.
+    assert set(run) == {*base, "doublets"}
+    assert all(run[key] == base[key] for key in base)
+    assert {
+        stage for stage, status in _statuses(run).items() if status == "completed"
+    } == {
+        stage for stage, status in _statuses(base).items() if status == "completed"
+    } | {"doublets"}
+    ref = run["doublets"]
+    status = datastore.artifacts.inspect(ref)
+    assert (ref.kind, ref.assay, status.operation) == (
+        "doublet_score",
+        "ATAC",
+        "run_doublet_detection",
+    )
+    # It scores the saved clustering on the run's graph, at the defaults of
+    # qc.doublets, in one sample.
+    assert status.input_ref("clusters") == base["clusters"]
+    assert status.input_ref("connectivity_map") == base["connectivity_map"]
+    assert status.input_ref("neighbors") == base["neighbors"]
+    assert (status.parameters["simulation_ratio"], status.parameters["save_k"]) == (
+        2.0,
+        30,
+    )
+    config = _config(run)
+    assert (config["stages"]["doublets"], config["doubletSampleColumns"]) == ({}, [])
+    # The run freezes the scores and calls as its doublet fields.
+    payload = datastore.artifacts.load(ref)
+    np.testing.assert_array_equal(
+        run.cells.fetch("doublet_score"), payload["values"][:]
+    )
+    calls = payload["predicted_doublets"][:]
+    np.testing.assert_array_equal(run.cells.fetch("predicted_doublet"), calls)
+    summary = _stages(run)["doublets"]["summary"]
+    cells = int(run.cells.fetch_all("I").sum())
+    assert summary["predictedDoublets"] == int(calls.sum())
+    assert [sample["cells"] for sample in summary["samples"]] == [cells]
 
 
 def test_atac_records_its_prevalent_peaks_as_a_feature_field(atac) -> None:
@@ -651,6 +706,55 @@ def test_atac_settings_are_checked_before_the_run(atac) -> None:
             with pytest.raises(error) as caught:
                 call()
             assert str(caught.value) == expected
+    # Doublet scoring weights its simulated doublets by TF-IDF and scores
+    # them by Euclidean distances, so a run of other values or of a cosine
+    # index refuses it, as it refuses what qc.doublets refuses.
+    for settings, message in (
+        (
+            {"doublets": True, "normalization": {"method": "clr"}},
+            "The run normalizes assay 'ATAC' with clr, but doublet scoring "
+            "weights its simulated doublets by TF-IDF and needs tf_idf; pass "
+            "normalization={'method': 'tf_idf'} or doublets=False",
+        ),
+        (
+            {"doublets": True, "ann_index": {"ann_metric": "cosine"}},
+            "ann_index={'ann_metric': 'cosine'} builds the graph on cosine "
+            "distances, but doublet scoring of an ATAC assay scores cells by "
+            "Euclidean distances in the LSI; pass ann_index={'ann_metric': 'l2'} "
+            "or doublets=False",
+        ),
+        (
+            {"doublets": {"simulation_ratio": 0}},
+            "doublets: simulation_ratio must be a finite number > 0",
+        ),
+        (
+            {"doublets": True, "leiden": False, "markers": False},
+            "doublets require at least one Leiden candidate",
+        ),
+        (
+            {"doublets": True, "leiden": False},
+            "doublets and markers require at least one Leiden candidate",
+        ),
+        (
+            {
+                "doublets": {"sample_column": None},
+                "harmony": {"batch_columns": ["names"]},
+            },
+            "A run with Harmony scores doublets within each sample on the "
+            "uncorrected LSI, so doublets['sample_column'] cannot be None; set it "
+            "to the column of each cell's capture, or omit it to use the Harmony "
+            "batch columns",
+        ),
+    ):
+        for call in (
+            lambda: pipeline.plan("atac", **settings),
+            lambda: pipeline.atac(**settings),
+        ):
+            with pytest.raises(ValueError) as caught:
+                call()
+            assert str(caught.value) == message
+    with pytest.raises(KeyError, match="Doublet sample column 'missing' was not found"):
+        pipeline.atac(doublets={"sample_column": "missing"})
     assert _run_ids(atac.datastore) == before
 
     # At the limits, the settings resolve.
@@ -685,6 +789,32 @@ def test_atac_prevalent_peaks_default_to_fewer_than_the_assay_holds(
     # A given top_n is recorded as it is.
     plan = _resolve("atac", atac.datastore, prevalent_peaks={"top_n": 2000})
     assert plan.config["stages"]["prevalent_peaks"] == {"top_n": 2000}
+
+
+@pytest.mark.slow  # An ATAC run with Harmony.
+def test_atac_with_harmony_scores_doublets_within_each_batch(
+    atac, atac_harmony
+) -> None:
+    datastore = atac.datastore
+
+    run = datastore.pipeline.atac(
+        harmony={"batch_columns": ["batch"]}, doublets=True, **ATAC_SETTINGS
+    )
+
+    # The run reuses every stage of the run without doublets.
+    assert all(run[key] == atac_harmony[key] for key in atac_harmony)
+    assert _config(run)["doubletSampleColumns"] == ["batch"]
+    # Each batch is scored apart, on the LSI that Harmony corrected.
+    summary = _stages(run)["doublets"]["summary"]
+    assert [sample["labels"] for sample in summary["samples"]] == [
+        {"batch": "a"},
+        {"batch": "b"},
+    ]
+    cells = int(run.cells.fetch_all("I").sum())
+    assert sum(sample["cells"] for sample in summary["samples"]) == cells
+    status = datastore.artifacts.inspect(run["doublets"])
+    assert status.input_ref("connectivity_map") == atac_harmony["connectivity_map"]
+    assert status.parameters["sample_columns"] == ["batch"]
 
 
 @pytest.mark.slow  # An ATAC run with Harmony, and an export of 65,908 peaks.

@@ -3,11 +3,13 @@
 from collections.abc import Mapping
 from typing import Any
 
-from ....assay import ATACassay
+from ....assay import ATACassay, NormMethod, norm_tf_idf
 from ..executor import COORDINATES, PlannedStage, RecipePlan, RunState
 from ..fields import cell_fields, feature_fields
 from ..filtering import default_filter_columns
+from ..normalizers import normalizer_label
 from ..settings import (
+    ANN_METRIC_DEFAULT,
     LSI_DIMS_DEFAULT,
     LSI_SKIP_FIRST_DEFAULT,
     PEAKS_TOP_N_DEFAULT,
@@ -34,9 +36,11 @@ from .common import (
     check_harmony_labels,
     cell_snapshots,
     check_tsne,
+    doublet_stage,
     harmony_config,
     modality_assay,
     recorded_modality_call,
+    resolve_doublet_samples,
     resolve_embeddings,
     resolve_graph,
     resolve_harmony,
@@ -80,6 +84,32 @@ def _lsi_stage(settings: Mapping[str, Any]) -> PlannedStage:
     )
 
 
+def _check_doublet_settings(
+    assay: str, normalizer: NormMethod, ann_metric: object
+) -> None:
+    """Refuse doublet scoring of a run whose LSI graph it cannot score.
+
+    Doublet scoring weights the counts of each simulated doublet by TF-IDF
+    and projects them onto the LSI of the graph's cells, so the run must
+    normalize those cells by TF-IDF too, and it scores cells by Euclidean
+    distances, so the graph's index must measure them.
+    """
+    if normalizer is not norm_tf_idf:
+        raise ValueError(
+            f"The run normalizes assay {assay!r} with "
+            f"{normalizer_label(normalizer)}, but doublet scoring weights its "
+            "simulated doublets by TF-IDF and needs tf_idf; pass "
+            "normalization={'method': 'tf_idf'} or doublets=False"
+        )
+    if ann_metric != "l2":
+        raise ValueError(
+            f"ann_index={{'ann_metric': {ann_metric!r}}} builds the graph on "
+            f"{ann_metric} distances, but doublet scoring of an ATAC assay "
+            "scores cells by Euclidean distances in the LSI; pass "
+            "ann_index={'ann_metric': 'l2'} or doublets=False"
+        )
+
+
 def resolve_atac(
     store: Any,
     *,
@@ -101,6 +131,7 @@ def resolve_atac(
     leiden: object,
     paris: object,
     membership_strength: object,
+    doublets: object,
     markers: object,
     snapshot_columns: object,
     species: object,
@@ -146,16 +177,40 @@ def resolve_atac(
     embeddings = resolve_embeddings(umap=umap, localmap=localmap, tsne=tsne)
     partitions, selected, leiden_settings = resolve_leiden(leiden)
     paris_enabled, paris_settings = stage_settings("paris", paris, optional=True)
-    if not partitions and markers:
-        raise ValueError("markers require at least one Leiden candidate")
+    doublets_enabled, doublet_settings = stage_settings(
+        "doublets", doublets, optional=True
+    )
+    # Doublets and markers both read the saved clustering.
+    clustered = [
+        name
+        for name, enabled in (("doublets", doublets_enabled), ("markers", markers))
+        if enabled
+    ]
+    if not partitions and clustered:
+        raise ValueError(
+            f"{' and '.join(clustered)} require at least one Leiden candidate"
+        )
     if not partitions and membership_strength:
         raise ValueError("membership_strength requires at least one Leiden candidate")
+    if doublets_enabled:
+        _check_doublet_settings(
+            assay_name,
+            normalization_settings.normalizer,
+            graph.ann_index.get("ann_metric", ANN_METRIC_DEFAULT),
+        )
     snapshots = resolve_snapshot_columns(
         store,
         snapshot_columns,
         reserved=run_reserved_fields(
             embeddings, partitions, extra=("prevalent_peaks",)
         ),
+    )
+    doublet_samples = (
+        resolve_doublet_samples(
+            store, doublet_settings, harmony_columns, reduction="LSI"
+        )
+        if doublets_enabled
+        else ()
     )
     # The settings are checked, so the run's cells are checked last.
     source = resolve_cells(store, cells, assays=(assay_name,), operation=OPERATION)
@@ -182,7 +237,10 @@ def resolve_atac(
         membership_strength=membership_strength,
     )
     cell_columns, extra_snapshots = cell_snapshots(
-        filtering_config, harmony_columns=harmony_columns, snapshot_columns=snapshots
+        filtering_config,
+        harmony_columns=harmony_columns,
+        snapshot_columns=snapshots,
+        doublet_samples=doublet_samples,
     )
     stages = (
         input_snapshot_stage(
@@ -203,12 +261,14 @@ def resolve_atac(
         ),
         *first_tail,
         *tsne_tail,
+        doublet_stage(doublets_enabled, doublet_settings, doublet_samples),
         markers_stage(markers),
     )
     config = {
         "cells": source.to_config(),
         "snapshotColumns": list(snapshots),
         "species": resolved_species,
+        "doubletSampleColumns": list(doublet_samples),
         "stages": {
             "filtering": filtering_config,
             "prevalent_peaks": peak_settings,
@@ -220,13 +280,14 @@ def resolve_atac(
             "leiden": leiden_config(partitions, selected, leiden_settings),
             "paris": paris_settings if paris_enabled else False,
             "membership_strength": membership_strength,
+            "doublets": doublet_settings if doublets_enabled else False,
             "markers": markers,
         },
     }
     output_keys = graph_output_keys(
         head=("prevalent_peaks",),
         reduction=("lsi",),
-        tail=("markers",),
+        tail=("doublets", "markers"),
     )
 
     def fields(state: RunState) -> tuple[Any, ...]:
