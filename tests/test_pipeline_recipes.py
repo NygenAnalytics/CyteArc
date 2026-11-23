@@ -10,6 +10,7 @@ import re
 import shutil
 import tarfile
 from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -226,7 +227,7 @@ def _resolve(recipe: str, datastore: DataStore, **keywords: Any) -> RecipePlan:
             getattr(PipelineAccessor, recipe)
         ).parameters.items()
         if parameter.kind is inspect.Parameter.KEYWORD_ONLY
-        and name not in {"callback", "cancel"}
+        and name not in {"run_until", "callback", "cancel"}
     }
     return _RESOLVERS[recipe](datastore, **{**defaults, **keywords})
 
@@ -3131,3 +3132,55 @@ def test_a_run_records_every_keyword_and_its_plan_reuses_every_stage(
 
     assert_settings_name_every_keyword(run)
     assert_plan_reuses_run(datastore.pipeline.plan(run), run)
+
+
+# Pause and resume --------------------------------------------------------------
+
+
+def _paused_then_resumed(
+    datastore: DataStore, call: Callable[..., PipelineRun], run_until: str
+) -> tuple[PipelineRun, list[str], PipelineRun]:
+    """Pause a call after ``run_until`` and resume it.
+
+    Return the paused run, the stages that it recorded before the resume, and
+    the resumed run.
+    """
+    paused = call(run_until=run_until)
+    stages = list(_stages(paused))
+    resumed = datastore.pipeline.resume(paused.run_id)
+    return paused, stages, resumed
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    ("recipe", "run_until"),
+    [("adt", "pca"), ("multimodal", "integration"), ("atac", "lsi")],
+)
+def test_each_recipe_pauses_after_run_until_and_resumes_to_its_single_call(
+    request, tmp_path, recipe: str, run_until: str
+) -> None:
+    if recipe == "atac":
+        source = request.getfixturevalue("atac")
+        datastore = DataStore(str(_copy(source.location, tmp_path)))
+        expected = source.run
+        call = partial(datastore.pipeline.atac, **ATAC_SETTINGS)
+    else:
+        cite = request.getfixturevalue("cite")
+        # The fixture's runs commit before the copy, which then holds their
+        # artifacts.
+        expected = cite.adt if recipe == "adt" else request.getfixturevalue("joint").wnn
+        datastore = _open_cite(_copy(cite.location, tmp_path))
+        runs = [datastore.pipeline.open(label=name) for name in ("rna", "adt")]
+        if recipe == "adt":
+            call = partial(datastore.pipeline.adt, cells=runs[0], **ADT_SETTINGS)
+        else:
+            call = partial(datastore.pipeline.multimodal, runs, umap={"n_epochs": 30})
+
+    paused, stages, resumed = _paused_then_resumed(datastore, call, run_until)
+
+    assert paused.status == "paused" and stages[-1] == run_until
+    assert resumed.run_id == paused.run_id and resumed.status == "completed"
+    # The recipe that the resume rebuilt from the record is the one called.
+    assert resumed.settings() == expected.settings()
+    assert dict(resumed.items()) == dict(expected.items())
+    assert list(_stages(resumed)) == expected.report()["run"]["stageOrder"]

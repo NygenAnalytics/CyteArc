@@ -562,7 +562,7 @@ def _resolve_rna(store: DataStore, **keywords: object) -> RecipePlan:
     defaults = {
         name: parameter.default
         for name, parameter in parameters.items()
-        if name not in {"self", "callback", "cancel"}
+        if name not in {"self", "run_until", "callback", "cancel"}
     }
     return resolve_rna(store, **(defaults | keywords))
 

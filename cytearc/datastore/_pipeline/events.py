@@ -11,12 +11,14 @@ from ...utils.logging import UNCOLLECTED_EXTRA, logger
 
 type PipelineEventKind = Literal[
     "run_started",
+    "run_resumed",
     "stage_started",
     "stage_progress",
     "stage_completed",
     "stage_skipped",
     "stage_failed",
     "stage_interrupted",
+    "run_paused",
     "run_completed",
     "run_failed",
     "run_interrupted",
@@ -54,7 +56,10 @@ class PipelineEvent:
     """One step of a pipeline run, as listeners receive it.
 
     A run emits ``run_started``, then each stage's events in order, and ends
-    with ``run_completed``, ``run_failed``, or ``run_interrupted``. A stage
+    with ``run_completed``, ``run_failed``, or ``run_interrupted``, or with
+    ``run_paused`` once the stage that ``run_until`` names has completed. A
+    process that resumes a paused run emits ``run_resumed`` in place of
+    ``run_started``, then the events of the stages that it runs. A stage
     emits ``stage_skipped`` alone, or ``stage_started``, any number of
     ``stage_progress`` events, and one of ``stage_completed``,
     ``stage_failed``, or ``stage_interrupted``. An interruption that a stage
@@ -62,16 +67,18 @@ class PipelineEvent:
     ``stage_completed`` precedes a ``run_interrupted`` that names no stage.
 
     Attributes:
-        kind: What happened. Run events are ``run_started``, ``run_completed``,
-            ``run_failed``, and ``run_interrupted``; stage events are
+        kind: What happened. Run events are ``run_started``, ``run_resumed``,
+            ``run_paused``, ``run_completed``, ``run_failed``, and
+            ``run_interrupted``; stage events are
             ``stage_started``, ``stage_progress``, ``stage_completed``,
             ``stage_skipped``, ``stage_failed``, and ``stage_interrupted``.
         run_id: The durable run identifier.
         recipe: The recipe, such as ``"rna"``.
         label: The label the run requested, or None.
         stage: The stage that the event is about. Stage events name their
-            stage, and ``run_started`` and ``run_completed`` name none.
-            ``run_failed`` always names one: the stage that failed, or
+            stage, and ``run_started``, ``run_resumed``, ``run_paused``, and
+            ``run_completed`` name none. ``run_failed`` always names one: the
+            stage that failed, ``"pause"`` when pausing the run failed, or
             ``"finalize"`` when completing the run record failed.
             ``run_interrupted`` names the stage whose work the interruption
             cut short, and none when the run stopped between stages, while a

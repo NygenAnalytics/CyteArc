@@ -87,6 +87,25 @@ def test_a_ledger_needs_positive_integer_workers_and_budget(name, value) -> None
     assert (accepted.workers, accepted.memory_budget_bytes) == (1, 1)
 
 
+@pytest.mark.parametrize("value", [-1, True, 1.0, None, "1"])
+def test_a_ledger_starts_at_a_non_negative_integer_ordinal(value) -> None:
+    root, ledger, _events = _ledger("first", "second")
+    resources = {"workers": 1, "memory_budget_bytes": 2**30}
+    with pytest.raises(
+        ValueError, match=f"^ordinal must be a non-negative integer, not {value!r}$"
+    ):
+        RunLedger(root, ledger.run_id, ledger.events, ordinal=value, **resources)
+    # A ledger that starts at the second stage records it at ordinal 1, after
+    # the first stage's record.
+    ledger.skip("first")
+    resumed = RunLedger(root, ledger.run_id, ledger.events, ordinal=1, **resources)
+    resumed.skip("second")
+    assert [
+        (record.ordinal, record.stage)
+        for record in load_pipeline_stage_records(root, ledger.run_id)
+    ] == [(0, "first"), (1, "second")]
+
+
 def test_grouped_interruption_ends_the_stage_as_that_interruption() -> None:
     root, ledger, events = _ledger("first", "second")
     interruption = KeyboardInterrupt("stop")

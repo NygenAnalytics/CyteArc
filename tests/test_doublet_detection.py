@@ -1327,7 +1327,7 @@ def test_pipeline_resolves_doublet_samples_from_settings_and_harmony(
     defaults = {
         name: parameter.default
         for name, parameter in parameters.items()
-        if name not in {"self", "callback", "cancel"}
+        if name not in {"self", "run_until", "callback", "cancel"}
     }
     # The columns that each resolved recipe freezes in its input snapshot.
     snapshots: list[dict[str, Any]] = []

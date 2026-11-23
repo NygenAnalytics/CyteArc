@@ -16,7 +16,12 @@ from ....storage.selections import snapshot_run_metadata
 from ..cluster_selection import cluster_label_values
 from ..executor import PlannedStage, RecipePlan, RunState
 from ..fields import cell_fields, feature_fields
-from ..normalizers import method_normalizer, normalizer_label, recorded_normalizer
+from ..normalizers import (
+    CustomNormalizerUnset,
+    method_normalizer,
+    normalizer_label,
+    recorded_normalizer,
+)
 from ..settings import (
     MULTIMODAL_LEIDEN_PARTITIONS,
     leiden_config,
@@ -148,20 +153,22 @@ def _source_normalizer(store: Any, run: PipelineRun) -> NormMethod:
     be the assay's ``normMethod``.
 
     Raises:
-        ValueError: If the source run normalized with a custom normalizer that
-            is not the assay's ``normMethod``.
+        CustomNormalizerUnset: If the source run normalized with a custom
+            normalizer that is not the assay's ``normMethod``.
     """
     record = load_pipeline_run_record(store.zw, run.run_id)
     method = recorded_normalizer(store, record)
     assay = store._get_assay(run.assay)
     normalizer = method_normalizer(assay, method)
     if normalizer is None:
-        raise ValueError(
+        raise CustomNormalizerUnset(
             f"Run {run.run_id} ({run.recipe}) normalized assay {run.assay!r} with "
             f"the custom normalizer {method!r}, with which the multimodal run "
             "ranks the assay's markers, but the assay's normMethod is "
             f"{normalizer_label(assay.normMethod)}; set the assay's normMethod "
-            "to that normalizer, or pass markers=False"
+            "to that normalizer, or pass markers=False",
+            assay=run.assay,
+            method=method,
         )
     return normalizer
 

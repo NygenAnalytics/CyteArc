@@ -93,10 +93,7 @@ not thresholds.
    populations (platelets, erythrocytes, neutrophils) and high-RNA ones (plasma, cycling cells).
    Audit retention per sample and per marker-defined group without author labels, and look at the
    markers of removed cells (`references/quality-control.md`).
-5. **Labels are immutable and runs cannot be resumed.** Use a new `label` for every variant. A rerun
-   reuses every complete artifact, so it is cheap, and a variant recomputes only what its change
-   feeds: a run that only adds `snapshot_columns` (design columns you want inside `run.cells` and
-   exports) reuses every artifact, and a run that adds Harmony reuses everything up to PCA.
+5. **Labels are immutable, and only a paused run resumes.** Use a new `label` for every variant. A failed or interrupted run does not resume; run it again instead. A rerun reuses every complete artifact, so it is cheap, and a variant recomputes only what its change feeds. A run that only adds `snapshot_columns` (design columns you want inside `run.cells` and exports) reuses every artifact, and a run that adds Harmony reuses everything up to PCA.
 6. **Read pipeline outputs instead of recomputing them.** `run["markers"]`, `run["cell_cycle"]` and
    `run["doublets"]` already exist. A direct `markers.search(run["clusters"], ...)` creates a new
    artifact and rereads all counts.

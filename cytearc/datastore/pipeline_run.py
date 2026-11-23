@@ -1195,7 +1195,7 @@ class PipelineRun(Mapping[str, ArtifactRef | tuple[ArtifactRef, ...]]):
         """The run's immutable label, or None.
 
         A run takes its requested label only when it completes, so a running,
-        failed, or interrupted run has None; ``report()["run"]
+        paused, failed, or interrupted run has None; ``report()["run"]
         ["requestedLabel"]`` keeps the label that it requested.
         """
         return self._record.label
@@ -1211,10 +1211,11 @@ class PipelineRun(Mapping[str, ArtifactRef | tuple[ArtifactRef, ...]]):
 
     @property
     def status(self) -> str:
-        """``"running"``, ``"completed"``, ``"failed"``, or ``"interrupted"``.
+        """``"running"``, ``"paused"``, ``"completed"``, ``"failed"``, or ``"interrupted"``.
 
-        The status is the one that the run record held when this handle was
-        opened.
+        A run that a recipe called with ``run_until`` stopped is
+        ``"paused"`` until ``ds.pipeline.resume`` runs the rest. The status
+        is the one that the run record held when this handle was opened.
         """
         return self._record.status
 
@@ -1237,8 +1238,8 @@ class PipelineRun(Mapping[str, ArtifactRef | tuple[ArtifactRef, ...]]):
     def finished_at_ns(self) -> int | None:
         """When the run ended, in nanoseconds since the epoch.
 
-        None while the run is running, including a run whose process died
-        without cleanup.
+        None while the run is running or paused, including a run whose
+        process died without cleanup.
         """
         return self._record.finished_at_ns
 
@@ -1461,6 +1462,22 @@ class PipelineRun(Mapping[str, ArtifactRef | tuple[ArtifactRef, ...]]):
             "|---:|---|---|---:|---:|---:|---:|---:|---:|---:|",
         ]
         lines.extend(self._stage_markdown(stage) for stage in stages)
+        if run.get("segments"):
+            lines.extend(
+                [
+                    "",
+                    "## Segments",
+                    "",
+                    "| # | Started at ns | Stopped at ns | Stages | Stopped because |",
+                    "|---:|---:|---:|---|---|",
+                ]
+            )
+            lines.extend(
+                f"| {index} | {segment['startedAtNs']} | "
+                f"{'' if segment['stoppedAtNs'] is None else segment['stoppedAtNs']} | "
+                f"{', '.join(segment['stages'])} | {segment['reason'] or 'running'} |"
+                for index, segment in enumerate(run["segments"], start=1)
+            )
         diagnostics = self._diagnostics_markdown(stages)
         if diagnostics:
             lines.extend(["", "## Diagnostics", "", *diagnostics])
@@ -1526,7 +1543,11 @@ class PipelineRun(Mapping[str, ArtifactRef | tuple[ArtifactRef, ...]]):
           ``finishedAtNs``, ``status``, ``complete``, ``cytearcVersion``,
           ``config``, ``stageOrder``, ``outputs``, ``fields``, ``error``,
           ``interruption``, and ``outputLists``, the outputs that hold
-          several artifacts, such as ``leiden``.
+          several artifacts, such as ``leiden``. A run that paused also
+          holds ``segments``: for the process that started it and each that
+          resumed it, ``startedAtNs``, ``stoppedAtNs``, the ``stages`` it ran,
+          the ``reason`` it stopped, ``"paused"`` or the status that the run
+          ended with, and its ``shutdown`` signal protection.
         - ``stages``: each stage record written so far, skipped stages
           included, with its status, times, outputs and ``outputLists``,
           artifact plans with their ``created`` or ``reused`` dispositions,
@@ -1543,7 +1564,8 @@ class PipelineRun(Mapping[str, ArtifactRef | tuple[ArtifactRef, ...]]):
 
         ``format="markdown"`` returns the same facts as a Markdown document,
         with a table of the stages, their wall and CPU seconds, peak RSS and
-        received bytes, and a section of each stage's summary and warnings.
+        received bytes, a table of the segments of a run that paused, and a
+        section of each stage's summary and warnings.
 
         Args:
             format: ``"dict"`` or ``"markdown"``.

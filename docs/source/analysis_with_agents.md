@@ -503,21 +503,11 @@ Classify the problem before retrying:
 - **Numerical or graph:** check dimensions, graph components, neighbor count, convergence, validity masks, and method-specific diagnostics.
 - **Scientific ambiguity:** preserve branches, seek another independent form of evidence, narrow the claim, or report that the available design does not resolve the alternatives.
 
-In a granular workflow, retry the lowest failed stage. A failed, interrupted, or cancelled pipeline run is not resumable; start a new run, which can reuse matching complete artifacts from the earlier attempt. Before a costly rerun, or a run with a changed setting, call `ds.pipeline.plan` with the recipe's name and the same arguments: without writing anything, it reports which stages the run would reuse and which it would compute, with the reason for each, such as a changed setting, a superseding operation revision, or an earlier stage that it waits on, and what each computed stage took when an earlier run computed it ([Plan a call](reference/api/pipeline.md#plan-a-call)).
+In a granular workflow, retry the lowest failed stage. A failed, interrupted, or cancelled pipeline run is not resumable; start a new run, which can reuse matching complete artifacts from the earlier attempt. Only a run that a recipe called with `run_until` paused resumes, with `ds.pipeline.resume(run_id)`, in any process that opens the store, such as one on a larger machine for the stages after `pca` ([Pause and resume a run](reference/api/pipeline.md#pause-and-resume-a-run)). Before a costly rerun, or a run with a changed setting, call `ds.pipeline.plan` with the recipe's name and the same arguments: without writing anything, it reports which stages the run would reuse and which it would compute, with the reason for each, such as a changed setting, a superseding operation revision, or an earlier stage that it waits on, and what each computed stage took when an earlier run computed it ([Plan a call](reference/api/pipeline.md#plan-a-call)).
 
 ## Progress, cancellation, and deterministic comparisons
 
-Every recipe takes `callback=`, which receives each
-[`PipelineEvent`](/api/pipeline.html#cytearc.datastore.pipeline_accessor.PipelineEvent) of the run,
-and `with cytearc.pipeline_listener(listener):` sends the events of every run started in its block
-to `listener`. Use either to update an external progress record. A run delivers its events in
-order, on the thread that runs it: `run_started`; for each stage, `stage_started`, any
-`stage_progress` events, and then `stage_completed`, `stage_failed`, or `stage_interrupted`, or
-only `stage_skipped` for a skipped stage; and last `run_completed`, `run_failed`, or
-`run_interrupted`. While a stage runs, CyteArc's progress bars send throttled `stage_progress`
-events, even when progress display is off. `event.to_dict()` returns the event as JSON values for
-a log. A callback or listener that raises is logged and ignored, so it cannot stop or fail a run;
-a slow one delays the run, so hand events to a queue instead.
+Every recipe takes `callback=`, which receives each [`PipelineEvent`](/api/pipeline.html#cytearc.datastore.pipeline_accessor.PipelineEvent) of the run, and `with cytearc.pipeline_listener(listener):` sends the events of every run started in its block to `listener`. Use either to update an external progress record. A run delivers its events in order, on the thread that runs it: `run_started`, or `run_resumed` in a process that resumes a paused run; for each stage, `stage_started`, any `stage_progress` events, and then `stage_completed`, `stage_failed`, or `stage_interrupted`, or only `stage_skipped` for a skipped stage; and last `run_completed`, `run_paused`, `run_failed`, or `run_interrupted`. While a stage runs, CyteArc's progress bars send throttled `stage_progress` events, even when progress display is off. `event.to_dict()` returns the event as JSON values for a log. A callback or listener that raises is logged and ignored, so it cannot stop or fail a run; a slow one delays the run, so hand events to a queue instead.
 
 To stop a run, create a token, `token = cytearc.CancellationToken()`, pass it as `cancel=token`,
 and call `token.cancel("reason")` from any thread, such as on a user's stop request. The run stops

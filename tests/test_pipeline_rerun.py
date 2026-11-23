@@ -97,7 +97,13 @@ def assert_settings_name_every_keyword(run: PipelineRun) -> None:
     """
     recipe = getattr(PipelineAccessor, run.recipe)
     keywords = set(inspect.signature(recipe).parameters)
-    assert set(run.settings()) == keywords - {"self", "label", "callback", "cancel"}
+    assert set(run.settings()) == keywords - {
+        "self",
+        "label",
+        "run_until",
+        "callback",
+        "cancel",
+    }
 
 
 # Settings --------------------------------------------------------------------

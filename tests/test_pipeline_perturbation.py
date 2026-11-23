@@ -315,7 +315,7 @@ def _recipe_defaults(recipe: str) -> dict[str, Any]:
             getattr(PipelineAccessor, recipe)
         ).parameters.items()
         if parameter.kind is inspect.Parameter.KEYWORD_ONLY
-        and name not in {"callback", "cancel", "labels"}
+        and name not in {"run_until", "callback", "cancel", "labels"}
     }
 
 
@@ -997,6 +997,23 @@ def test_an_identical_second_call_creates_no_artifacts(runs, tmp_path) -> None:
     ]
 
 
+def test_a_paused_screen_resumes_to_the_run_that_a_single_call_commits(
+    runs, tmp_path
+) -> None:
+    store = _copy(runs.location, tmp_path)
+
+    paused = store.pipeline.perturbation(labels=LABELS, run_until="pca", **FULL)
+    stages = list(_stages(paused))
+    resumed = store.pipeline.resume(paused.run_id)
+
+    assert paused.status == "paused" and stages[-1] == "pca"
+    assert (resumed.run_id, resumed.status) == (paused.run_id, "completed")
+    # The resume rebuilt the recipe that the call ran from the run's record.
+    assert resumed.settings() == runs.full.settings()
+    assert dict(resumed) == dict(runs.full)
+    assert list(_stages(resumed)) == STAGES
+
+
 def test_the_recipe_reuses_the_artifacts_of_standalone_calls(screen, tmp_path) -> None:
     store = _copy(screen, tmp_path)
     cells = store.select_measured_cells("CRISPR")
@@ -1308,6 +1325,35 @@ def test_guide_calling_imports_cell_rangers_calls(runs, tmp_path) -> None:
     assert again["guide_calls"] == run["guide_calls"]
     assert _reused(again)["guide_calls"]
     assert _stages(again)["guide_calling"]["warnings"] == warned
+
+
+def test_a_paused_screen_resumes_only_where_its_call_file_is(runs, tmp_path) -> None:
+    store = _copy(runs.location, tmp_path)
+    path = _call_file(tmp_path / "protospacer_calls_per_cell.csv")
+    settings = {"efficiency": False, "edistance": False, **QUICK}
+    # PCA is the last stage that these settings run.
+    paused = store.pipeline.perturbation(
+        labels=LABELS,
+        guide_calling={"path": path},
+        run_until="normalization",
+        **settings,
+    )
+    assert paused.status == "paused"
+    record = zarr.open_group(store.zarr_loc, mode="r")[f"pipeline/runs/{paused.run_id}"]
+    before = dict(record.attrs)
+    # The machine that resumes holds the call file at another path.
+    moved = path.rename(tmp_path / "calls_elsewhere.csv")
+
+    with pytest.raises(
+        FileNotFoundError, match="guide_calling\\['path'\\] .* is not a file"
+    ):
+        store.pipeline.resume(paused.run_id)
+    assert dict(record.attrs) == before
+
+    moved.rename(path)
+    run = store.pipeline.resume(paused.run_id)
+    assert (run.run_id, run.status) == (paused.run_id, "completed")
+    assert store.artifacts.inspect(run["guide_calls"]).operation == "import_guide_calls"
 
 
 def test_an_import_after_qc_filtering_warns_only_about_unknown_barcodes(
