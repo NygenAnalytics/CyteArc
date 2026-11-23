@@ -1521,6 +1521,182 @@ def test_composite_records_a_source_whose_name_holds_a_path_separator(tmp_path):
     assert joint.ADT.feats.fetch_all("measured_in_p2").tolist() == [True, True, False]
 
 
+def test_a_composite_of_a_merged_store_keeps_the_source_of_each_of_its_cells(tmp_path):
+    from cytearc.merge import DataStoreMerge
+    from cytearc.metadata.membership import (
+        features_measured_by_cells,
+        measured_feature_columns,
+    )
+
+    panels = {
+        "p1": ["CD3", "CD4", "CD8"],
+        "p2": ["CD4", "CD3", "CD19"],
+        "p3": ["CD3", "CD56"],
+    }
+    sources = _panel_sources(tmp_path, panels, assay="ADT")
+    DataStoreMerge(
+        [sources["p1"], sources["p2"]],
+        str(tmp_path / "inner.zarr"),
+        ["p1", "p2"],
+        nthreads=1,
+    ).dump()
+    inner = DataStore(
+        str(tmp_path / "inner.zarr"),
+        default_assay="ADT",
+        min_features_per_cell=-1,
+        nthreads=1,
+        mem_budget="64M",
+    )
+    inner_ids = inner.cells.fetch_all("ids").astype(str)
+    source_of = dict(
+        zip(inner_ids, inner.cells.fetch_all("dataset").astype(str), strict=True)
+    )
+    # The composite takes every cell of p2 from the merged store, and one of p1.
+    rows = sorted(
+        [index for index, cell in enumerate(inner_ids) if cell.startswith("p2__")]
+        + [next(i for i, cell in enumerate(inner_ids) if cell.startswith("p1__"))]
+    )
+
+    with _feature_warnings() as messages:
+        joint = create_composite(
+            {"inner": inner, "p3": sources["p3"]},
+            at=tmp_path / "joint.zarr",
+            assay="ADT",
+            features="union",
+            rows={"inner": rows},
+        )
+
+    # The warning names what each source of the merged store lacks.
+    assert messages == [
+        "Assay 'ADT': 4 of the 5 composite features were not measured by every "
+        "source that holds the assay. Source 'inner__p1' lacks 2: 'CD19', 'CD56'. "
+        "Source 'inner__p2' lacks 2: 'CD8', 'CD56'. Source 'p3' lacks 3: 'CD4', "
+        "'CD8', 'CD19'." + _zeros_read_as_counts("inner__p1", adt=True)
+    ]
+    ids = joint.cells.fetch_all("ids").astype(str)
+    expected = np.array(
+        [
+            f"inner__{source_of[cell.split('__', 1)[1]]}"
+            if cell.startswith("inner__")
+            else "p3"
+            for cell in ids
+        ]
+    )
+    assert sorted(expected.tolist()) == ["inner__p1"] + ["inner__p2"] * 3 + ["p3"] * 3
+    column = joint.cells._get_array("dataset")
+    assert column.attrs["role"] == "cell_sources"
+    assert column.categories.tolist() == ["inner__p1", "inner__p2", "p3"]
+    np.testing.assert_array_equal(joint.cells.fetch_all("dataset"), expected)
+    assert measured_feature_columns(joint.ADT.feats) == {
+        "measured_in_inner__p1": "inner__p1",
+        "measured_in_inner__p2": "inner__p2",
+        "measured_in_p3": "p3",
+    }
+    names = joint.ADT.feats.fetch_all("names").astype(str).tolist()
+    assert names == ["CD3", "CD4", "CD8", "CD19", "CD56"]
+    for column_name, panel in (
+        ("measured_in_inner__p1", panels["p1"]),
+        ("measured_in_inner__p2", panels["p2"]),
+        ("measured_in_p3", panels["p3"]),
+    ):
+        assert joint.ADT.feats.fetch_all(column_name).tolist() == [
+            name in panel for name in names
+        ]
+    # The cells of p2 measured its panel, and only they have values of CD19.
+    rows_p2 = np.flatnonzero(expected == "inner__p2")
+    measured = features_measured_by_cells(
+        joint.cells, joint.ADT.feats, rows_p2, assay="ADT"
+    )
+    assert measured is not None
+    assert np.asarray(names)[measured].tolist() == ["CD3", "CD4", "CD19"]
+    cd19 = joint.get_cell_vals("ADT", "I", "CD19")
+    np.testing.assert_array_equal(np.flatnonzero(~np.isnan(cd19)), rows_p2)
+    # A source whose record column a source of the merged store takes is
+    # refused before anything is written.
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            "Sources 'inner__p1' and 'inner/_p1' would record which features they "
+            "measured in the feature columns 'measured_in_inner__p1' and "
+            "'measured_in_inner__p1'"
+        ),
+    ):
+        create_composite(
+            {"inner": inner, "inner/_p1": sources["p3"]},
+            at=tmp_path / "clash.zarr",
+            assay="ADT",
+            features="union",
+        )
+    assert not (tmp_path / "clash.zarr").exists()
+
+
+def test_a_composite_names_the_sources_that_a_merged_stores_column_of_text_holds(
+    tmp_path,
+):
+    from cytearc.merge import DataStoreMerge
+    from cytearc.storage.identity import replace_metadata_column
+
+    panels = {"p1": ["CD3", "CD4"], "p2": ["CD4", "CD19"], "p3": ["CD3"]}
+    sources = _panel_sources(tmp_path, panels, assay="ADT")
+    DataStoreMerge(
+        [sources["p1"], sources["p2"]],
+        str(tmp_path / "inner.zarr"),
+        ["p1", "p2"],
+        nthreads=1,
+    ).dump()
+
+    def inner_store() -> DataStore:
+        return DataStore(
+            str(tmp_path / "inner.zarr"),
+            default_assay="ADT",
+            min_features_per_cell=-1,
+            nthreads=1,
+            mem_budget="64M",
+        )
+
+    # The store names each cell's source as text, as an import with
+    # categorical_columns=False writes it, and one cell has none.
+    column = inner_store().cells._get_array("dataset")
+    labels = np.asarray(column.categories)[np.asarray(column.codes[:])]
+    missing = np.arange(len(labels)) == 2
+    cells = zarr.open_group(str(tmp_path / "inner.zarr"), mode="r+")["cellData"]
+    replace_metadata_column(cells, "dataset", np.where(missing, "", labels), missing)
+    cells["dataset"].attrs.update({"role": "cell_sources"})
+    inner = inner_store()
+    ids = inner.cells.fetch_all("ids").astype(str)
+
+    # A composite of the cells that have a source names the sources that the
+    # column holds, and no source for the missing value.
+    joint = create_composite(
+        {"inner": inner, "p3": sources["p3"]},
+        at=tmp_path / "joint.zarr",
+        assay="ADT",
+        features="union",
+        rows={"inner": np.flatnonzero(~missing)},
+    )
+
+    assert joint.cells._get_array("dataset").categories.tolist() == [
+        "inner__p1",
+        "inner__p2",
+        "p3",
+    ]
+    expected = {
+        f"inner__{cell}": f"inner__{label}"
+        for cell, label, absent in zip(ids, labels, missing, strict=True)
+        if not absent
+    } | {f"p3__c{cell}": "p3" for cell in range(3)}
+    assert (
+        dict(
+            zip(
+                joint.cells.fetch_all("ids").astype(str),
+                joint.cells.fetch_all("dataset").astype(str).tolist(),
+                strict=True,
+            )
+        )
+        == expected
+    )
+
+
 def test_composite_refuses_sources_whose_record_columns_differ_only_in_case(
     tmp_path,
 ):
@@ -1758,6 +1934,7 @@ def test_unshared_features_warning_names_its_combinations():
         0.5,
         (True, True),
         (np.array([True, True]), np.array([False, True])),
+        (None, None),
     )
     shared = (
         "Assay 'RNA': 1 of the 2 {} features was not measured by every source "
@@ -1803,6 +1980,7 @@ def test_shared_features_warning_counts_the_sources_that_hold_the_assay():
         1 / 11,
         (True, True, False),
         (np.ones(11, dtype=bool), np.arange(11) == 0, np.zeros(11, dtype=bool)),
+        (None, None, None),
     )
 
     for combination in ("composite", "merge"):

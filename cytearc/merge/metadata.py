@@ -20,7 +20,11 @@ from ..metadata.artifacts import (
     stored_levels,
     validate_display_metadata,
 )
-from ..metadata.membership import measured_feature_columns
+from ..metadata.membership import (
+    exported_measured_features,
+    measured_feature_columns,
+    resolve_assay_membership,
+)
 from ..metadata.encoding import inexact_time_rows
 from ..metadata.palettes import stored_category_colors
 from ..metadata.rows import (
@@ -74,6 +78,7 @@ from ..storage.types import as_zarr_array, as_zarr_group
 from ..utils.arrays import sort_categories
 from ..utils.logging import logger
 from ..utils.memory_budget import MemoryBudgetError
+from .features import NestedSources, nested_source_name
 from .row_plan import (
     RowPlan,
     RowPlanSegment,
@@ -183,12 +188,133 @@ def _band_write_bytes(spec: MetadataColumnSpec, rows: int, chunk_rows: int) -> i
     return values + missing + max(_column_working_bytes(spec, rows), encode)
 
 
+def _sources_and_holders(
+    cells: Any, column: str, categorical: bool, assays: Sequence[str]
+) -> tuple[tuple[str, ...], dict[str, frozenset[str]]]:
+    """Return the sources that a merged source's column of sources names, and those of the cells that each of ``assays`` measured.
+
+    The sources are the column's categories, or the labels that a column of
+    text holds in sorted order, blank and missing labels left out, as a
+    column's categories leave them out. Each assay's cells are those that
+    its membership column marks, or every cell without one. The column and
+    the membership columns are read once, a block at a time, and a
+    categorical column is not read when no assay needs it.
+
+    Raises:
+        ValueError: If a code of a categorical column names no category, or
+            a membership column is malformed.
+    """
+    stored = cells._get_array(column)
+    names = (
+        tuple(str(category) for category in stored.categories.tolist())
+        if categorical
+        else ()
+    )
+    if categorical and not assays:
+        return names, {}
+    # Each assay's membership column, or None for an assay that measured
+    # every cell.
+    members: dict[str, Any] = {}
+    for assay in assays:
+        membership = resolve_assay_membership(cells, assay)
+        members[assay] = None if membership is None else cells._get_array(membership)
+    mask = None if categorical else metadata_missing_mask(cells, column)
+    found: set[str] = set()
+    held: dict[str, set[Any]] = {assay: set() for assay in assays}
+    n_rows = int(cells.N)
+    block_rows = max(1, int(cells.default_block_rows(column)))
+    for start in range(0, n_rows, block_rows):
+        stop = min(start + block_rows, n_rows)
+        if categorical:
+            keys = np.asarray(stored.check_codes(np.asarray(stored.codes[start:stop])))
+            valid = keys >= 0
+        else:
+            keys = np.asarray(stored[start:stop]).astype(str)
+            valid = valid_category_mask(
+                keys,
+                missing_mask=None
+                if mask is None
+                else np.asarray(mask[start:stop], dtype=bool),
+            )
+            found.update(np.unique(keys[valid]).tolist())
+        for assay, members_array in members.items():
+            measured = (
+                valid
+                if members_array is None
+                else valid & np.asarray(members_array[start:stop], dtype=bool)
+            )
+            held[assay].update(np.unique(keys[measured]).tolist())
+    if not categorical:
+        return tuple(sorted(found)), {
+            assay: frozenset(labels) for assay, labels in held.items()
+        }
+    return names, {
+        assay: frozenset(names[code] for code in codes) for assay, codes in held.items()
+    }
+
+
+def nested_sources(cells: Any, assays: Mapping[str, Any]) -> NestedSources | None:
+    """Return the sources of a merged source that a merge records in its place, or None for a source that it records as one.
+
+    ``assays`` maps each of the source's assays that the merge takes to its
+    feature table. A merge or a composite whose sources measured different
+    features writes in each a record of which features each of its sources
+    measured, which names its cell column of each cell's source. A source
+    is recorded by its own sources when every such record of ``assays``
+    names one column, which ``cells`` holds with the role
+    :data:`~cytearc.storage.metadata_keys.CELL_SOURCES_ROLE`. A source
+    without a record, or whose record names no such column, is recorded as
+    one source. Of an assay without a record, only the own sources whose
+    cells the assay measured hold it, as a merge records only the sources
+    that hold an assay.
+    """
+    records: dict[str, dict[str, str]] = {}
+    linked: set[str | None] = set()
+    for assay, table in assays.items():
+        declared, column = exported_measured_features(table, assay)
+        if declared:
+            records[assay] = declared[assay]
+            linked.add(column)
+    if len(linked) != 1:
+        return None
+    (column,) = linked
+    if column is None or column not in cells.columns:
+        return None
+    stored = cells._get_array(column)
+    if stored.attrs.get("role") != CELL_SOURCES_ROLE:
+        return None
+    categorical = isinstance(stored, CategoricalColumn)
+    names, measured = _sources_and_holders(
+        cells, column, categorical, [assay for assay in assays if assay not in records]
+    )
+    return NestedSources(
+        column,
+        names,
+        categorical,
+        {
+            assay: tuple(
+                name
+                for name in names
+                if name
+                in (records[assay].values() if assay in records else measured[assay])
+            )
+            for assay in assays
+        },
+        {assay: tuple(columns) for assay, columns in records.items()},
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class CellMetadataPlan:
     columns: tuple[MetadataColumnSpec, ...]
     blockRows: int
     # Public column name to source column name, per source.
     sourceColumns: tuple[dict[str, str], ...]
+    # The categories of the cell column of each cell's source that a merge
+    # writes beside its record of which features each source measured, and
+    # the sources of each merged source that it records in its place.
+    sourceCategories: tuple[str, ...] = ()
+    nestedSources: tuple[NestedSources | None, ...] = ()
 
     def peak_write_bytes_at(self, rows: int, *, chunk_rows: int) -> int:
         """Bound writing each column ``rows`` rows at a time, the costliest of them.
@@ -1085,6 +1211,7 @@ def plan_cell_metadata(
     row_plan: RowPlan | None = None,
     record_sources: bool = False,
     default_source_column: bool = False,
+    nested: Sequence[NestedSources | None] | None = None,
 ) -> CellMetadataPlan:
     """Resolve the destination cell-metadata schema without writing.
 
@@ -1097,8 +1224,29 @@ def plan_cell_metadata(
     the source names with the attributes of
     :func:`~cytearc.storage.metadata_keys.cell_sources_attributes`, which
     the record names; ``default_source_column`` says that the merge, not its
-    caller, chose that name.
+    caller, chose that name. ``nested`` gives, in source order, the sources
+    of each merged source that such a column names in its place, under the
+    names of :func:`~cytearc.merge.features.nested_source_name`, and None for
+    every other source; it is read only with ``record_sources``.
     """
+    nested_plan = (
+        tuple(nested)
+        if record_sources and nested is not None
+        else tuple(None for _ in source_names)
+    )
+    source_categories = (
+        tuple(
+            label
+            for name, item in zip(source_names, nested_plan, strict=True)
+            for label in (
+                (name,)
+                if item is None
+                else tuple(nested_source_name(name, own) for own in item.names)
+            )
+        )
+        if record_sources
+        else ()
+    )
     block_rows = max(1, int(block_rows))
     scan_rows = block_rows if scan_rows is None else max(1, int(scan_rows))
     if source_column is not None and (
@@ -1339,13 +1487,32 @@ def plan_cell_metadata(
             continue
         if public == source_column:
             if record_sources:
-                # Each cell's code is its source's position among the names,
-                # the categories that write_cell_metadata links.
+                # Each cell's code is its source's position among the
+                # categories that write_cell_metadata links, read from the
+                # column of a merged source that it records by its sources.
+                held = [
+                    (table, item)
+                    for table, item in zip(source_cell_tables, nested_plan, strict=True)
+                    if item is not None
+                ]
                 columns.append(
                     _metadata_column_spec(
                         public,
-                        category_codes_dtype(len(source_names)),
+                        category_codes_dtype(len(source_categories)),
                         False,
+                        value_arrays=[
+                            table._get_array(item.column).codes
+                            if item.categorical
+                            else table._get_array(item.column)
+                            for table, item in held
+                        ],
+                        mask_arrays=[
+                            mask
+                            for table, item in held
+                            if not item.categorical
+                            and (mask := metadata_missing_mask(table, item.column))
+                            is not None
+                        ],
                         role=CELL_SOURCES_ROLE,
                     )
                 )
@@ -1464,6 +1631,8 @@ def plan_cell_metadata(
         tuple(columns),
         block_rows,
         sourceColumns=tuple(per_source),
+        sourceCategories=source_categories,
+        nestedSources=nested_plan,
     )
 
 
@@ -1869,6 +2038,50 @@ def merged_source_rows(
     return lookups
 
 
+def _own_sources(
+    table: Any, nested: NestedSources, rows: np.ndarray, *, source: str
+) -> np.ndarray:
+    """Return the position in ``nested.names`` of the source of each cell of a merged source at ``rows``, read from its column of sources.
+
+    A missing row of a column of text holds blank text, which names no
+    source.
+
+    Raises:
+        ValueError: If a cell has no source in that column, or a code that
+            names none, naming the cell and the calls that drop the merged
+            source's record.
+    """
+    if nested.categorical:
+        codes = table._get_array(nested.column).codes
+        positions = np.asarray(read_array_rows_chunkwise(codes, rows), dtype=np.int64)
+    else:
+        labels = np.asarray(
+            read_metadata_rows_chunkwise(table, nested.column, rows)
+        ).astype(str)
+        positions = np.asarray(
+            pd.Index(nested.names).get_indexer(labels), dtype=np.int64
+        )
+    unnamed = np.flatnonzero((positions < 0) | (positions >= len(nested.names)))
+    if unnamed.size:
+        cell = read_metadata_rows_chunkwise(table, "ids", rows[unnamed[:1]])[0]
+        drops = ", ".join(
+            f"ds.{assay}.feats.drop({column!r})"
+            if assay.isidentifier()
+            else f"ds.get_assay({assay!r}).feats.drop({column!r})"
+            for assay, columns in nested.records.items()
+            for column in columns
+        )
+        raise ValueError(
+            f"Cell {str(cell)!r} of source {source!r} has no source in its cell "
+            f"column {nested.column!r}, which names the source of each of its "
+            "cells for its record of which features they measured. Merge "
+            f"{source!r} again from its own sources, which writes the column "
+            f"anew, or drop its record with {drops}, after which a merge "
+            f"records {source!r} as one source."
+        )
+    return positions
+
+
 def _iter_column_blocks(
     spec: MetadataColumnSpec,
     row_plan: RowPlan,
@@ -1880,6 +2093,7 @@ def _iter_column_blocks(
     membership: SourceMembership,
     segment_rows: int,
     chunk_rows: int,
+    nested: Sequence[NestedSources | None] = (),
 ) -> Iterator[MetadataBlock]:
     # Segments fill one destination chunk band at a time, so each band is
     # written with a single whole-chunk write instead of partial updates.
@@ -1890,6 +2104,11 @@ def _iter_column_blocks(
         merged_source_rows(row_plan, source_cell_tables)
         if spec.name == SOURCE_ROW
         else None
+    )
+    owned = list(nested) or [None] * len(row_plan.sourceNames)
+    # The position of each source's first category in the column of sources.
+    first_category = np.cumsum(
+        [0, *(1 if item is None else len(item.names) for item in owned)]
     )
     for segment in _iter_destination_chunk_segments(
         row_plan,
@@ -1926,11 +2145,16 @@ def _iter_column_blocks(
             selected, merged = lookups[source_idx]
             values = merged[np.searchsorted(selected, local_rows)]
         elif spec.name == source_column:
-            values = np.full(
-                n,
-                source_idx if spec.role == CELL_SOURCES_ROLE else name,
-                dtype=spec.dtype,
-            )
+            own = owned[source_idx]
+            if spec.role != CELL_SOURCES_ROLE:
+                values = np.full(n, name, dtype=spec.dtype)
+            elif own is None:
+                values = np.full(n, first_category[source_idx], dtype=spec.dtype)
+            else:
+                values = (
+                    first_category[source_idx]
+                    + _own_sources(table, own, local_rows, source=name)
+                ).astype(spec.dtype)
         elif spec.role == ASSAY_MEMBERSHIP_ROLE:
             assert spec.assay is not None
             state = membership[spec.assay][source_idx]
@@ -2028,6 +2252,7 @@ def write_cell_metadata(
             membership=membership,
             segment_rows=segment_rows,
             chunk_rows=chunk_size,
+            nested=metadata_plan.nestedSources,
         )
         # The merge's own membership contract wins over source attributes.
         attributes = dict(spec.attributes)
@@ -2049,7 +2274,10 @@ def write_cell_metadata(
         )
         if spec.role == CELL_SOURCES_ROLE:
             link_categories(
-                group, spec.name, np.asarray(row_plan.sourceNames), profile=profile
+                group,
+                spec.name,
+                np.asarray(metadata_plan.sourceCategories),
+                profile=profile,
             )
     group.attrs["complete"] = True
     return group
