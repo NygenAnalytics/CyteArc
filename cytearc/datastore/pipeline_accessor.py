@@ -1306,6 +1306,7 @@ class PipelineAccessor:
             >>> for paused in ds.pipeline.list_runs(status="paused"):
             ...     ds.pipeline.end_paused(paused, reason="analysis dropped")
         """
+        release_claim = bool_argument(release_claim, "release_claim")
         if self._store.zarr_mode != "r+":
             raise PermissionError("Ending a paused run requires zarr_mode='r+'")
         if isinstance(run, PipelineRun):
