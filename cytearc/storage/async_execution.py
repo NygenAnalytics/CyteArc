@@ -23,7 +23,13 @@ from typing import Any, TypeVar, cast
 import zarr
 from zarr.core.codec_pipeline import BatchedCodecPipeline
 from zarr.registry import register_pipeline
-from zarr.storage import LocalStore, WrapperStore
+from zarr.storage import (
+    FsspecStore,
+    LocalStore,
+    MemoryStore,
+    ObjectStore,
+    WrapperStore,
+)
 
 from ..utils.memory_budget import MemoryBudgetError
 from ..utils.numba import numba_threads
@@ -482,10 +488,11 @@ def zarr_host_threads() -> Iterator[None]:
 
 
 # The threads that the chunks of each store that a DataStore or a writer
-# registered decode and encode on, one entry for each store and count. Each
+# registered decode and encode on, one entry for each store and count, with the
+# store's location as _location_key named it when the store registered. Each
 # entry holds its store weakly, so the registry keeps nothing alive; the entry
 # of a collected store matches no store and goes at the next registration.
-_STORE_THREADS: tuple[tuple["weakref.ref[Any]", int], ...] = ()
+_STORE_THREADS: tuple[tuple["weakref.ref[Any]", int, tuple[Any, ...] | None], ...] = ()
 _STORE_THREADS_LOCK = threading.Lock()
 
 
@@ -502,8 +509,8 @@ def register_store_threads(store: Any, threads: int) -> None:
     Every Zarr read and write of the arrays of ``store``, and of each store
     that it wraps, decodes and encodes on at most that many threads, from any
     thread, unless it runs within :func:`zarr_decoding_threads`, whose count
-    wins. A store registered more than once, and a local store of the same
-    root as a registered one, such as the read-only copy that
+    wins. A store registered more than once, and a store of the same location
+    as a registered one, such as the read-only copy that
     ``zarr.open_group(store, mode="r")`` makes or a caller's own open of the
     location, decode on the fewest threads registered for any of them, so no
     registration's bound is exceeded. The registry holds each store weakly,
@@ -520,34 +527,77 @@ def register_store_threads(store: Any, threads: int) -> None:
         )
     # The store's arrays, opened after this, take CyteArc's codec pipeline.
     ensure_zarr_host_ceiling()
-    layers = list(_store_layers(store))
+    layers = [(layer, _location_key(layer)) for layer in _store_layers(store)]
     with _STORE_THREADS_LOCK:
         entries = [entry for entry in _STORE_THREADS if entry[0]() is not None]
-        for layer in layers:
+        for layer, location in layers:
             if not any(
                 reference() is layer and count == threads
-                for reference, count in entries
+                for reference, count, _ in entries
             ):
-                entries.append((weakref.ref(layer), threads))
+                entries.append((weakref.ref(layer), threads, location))
         _STORE_THREADS = tuple(entries)
+
+
+# The configuration entries that, beside its prefix, name where an obstore
+# store keeps its objects.
+_OBSTORE_LOCATION_KEYS = ("endpoint", "bucket", "account_name", "container_name")
+
+
+def _location_key(store: Any) -> tuple[Any, ...] | None:
+    """Return what names the place that ``store`` reads, or None for a store that matches only itself.
+
+    Each part is one that a store's read-only copy, made by ``with_read_only``,
+    shares with the store, and none compares the stored contents: a local
+    store's root; the dict of a memory store, with its path; an fsspec
+    store's protocol and path; and an obstore store's type with its URL, or
+    with its prefix and the endpoint, bucket, account and container of its
+    configuration, or else the obstore store itself.
+    """
+    if type(store) is LocalStore:
+        return ("local", store.root)
+    if isinstance(store, MemoryStore):
+        return ("memory", id(store._store_dict), getattr(store, "path", ""))
+    if isinstance(store, FsspecStore):
+        return ("fsspec", store.fs.protocol, store.path)
+    if isinstance(store, ObjectStore):
+        inner = store.store
+        url = getattr(inner, "url", None)
+        if url is not None:
+            return ("obstore", type(inner), str(url))
+        if hasattr(inner, "prefix"):
+            config = getattr(inner, "config", None) or {}
+            place = (config.get(key) for key in _OBSTORE_LOCATION_KEYS)
+            return ("obstore", type(inner), str(inner.prefix), *place)
+        # Obstore's memory store has neither, and a copy wraps the same one.
+        return ("obstore", id(inner))
+    return None
 
 
 def _registered_threads(store: Any) -> int | None:
     """Return the fewest threads registered for ``store`` or for a store that it wraps, or None.
 
-    A layer of ``store`` matches the registrations of that store object and,
-    for a local store, those of each registered local store of its root.
-    Other stores match only themselves: their equality can compare their
-    contents, as a memory store's does, rather than their location.
+    A layer of ``store`` matches the registrations of that store object and
+    of each registered store of the same location, as
+    :func:`_location_key` names it. A store of another kind matches only
+    itself.
     """
     entries = _STORE_THREADS
+    # Naming an obstore store's location builds its configuration, which a
+    # read of a store that nothing registered can skip.
+    if not entries:
+        return None
     fewest: int | None = None
     for layer in _store_layers(store):
-        local = type(layer) is LocalStore
-        for reference, threads in entries:
+        location = _location_key(layer)
+        for reference, threads, registered_location in entries:
             registered = reference()
+            # The dict that a collected memory store's location names may now
+            # be another store's.
+            if registered is None:
+                continue
             if registered is layer or (
-                local and type(registered) is LocalStore and registered == layer
+                location is not None and registered_location == location
             ):
                 fewest = threads if fewest is None else min(fewest, threads)
     return fewest

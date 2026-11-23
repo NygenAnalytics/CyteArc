@@ -1078,10 +1078,14 @@ def test_a_store_registered_again_keeps_the_fewest_threads(tmp_path) -> None:
     assert sorted(_entries_of(root.store)) == [1, 3]
 
 
-def test_a_memory_store_takes_only_its_own_threads(monkeypatch) -> None:
-    # A memory store's equality compares its keys and bytes, not a location,
-    # so another memory store that holds the same bytes takes no threads of a
-    # registered one, and a lookup never compares them.
+def test_a_memory_store_shares_its_threads_with_its_copies_and_not_with_a_twin(
+    monkeypatch,
+) -> None:
+    # The read-only copy that Zarr makes of a writable memory store holds the
+    # store's own dict, so it decodes on the store's threads. Another memory
+    # store that holds the same bytes in a dict of its own is another
+    # location, which takes no threads of the registered one, although the
+    # two are equal, and a lookup never compares their contents.
     from zarr.core.buffer import cpu
     from zarr.storage import MemoryStore
 
@@ -1089,12 +1093,14 @@ def test_a_memory_store_takes_only_its_own_threads(monkeypatch) -> None:
     root = zarr.open_group(store=memory, mode="w")
     values = _values(root, n_chunks=2)
     async_execution.register_store_threads(memory, 2)
+    copy = zarr.open_group(store=memory, mode="r")
     twin = MemoryStore(
         {
             key: cpu.Buffer.from_bytes(value.to_bytes())
             for key, value in memory._store_dict.items()
         }
     )
+    assert copy.store is not memory and copy.store.read_only
     assert twin == memory
 
     def compared(self: Any, other: object) -> bool:
@@ -1103,19 +1109,257 @@ def test_a_memory_store_takes_only_its_own_threads(monkeypatch) -> None:
     with monkeypatch.context() as patch:
         patch.setattr(MemoryStore, "__eq__", compared)
         assert async_execution._registered_threads(twin) is None
+        assert async_execution._registered_threads(copy.store) == 2
         assert async_execution._registered_threads(memory) == 2
     with recorded_codec_pools(host_threads=_HOST_THREADS) as pools:
         pools.label = "registered"
         np.testing.assert_array_equal(root["values"][:], values)
+        pools.label = "copy"
+        np.testing.assert_array_equal(copy["values"][:], values)
         pools.label = "twin"
         np.testing.assert_array_equal(
             zarr.open_group(store=twin, mode="r")["values"][:], values
         )
     assert pools.threads("registered") == [2, 2]
+    assert pools.threads("copy") == [2, 2]
     assert pools.threads("twin") == [_HOST_THREADS] * 2
 
 
-def test_a_lookup_compares_a_store_only_with_registered_stores_of_its_type(
+def test_a_managed_memory_store_matches_its_dict_at_its_own_path(tmp_path) -> None:
+    # Managed memory stores of one name share one dict, and each reads below
+    # its own path: a store of the same name and path takes the registered
+    # one's threads, and a store of the same name at another path is another
+    # location.
+    from zarr.storage import ManagedMemoryStore
+
+    name = f"threads-{tmp_path.name}"
+    registered = ManagedMemoryStore(name, path="a")
+    async_execution.register_store_threads(registered, 2)
+    assert async_execution._registered_threads(ManagedMemoryStore(name, path="a")) == 2
+    assert (
+        async_execution._registered_threads(ManagedMemoryStore(name, path="b")) is None
+    )
+    assert async_execution._registered_threads(registered.with_read_only(True)) == 2
+
+
+def test_an_fsspec_store_matches_by_its_protocol_and_path(tmp_path) -> None:
+    # The read-only copy of a writable fsspec store shares its file system
+    # and path, and another open of the same URL names the same protocol and
+    # path, so both decode on the registered store's threads; an fsspec
+    # store of another path decodes on the host's.
+    from zarr.storage import FsspecStore
+
+    url = f"file://{tmp_path}/registered.zarr"
+    # Fsspec's local file system makes no missing folder unless asked to.
+    writable = {"auto_mkdir": True}
+    store = FsspecStore.from_url(url, read_only=False, storage_options=writable)
+    root = zarr.open_group(store=store, mode="w")
+    values = _values(root, n_chunks=2)
+    async_execution.register_store_threads(store, 2)
+    copy = zarr.open_group(store=store, mode="r")
+    reopened = zarr.open_group(
+        store=FsspecStore.from_url(url, read_only=True), mode="r"
+    )
+    other = zarr.open_group(
+        store=FsspecStore.from_url(
+            f"file://{tmp_path}/other.zarr", read_only=False, storage_options=writable
+        ),
+        mode="w",
+    )
+    _values(other, n_chunks=2)
+    assert copy.store is not store and copy.store.fs is store.fs
+    assert reopened.store.fs is not store.fs
+    with recorded_codec_pools(host_threads=_HOST_THREADS) as pools:
+        for label, group in (("copy", copy), ("reopened", reopened), ("other", other)):
+            pools.label = label
+            np.testing.assert_array_equal(group["values"][:], values)
+    assert pools.threads("copy") == [2, 2]
+    assert pools.threads("reopened") == [2, 2]
+    assert pools.threads("other") == [_HOST_THREADS] * 2
+    # Fsspec's memory file system names the same path under another protocol.
+    elsewhere = FsspecStore.from_url(f"memory://{tmp_path}/registered.zarr")
+    assert elsewhere.path == store.path
+    assert async_execution._registered_threads(elsewhere) is None
+
+
+def test_an_object_store_matches_by_its_url_or_its_prefix(tmp_path) -> None:
+    # The read-only copy of a writable obstore store wraps the store's own
+    # obstore store. Another open of the same prefix, or of the same URL,
+    # names the same location; an obstore memory store, which has neither,
+    # matches only the stores that wrap it.
+    from obstore.store import AzureStore, GCSStore, HTTPStore
+    from obstore.store import LocalStore as ObstoreLocalStore
+    from obstore.store import MemoryStore as ObstoreMemoryStore
+    from obstore.store import S3Store
+    from zarr.storage import ObjectStore
+
+    for name in ("registered", "other"):
+        (tmp_path / name).mkdir()
+    store = ObjectStore(ObstoreLocalStore(prefix=tmp_path / "registered"))
+    root = zarr.open_group(store=store, mode="w")
+    values = _values(root, n_chunks=2)
+    async_execution.register_store_threads(store, 2)
+    copy = zarr.open_group(store=store, mode="r")
+    reopened = zarr.open_group(
+        store=ObjectStore(
+            ObstoreLocalStore(prefix=tmp_path / "registered"), read_only=True
+        ),
+        mode="r",
+    )
+    other = zarr.open_group(
+        store=ObjectStore(ObstoreLocalStore(prefix=tmp_path / "other")), mode="w"
+    )
+    _values(other, n_chunks=2)
+    assert copy.store is not store and copy.store.store is store.store
+    with recorded_codec_pools(host_threads=_HOST_THREADS) as pools:
+        for label, group in (("copy", copy), ("reopened", reopened), ("other", other)):
+            pools.label = label
+            np.testing.assert_array_equal(group["values"][:], values)
+    assert pools.threads("copy") == [2, 2]
+    assert pools.threads("reopened") == [2, 2]
+    assert pools.threads("other") == [_HOST_THREADS] * 2
+
+    memory = ObjectStore(ObstoreMemoryStore())
+    async_execution.register_store_threads(memory, 3)
+    assert async_execution._registered_threads(memory.with_read_only(True)) == 3
+    assert (
+        async_execution._registered_threads(ObjectStore(ObstoreMemoryStore())) is None
+    )
+    # One prefix in another bucket, behind another endpoint, in another
+    # Azure container or account, or in a GCS bucket of the same name, is
+    # another place.
+    prefix = tmp_path.name
+
+    def s3(bucket: str = "one", **options: str) -> Any:
+        return ObjectStore(
+            S3Store(
+                bucket,
+                prefix=prefix,
+                region="us-east-1",
+                skip_signature=True,
+                **options,
+            )
+        )
+
+    def azure(container: str = "container", account: str = "account") -> Any:
+        return ObjectStore(
+            AzureStore(
+                container, prefix=prefix, account_name=account, skip_signature=True
+            )
+        )
+
+    registered = {"s3": s3(), "azure": azure()}
+    async_execution.register_store_threads(registered["s3"], 3)
+    async_execution.register_store_threads(registered["azure"], 5)
+    assert async_execution._registered_threads(s3()) == 3
+    assert async_execution._registered_threads(azure()) == 5
+    elsewhere = {
+        "another bucket": s3("two"),
+        "another endpoint": s3(endpoint="http://127.0.0.1:9000"),
+        "another container": azure(container="other"),
+        "another account": azure(account="other"),
+        # Obstore 0.5.1 refuses skip_signature for GCS, which needs no
+        # credentials to be built.
+        "a GCS bucket of the same name": ObjectStore(GCSStore("one", prefix=prefix)),
+    }
+    for label, store_elsewhere in elsewhere.items():
+        assert async_execution._registered_threads(store_elsewhere) is None, label
+    url = f"https://example.invalid/{tmp_path.name}/data.zarr"
+    remote = ObjectStore(HTTPStore.from_url(url))
+    async_execution.register_store_threads(remote, 4)
+    assert (
+        async_execution._registered_threads(ObjectStore(HTTPStore.from_url(url))) == 4
+    )
+    assert (
+        async_execution._registered_threads(
+            ObjectStore(HTTPStore.from_url(f"{url}/other"))
+        )
+        is None
+    )
+
+
+def _memory_copy_of(source: str) -> Any:
+    """Return a writable memory store that holds the files of the store at ``source``."""
+    from zarr.core.buffer import cpu
+    from zarr.storage import MemoryStore
+
+    root = Path(source)
+    return MemoryStore(
+        {
+            path.relative_to(root).as_posix(): cpu.Buffer.from_bytes(path.read_bytes())
+            for path in root.rglob("*")
+            if path.is_file()
+        }
+    )
+
+
+def test_a_group_that_artifacts_load_returns_decodes_on_a_memory_stores_threads(
+    datastore_zarr_root,
+) -> None:
+    # artifacts.load reads a writable store's group through the read-only
+    # copy that Zarr makes of the store; the copy of a memory store holds the
+    # store's dict, so its reads decode on the store's one thread.
+    store = DataStore(
+        _memory_copy_of(datastore_zarr_root), default_assay="RNA", nthreads=1
+    )
+    cells = store.snapshot_cell_selection("I")
+    group = store.artifacts.load(cells)
+    assert group.store is not store.z.store and group.store.read_only
+    with recorded_codec_pools(host_threads=_HOST_THREADS) as pools:
+        pools.label = "group"
+        group["values"][:]
+    assert pools.threads("group") == [1]
+
+
+@pytest.mark.usefixtures("hub_offline")
+def test_a_group_that_artifacts_load_returns_decodes_on_a_hub_stores_threads(
+    datastore_zarr_root, tmp_path, loopback_hub
+) -> None:
+    # A store opened writable from a Hugging Face bucket reads its groups
+    # through read-only copies that share its file system and path, so they
+    # decode on the store's one thread. The loopback hub serves reads only,
+    # so the snapshot is taken in a local copy before the hub serves it.
+    from tests.fixtures_hub import BUCKET_ID
+
+    local = _copied_store(datastore_zarr_root, tmp_path, nthreads=1)
+    cells = local.snapshot_cell_selection("I")
+    shutil.copytree(local.zarr_loc, loopback_hub.root / "store.zarr")
+    store = DataStore(
+        f"hf://buckets/{BUCKET_ID}/store.zarr",
+        zarr_mode="r+",
+        storage_options={"token": False, "endpoint": loopback_hub.endpoint},
+        default_assay="RNA",
+        nthreads=1,
+    )
+    group = store.artifacts.load(cells)
+    assert group.store is not store.z.store and group.store.read_only
+    with recorded_codec_pools(host_threads=_HOST_THREADS) as pools:
+        pools.label = "group"
+        group["values"][:]
+    assert pools.threads("group") == [1]
+
+
+def test_a_registered_wrapper_lends_its_threads_to_other_opens_of_the_store_it_wraps(
+    tmp_path,
+) -> None:
+    # Registering a wrapper registers each store that it wraps at that
+    # store's own location, so another open of the wrapped folder takes the
+    # wrapper's threads, and a folder beside it takes none.
+    from zarr.storage import LocalStore, LoggingStore
+
+    wrapper = LoggingStore(LocalStore(str(tmp_path / "wrapped.zarr")))
+    async_execution.register_store_threads(wrapper, 2)
+    assert (
+        async_execution._registered_threads(LocalStore(str(tmp_path / "wrapped.zarr")))
+        == 2
+    )
+    assert (
+        async_execution._registered_threads(LocalStore(str(tmp_path / "beside.zarr")))
+        is None
+    )
+
+
+def test_a_lookup_never_asks_a_store_whether_it_equals_another(
     tmp_path, caplog
 ) -> None:
     # A LoggingStore logs every call, its equality checks included; reads of
@@ -1138,7 +1382,7 @@ def test_a_lookup_compares_a_store_only_with_registered_stores_of_its_type(
 def _entries_of(store: Any) -> list[int]:
     return [
         threads
-        for reference, threads in async_execution._STORE_THREADS
+        for reference, threads, _ in async_execution._STORE_THREADS
         if reference() is store
     ]
 
@@ -1162,7 +1406,7 @@ def test_the_registry_keeps_no_store_alive_and_forgets_a_collected_one(
     assert async_execution._registered_threads(reopened) == 2
     (entry,) = [
         reference
-        for reference, _ in async_execution._STORE_THREADS
+        for reference, *_ in async_execution._STORE_THREADS
         if reference() is store
     ]
     held = weakref.ref(store)
@@ -1175,7 +1419,7 @@ def test_the_registry_keeps_no_store_alive_and_forgets_a_collected_one(
     later = LocalStore(str(tmp_path / "later.zarr"))
     async_execution.register_store_threads(later, 3)
     assert all(
-        reference is not entry for reference, _ in async_execution._STORE_THREADS
+        reference is not entry for reference, *_ in async_execution._STORE_THREADS
     )
 
 
