@@ -33,6 +33,7 @@ returns a durable, read-only {py:class}`~cytearc.PipelineRun` whose outputs are 
    cytearc.datastore.pipeline_accessor.PipelineAccessor.perturbation
    cytearc.datastore.pipeline_accessor.PipelineAccessor.plan
    cytearc.datastore.pipeline_accessor.PipelineAccessor.rerun
+   cytearc.datastore.pipeline_accessor.PipelineAccessor.resume
    cytearc.datastore.pipeline_accessor.PipelineAccessor.describe
    cytearc.datastore.pipeline_accessor.PipelineAccessor.open
    cytearc.datastore.pipeline_accessor.PipelineAccessor.list_runs
@@ -345,6 +346,7 @@ A recipe checks its call against the store before it creates a run record, and a
 - `leiden selected must be one of the partitions`;
 - `snapshot_columns collide with reserved run fields: [...]`;
 - `TypeError("callback must be callable")` and a `cancel` that is not a `CancellationToken`;
+- `run_until='clustering' is not a stage of the rna recipe; ...` and `run_until='harmony' names a stage that this run's settings skip; ...`, which list the stages that the run runs ([Pause and resume a run](#pause-and-resume-a-run));
 - `The rna recipe needs counts: its doublet scoring reads counts. ...`, for an assay of normalized values, naming every stage of the run that needs counts and the argument that turns it off, as {ref}`normalized values <normalized_values>` describes.
 
 Before the run starts, the recipe also checks the settings of every stage with the checks of the stage's method, so a value that the method refuses raises the method's error, with the stage's name before the method's message, such as `pca: batch_size must be at least 1`, since several stages take a `batch_size` or a seed. An omitted setting is checked as the method's default. Among them, `doublets={'expected_doublet_rate': 1.5}`, `ann_index={'ann_m': 1}`, `pca={'feat_scaling': 0}`, `umap={'min_dist': -1}`, `leiden={'backend': 'louvain'}`, and `paris={'n_clusters': 0}` raise `ValueError` or `TypeError`. A normalization flag must apply to the run's normalizer, as the stage that reads it requires: `normalization={'log_transform': True}` of a run of Pearson residuals or of an `atac` run, and `cell_cycle={'log_transform': True}` of a run of Pearson residuals, raise `ValueError`. The recipe also checks:
@@ -384,10 +386,7 @@ Before the run starts, the recipe also checks the settings of every stage with t
 
 A stage's method checks the limits that depend on the data when the stage runs, such as the memory that the ANN index or cluster selection needs, a Paris `n_clusters` above the number of cells, a sample with fewer control cells than the signature's `n_neighbors`, or clusters of fewer than 3 profiles. Such a limit fails its stage after the earlier stages have run: the run is recorded as failed and raises `PipelineExecutionError`.
 
-A handled stage failure raises {py:class}`~cytearc.PipelineExecutionError` after the stage and
-the run are recorded as failed. Use its `run_id` to inspect the persisted failure, and its `stage`
-to identify the failing stage, or `"finalize"` when completing the run record failed. The original
-exception is retained as `__cause__`.
+A handled stage failure raises {py:class}`~cytearc.PipelineExecutionError` after the stage and the run are recorded as failed. Use its `run_id` to inspect the persisted failure, and its `stage` to identify the failing stage, `"pause"` when pausing the run failed, or `"finalize"` when completing the run record failed. The original exception is retained as `__cause__`.
 
 ```python
 from cytearc import PipelineExecutionError
@@ -433,11 +432,11 @@ An artifact's identity includes the identities of its inputs. A stage that reads
 
 A computed stage's `estimate`, a {py:class}`~cytearc.datastore.pipeline_accessor.PipelineStageEstimate`, holds what the stage took in the latest earlier run of the same recipe and assay that computed it, with that run's ID: its wall and CPU time, sampled RSS peaks, OS thread peak, network bytes, the process's peak RSS when the stage raised it, and the `resources` that its process had, such as `workers` and `memoryLimitBytes` ([Stage resources](#stage-resources)). A run that reused every artifact of the stage does not count, and with no such run `estimate` is None. A value that the earlier run did not record, as runs of releases before these measurements record no CPU time, is None. It is a past measurement, not a model: that run's cells and settings can differ, and its `resources` describe the machine it ran on.
 
-A plan raises the errors that the call raises before it writes, such as a `ValueError` for an already completed label or for a setting that the stage's method refuses ([Validation before a run starts](#validation-before-a-run-starts)), and a `TypeError` for `callback` or `cancel`, which belong to a run. A stage's method checks the limits that depend on the data only when the stage runs: when every stage before it would be reused, the plan reaches that check and raises the stage's error, as the run would. The plan goes through each stage until the stage would compute an artifact, so a reused stage warns from its saved diagnostics as it does in a run.
+A plan raises the errors that the call raises before it writes, such as a `ValueError` for an already completed label or for a setting that the stage's method refuses ([Validation before a run starts](#validation-before-a-run-starts)), and a `TypeError` for `run_until`, `callback`, or `cancel`, which belong to a run. A stage's method checks the limits that depend on the data only when the stage runs: when every stage before it would be reused, the plan reaches that check and raises the stage's error, as the run would. The plan goes through each stage until the stage would compute an artifact, so a reused stage warns from its saved diagnostics as it does in a run.
 
 ## Rerun a run with changed settings
 
-`ds.pipeline.rerun` runs a run's recipe again with the settings that the run recorded, so a call passes only what it changes. `run.settings()` returns those settings as the keywords of the recipe's method, every keyword but `label`, `callback`, and `cancel`, and `ds.pipeline.plan` takes a run in place of a recipe's name to report what the rerun would compute.
+`ds.pipeline.rerun` runs a run's recipe again with the settings that the run recorded, so a call passes only what it changes. `run.settings()` returns those settings as the keywords of the recipe's method, every keyword but `label`, `run_until`, `callback`, and `cancel`, and `ds.pipeline.plan` takes a run in place of a recipe's name to report what the rerun would compute.
 
 ```python
 base = ds.pipeline.open(label="baseline")
@@ -449,6 +448,31 @@ fine = ds.pipeline.rerun(base, label="fine", leiden={"partitions": [2.0]})
 A mapping changes a stage's settings key by key: `leiden={"partitions": [2.0]}` keeps the run's other Leiden settings, among them its `selected` resolution, which must be one of the new partitions or None. A mapping inside a stage's settings, such as Harmony's `harmony_params`, is replaced whole. `False` turns an optional stage off, `True` runs it with its defaults, None takes the keyword's default, and every other value replaces the run's. A rerun with new `cells` therefore keeps the run's filtering, and `filtering=None` filters the new cells as a call that omits `filtering` would. Stages whose settings and inputs are unchanged reuse the run's artifacts, and the new run takes its own `label`.
 
 The settings are those that the call gave, with the defaults that the recipe fits to its data resolved, such as an `atac` run's `prevalent_peaks` `top_n`: a rerun that changes the cells or the panel keeps them, and the recipe refuses a value that no longer fits. They hold the run's normalizer as its `normalization` `method`, so a rerun normalizes as the run did whatever the session's `normMethod` is, and refuses a custom normalizer that the assay's `normMethod` is not ([Normalization method](#normalization-method)). A `cells` column is passed by its name, so a rerun reads the column as it is now, and settings that the run did not set take this release's defaults ([Runs saved by other releases](#runs-saved-by-other-releases)). A run records its settings when it starts, so a failed or interrupted run reruns too, with the setting that failed changed. A run recorded before its recipe gained a keyword or a stage setting, such as an `rna` run recorded before `localmap`, reruns with that setting's default, which matches what the earlier release did, so the plan reuses the run's stages and a call can turn the new stage on; a run recorded before the normalization `method` reruns with the normalizer that its normalized values record and the PCA feature scaling that it applied ([Runs saved by other releases](#runs-saved-by-other-releases)). `run.settings()` raises `ValueError` for a run whose recipe this release lacks, such as one that `pipeline.run()` saved, and for a run that records a keyword its recipe no longer takes.
+
+## Pause and resume a run
+
+A long run can stop after a chosen stage and continue later under the same run ID, in this process or another, on any machine that opens the store. Pass `run_until`, the name of a stage that the call runs, to a recipe or to `rerun`: the run pauses once that stage has completed and returns with status `paused`. `ds.pipeline.resume` runs the rest:
+
+```python
+paused = ds.pipeline.rna(label="baseline", run_until="pca")
+paused.status                    # 'paused'
+
+# Later, in any process that opens the store, such as one on a larger machine:
+run = ds.pipeline.resume(paused.run_id)
+run.status, run.label            # ('completed', 'baseline')
+```
+
+`resume` rebuilds the recipe from the settings that the run recorded, as `rerun` does, and restores what the finished stages left from their saved artifacts, computing and writing nothing for them. It then runs the next stages and completes the run, or pauses it again after the stage that its own `run_until` names; it takes `callback` and `cancel` as a recipe does. A run paused after each stage in turn and resumed to the end holds the same artifacts, provenance, and stage records as a single call, apart from timings and resources. The store is all that a resume reads, so the process that resumes plans its work with the `nthreads` and memory budget of the store that it opened, and each stage record holds the resources of the process that ran it ([Stage resources](#stage-resources)).
+
+`run_until` must name a stage that the call runs: a name outside the recipe, or a stage that the call's settings skip, raises `ValueError` before anything is written, listing the stages that the run runs. When only skipped stages follow the stage, the run completes instead of pausing. `plan` takes no `run_until`.
+
+A paused run has no outputs and no label yet: `run[key]` and the frozen views raise `RuntimeError`, as for a running run, and `list_runs(status="paused")` lists the runs that wait to resume. Its record holds `segments`, one for the process that started the run and one for each process that resumed it, with the times at which the process started and stopped, the stages that it ran, why it stopped (`paused`, or the status that the run ended with), and its signal protection. The Markdown report shows them as a table.
+
+`resume` refuses, writing nothing, a run that is not paused, such as a running, completed, failed, or interrupted run, which `rerun` runs again under a new run ID; a run that another CyteArc release recorded; a run whose recorded settings no longer resolve to the stages and settings that it recorded; and a run whose finished stages would not reuse the artifacts that their stage records name, as after a cell column that a stage read changed or an artifact was copied incompletely with the store. Its `run_until` must name a stage that the run has not run yet.
+
+A paused run keeps its requested label without reserving it. The label is checked when the run pauses and when it resumes, and claimed when the run completes, as for any run: a run whose label another run has committed meanwhile fails when it would pause, with `PipelineExecutionError` for the step `pause`, and `resume` refuses it. A resume claims its pause with an atomic write, so of two processes that resume one paused run at once, one runs it and the other raises `RuntimeError`. A storage backend without atomic conditional creation therefore refuses `run_until` and `resume` before anything is written.
+
+A cancellation, signal, or failure after a resume ends the run interrupted or failed, as for any run, and its last segment records why. A process that dies leaves the run `running`, as for any run. The finished stages keep their artifacts either way, so `rerun` reuses them under a new run ID.
 
 ## Describe a recipe
 
@@ -872,13 +896,7 @@ failed = ds.pipeline.list_runs(status="failed")
 unfinished = ds.pipeline.list_runs(status=["running", "interrupted"])
 ```
 
-`open` requires exactly one of `run_id` or `label`. Only a successfully completed run acquires its
-requested label. Failed and interrupted attempts do not reserve it. `list_runs` returns newest
-first and includes every status, `running`, `completed`, `failed`, and `interrupted`, unless
-`status` names one or a sequence of them. Concurrent finalizers use an atomic label claim, so at
-most one completed run can acquire a name. A storage backend without atomic conditional creation
-rejects `label=` before a run record or computation starts; unlabeled runs are unaffected. An
-unclean incomplete finalizer blocks reuse of its requested label and fails closed.
+`open` requires exactly one of `run_id` or `label`. Only a successfully completed run acquires its requested label. Paused, failed, and interrupted attempts do not reserve it. `list_runs` returns newest first and includes every status, `running`, `paused`, `completed`, `failed`, and `interrupted`, unless `status` names one or a sequence of them. Concurrent finalizers use an atomic label claim, so at most one completed run can acquire a name. A storage backend without atomic conditional creation rejects `label=` before a run record or computation starts; unlabeled runs are unaffected. An unclean incomplete finalizer blocks reuse of its requested label and fails closed.
 
 After confirming that the owner process has stopped, explicitly abandon that exact claim before
 retrying the label:
@@ -898,8 +916,7 @@ torn terminal payload, and records an `abandoned_label_claim` interruption. It r
 
 Every status exposes identity, status, recipe, and `run.report(format="dict" | "markdown")`. Only a completed run exposes mapping outputs and frozen views. Reports include what each stage used and what its process had ([Stage resources](#stage-resources)), artifact plans with `created` or `reused` dispositions, stage summaries and warnings ([Diagnostics](#diagnostics)), failures, interruption details, and signal-guard availability.
 
-A hard process death can leave `complete=False`; this is reported as an unclean incomplete run.
-There is no resume, repair, or same-ID retry. A new invocation may reuse only complete artifacts.
+A hard process death can leave `complete=False`; this is reported as an unclean incomplete run. Such a run has no repair or same-ID retry, since only a paused run resumes ([Pause and resume a run](#pause-and-resume-a-run)), and a new invocation reuses only its complete artifacts.
 
 ### Stage resources
 
@@ -948,6 +965,8 @@ its compatibility inventory.
 Releases from before the stage resources open the runs that this release saves, but their `report()` raises on the new metric fields, and their `plan` skips those stage records with a warning.
 
 Runs of releases before the one `leiden` stage hold one `leiden_<resolution>` stage, output, and cell field for each Leiden candidate, and they keep them: `run["leiden_1.0"]` and `run.cells.fetch("leiden_1.0")` read such a run, and it plots and exports with those names, while it has no `run["leiden"]`. To read a candidate the same way in runs of every release, find it by its graph and resolution with `ds.artifacts.find("clusters", graph=run["connectivity_map"], method="leiden", resolution=1.0)`. A new run with the same settings reuses their Leiden candidates. The runs that this release saves hold the record field `outputLists`, which earlier releases do not know: they skip those runs when they list runs and raise when they open one.
+
+A run that paused holds the record field `segments` and may hold the status `paused`, which releases before [pause and resume](#pause-and-resume-a-run) do not know: they skip such a run when they list runs and raise when they open it. A run that never paused holds no `segments`, so its record is unchanged. A paused run resumes only with the release that recorded it.
 
 A cell field can read an artifact of another assay than the run's, as the guide fields of a `perturbation` run do ([Frozen fields](#frozen-fields)). Such a field is an ordinary entry of the record's `fields`, so run records keep their shape, with no new record field, schema version, or migration, and every saved run reads as before. CyteArc 1.3.0 and earlier releases read cell fields of the run's assay only: they refuse the cell view of a run with such a field, with an `ArtifactResolutionError` whose code is `pipeline_field_axis_mismatch`, while its outputs and feature view open. They do not know the artifact kinds of a `perturbation` run's guide calls and labels, such as `guide_calls`, so they open no `perturbation` run. A run keeps the fields that it recorded and gains none later: a `perturbation` run saved without the guide fields gets them only from a new run of the recipe with the same settings, under another label or none, which reuses every artifact of the earlier run.
 
@@ -1032,12 +1051,14 @@ the run has, skipped stages included), and `time_ns`. The other fields depend on
 | Kind | Emitted | Other fields |
 | --- | --- | --- |
 | `run_started` | after the run record is created | |
+| `run_resumed` | after a paused run is recorded running again, in place of `run_started` | |
 | `stage_started` | after a stage's record is written, before the stage runs | |
 | `stage_progress` | while a stage runs, as a CyteArc progress bar advances | `progress` |
 | `stage_completed` | after the stage's outputs are recorded | `metrics`, `summary`, `outputs`, `reused`, `warnings` |
 | `stage_skipped` | after a stage that the run does not compute is recorded as skipped: one that the call turned off, or one that the recipe skips, such as `cluster_selection` with a `selected` resolution, `embedding_initialization` without UMAP, LocalMAP, or t-SNE, `pca` with `dims=0`, or a perturbation run's `signature` without Mixscape and `profiles` without clusters | `metrics` |
 | `stage_failed` | after the stage and the run are recorded as failed | `metrics`, `warnings`, `error` |
 | `stage_interrupted` | after the stage and the run are recorded as interrupted | `metrics`, `warnings`, `error` |
+| `run_paused` | after the run is recorded paused, once the stage that `run_until` names has completed | |
 | `run_completed` | after the run record is complete | |
 | `run_failed` | after the run is recorded as failed | `error` |
 | `run_interrupted` | after the run is recorded as interrupted | `error` |
@@ -1047,16 +1068,9 @@ record holds. `error` is the exception: the stage's own for `stage_failed`, the
 `PipelineExecutionError` for `run_failed`, and the interruption for `stage_interrupted` and
 `run_interrupted`.
 
-A run emits `run_started` first. Each stage then emits `stage_skipped` alone, or `stage_started`,
-any number of `stage_progress` events, and one of `stage_completed`, `stage_failed`, or
-`stage_interrupted`, before the next stage emits anything. The run then ends with one run event:
-`run_completed` after the last stage, `run_failed`, or `run_interrupted`. `run_started` and
-`run_completed` name no stage.
+A run emits `run_started` first, and a process that resumes a paused run emits `run_resumed` instead and then the events of the stages that it runs. Each stage then emits `stage_skipped` alone, or `stage_started`, any number of `stage_progress` events, and one of `stage_completed`, `stage_failed`, or `stage_interrupted`, before the next stage emits anything. The process then ends with one run event: `run_completed` after the last stage, `run_paused` after the stage that `run_until` names, `run_failed`, or `run_interrupted`. `run_started`, `run_resumed`, `run_paused`, and `run_completed` name no stage.
 
-- `run_failed` always names a stage. It follows `stage_failed` and names that stage. A failure to
-  write a stage's first record emits it without a stage event, and a failure to complete the run
-  record names the step `finalize`, which has no ordinal. An error while a skipped stage is
-  recorded emits `stage_failed` without `stage_started`.
+- `run_failed` always names a stage. It follows `stage_failed` and names that stage. A failure to write a stage's first record emits it without a stage event, a failure to pause the run names the step `pause`, and a failure to complete the run record names the step `finalize`; neither step has an ordinal. An error while a skipped stage is recorded emits `stage_failed` without `stage_started`.
 - `run_interrupted` names a stage only when the interruption cut that stage's work short: it then
   follows `stage_interrupted`. An interruption between two stages or while a skipped stage is
   recorded emits `run_interrupted` alone, with no stage. So does one that a stage notices just after
@@ -1136,9 +1150,7 @@ name the run, the stage whose work the cancellation cut short, and the reason. L
 after a stage's work finished. Completed stages keep their artifacts, so a new run with the same
 settings reuses them.
 
-A cancellation that arrives once the run record is complete comes too late to stop the run, and
-the call returns the completed run. One that races with a stage failure leaves the run failed and
-raises `PipelineExecutionError`.
+A cancellation that arrives once the run record is complete comes too late to stop the run, and the call returns the completed run, or the paused run when the run had paused. One that races with a stage failure leaves the run failed and raises `PipelineExecutionError`.
 
 A token stays cancelled. A run given a cancelled token raises `PipelineCancelled` with `run_id` and
 `stage` None before it writes anything; its call is still validated first. `cancel()` returns True
@@ -1189,19 +1201,13 @@ for running in monitor.pipeline.list_runs(status="running"):
     print(report["run"]["requestedLabel"], current, len(report["run"]["stageOrder"]))
 ```
 
-`report()` reads the stage records again on every call, but a `PipelineRun` keeps the run record
-that it opened, so open the run again with `monitor.pipeline.open(run_id=...)` to see its status
-change. A running run has no `label` until it completes; its `requestedLabel` names the label that
-it will claim. A stage record shows `running` while its stage runs and its terminal status,
-metrics, summary, and warnings once it ends; stages that have not started have no record yet. A
-process that died without cleanup leaves its run `running`, and the record has no heartbeat, so
-confirm that the process has stopped before treating such a run as abandoned.
+`report()` reads the stage records again on every call, but a `PipelineRun` keeps the run record that it opened, so open the run again with `monitor.pipeline.open(run_id=...)` to see its status change. A running run has no `label` until it completes; its `requestedLabel` names the label that it will claim. A stage record shows `running` while its stage runs and its terminal status, metrics, summary, and warnings once it ends; stages that have not started have no record yet. A process that died without cleanup leaves its run `running`, and the record has no heartbeat, so confirm that the process has stopped before treating such a run as abandoned. A paused run is `paused`, and `list_runs(status="paused")` lists the runs that wait for a resume.
 
 ## Public types
 
 ```{eval-rst}
 .. autoclass:: cytearc.datastore.pipeline_accessor.PipelineAccessor
-    :members: rna, atac, adt, multimodal, perturbation, plan, rerun, describe, open, list_runs, abandon_label_claim
+    :members: rna, atac, adt, multimodal, perturbation, plan, rerun, resume, describe, open, list_runs, abandon_label_claim
 
 .. autoclass:: cytearc.PipelineRun
     :members:
