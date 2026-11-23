@@ -5682,11 +5682,14 @@ def test_a_merge_keeps_dates_and_durations_of_different_units_at_the_finer_unit(
         assert {
             cell: str(value) for cell, value in zip(ids, stored, strict=True)
         } == expected, name
-        # An export writes each value as the text that NumPy writes, as it
-        # writes the dates of any store.
+        # An export writes each value as the text that NumPy writes, and NaT
+        # as missing, as it writes the dates of any store.
         assert {
-            cell: str(value) for cell, value in exported.obs[name].items()
-        } == expected, name
+            cell: None if pd.isna(value) else str(value)
+            for cell, value in exported.obs[name].astype(object).items()
+        } == {
+            cell: None if value == "NaT" else value for cell, value in expected.items()
+        }, name
     assert dropped == []
     merged = _merged.cells.to_pandas_dataframe(["orig_day"])["orig_day"]
     assert int(merged.isna().sum()) == 3

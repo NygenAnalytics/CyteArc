@@ -818,7 +818,8 @@ def test_a_composite_keeps_dates_and_durations_of_different_units_at_the_finer_u
         assert stored.dtype == dtype, column
         # Each selected cell holds its value as NumPy casts it to the finer
         # unit, NaT included, which readers take as missing without a mask,
-        # and an export writes each as the text that NumPy writes.
+        # and an export writes each as the text that NumPy writes, and NaT as
+        # missing.
         expected = {
             f"{name}__c{row}": str(cells[name][column][[row]].astype(dtype)[0])
             for name, selected in rows.items()
@@ -829,8 +830,11 @@ def test_a_composite_keeps_dates_and_durations_of_different_units_at_the_finer_u
             cell: str(value) for cell, value in zip(ids, stored, strict=True)
         } == expected, column
         assert {
-            cell: str(value) for cell, value in exported.obs[f"orig_{column}"].items()
-        } == expected, column
+            cell: None if pd.isna(value) else str(value)
+            for cell, value in exported.obs[f"orig_{column}"].astype(object).items()
+        } == {
+            cell: None if value == "NaT" else value for cell, value in expected.items()
+        }, column
     # b holds no lag, so each gene takes a's, cast to milliseconds by NumPy.
     lags = joint.z["RNA/featureData"]
     assert np.asarray(lags["lag"][:]).dtype == np.dtype("timedelta64[ms]")

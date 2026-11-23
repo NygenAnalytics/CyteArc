@@ -462,10 +462,7 @@ wraps silently, as `X * 300` does in `uint16`, and `numpy.log1p` of `uint8` retu
 while `float32` holds every such count exactly and is the dtype that Scanpy's readers return. A
 count that an explicit dtype cannot hold raises `OverflowError`.
 
-Nullable metadata columns keep a stored placeholder in each row that their linked missing mask
-flags. `to_anndata` and `to_h5ad` export those rows as missing values with or without `run`:
-numeric columns become float64 with `NaN`, boolean columns become nullable booleans, and other
-columns hold a missing value, which H5AD files store as a missing category.
+Nullable metadata columns keep a stored placeholder in each row that their linked missing mask flags. `to_anndata` and `to_h5ad` export those rows as missing values with or without `run`: numeric columns become float64 with `NaN`, boolean columns become nullable booleans, and other columns hold a missing value, which H5AD files store as a missing category. A column of dates or durations keeps its missing values as NaT, without a mask. `to_anndata` keeps such a column as pandas dates or durations, whose NaT pandas reads as missing, and `to_h5ad`, since AnnData stores no dates or durations, writes each value as the text that NumPy writes for it and each NaT as a missing category.
 
 ### Artifacts in exports
 
