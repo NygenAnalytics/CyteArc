@@ -457,9 +457,11 @@ def guide_calls_frames(
     rows, slots = np.nonzero(np.asarray(guide_codes) >= 0)
     order = np.lexsort((slots, rows))
     rows, slots = rows[order], slots[order]
+    # Each call's ID is taken from the cells' index, so it has the index's
+    # dtype whether the IDs were stored as fixed-width or variable-width text.
     calls = pd.DataFrame(
         {
-            "ids": np.asarray(cell_ids)[rows],
+            "ids": index.take(rows),
             "guide": np.asarray(guide_ids, dtype=object)[
                 np.asarray(guide_codes)[rows, slots]
             ],

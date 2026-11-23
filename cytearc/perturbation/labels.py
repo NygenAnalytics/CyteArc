@@ -451,11 +451,10 @@ def perturbation_label_frames(
     codes = np.asarray(target_codes)
     rows, slots = np.nonzero(codes >= 0)
     names = np.asarray(target_names, dtype=object)
+    # Each row's ID is taken from the cells' index, so it has the index's
+    # dtype whether the IDs were stored as fixed-width or variable-width text.
     targets = pd.DataFrame(
-        {
-            "ids": np.asarray(cell_ids)[rows],
-            "target": names[codes[rows, slots]],
-        }
+        {"ids": index.take(rows), "target": names[codes[rows, slots]]}
     )
     guide_codes = np.asarray(guide_target_codes)
     targeted = guide_codes >= 0

@@ -253,18 +253,20 @@ def test_calls_and_labels_of_cells_whose_ids_are_variable_width_text_load_alike(
         store.perturbation.labels(template.calls, controls=CONTROLS)
     )
 
+    # The same tables, their IDs of the dtype that pandas gives the
+    # fixed-width IDs.
     cells = [f"cell{index}" for index in range(len(COUNTS))]
-    assert calls.cells.index.tolist() == fixed_calls.cells.index.tolist() == cells
-    for name, column in fixed_calls.cells.items():
-        assert calls.cells[name].tolist() == column.tolist(), name
-    for name, column in fixed_calls.calls.items():
-        assert calls.calls[name].tolist() == column.tolist(), name
-    assert labels.cells.index.tolist() == cells
+    assert calls.cells.index.tolist() == cells
     assert labels.cells["label"].tolist() == SINGLE
-    for frame in ("cells", "targets", "guides"):
-        loaded, fixed = getattr(labels, frame), getattr(fixed_labels, frame)
-        for name, column in fixed.items():
-            assert loaded[name].tolist() == column.tolist(), (frame, name)
+    pairs = [
+        (calls.cells, fixed_calls.cells),
+        (calls.calls, fixed_calls.calls),
+        (labels.cells, fixed_labels.cells),
+        (labels.targets, fixed_labels.targets),
+        (labels.guides, fixed_labels.guides),
+    ]
+    for loaded, fixed in pairs:
+        pd.testing.assert_frame_equal(loaded, fixed)
 
 
 def test_a_target_column_of_numbers_names_each_target_by_its_number(
