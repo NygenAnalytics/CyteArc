@@ -281,14 +281,20 @@ def _dense_band_writes(
         del band
 
 
-def _producer_process_bytes(producers: int, reserveBytes: int) -> int:
+def _producer_process_bytes(
+    producers: int, reserveBytes: int, residentBytes: int
+) -> int:
     """Return the bytes that producer processes hold while the parent writes.
 
     A single producer is a generator in the writing process and is suspended
     while bands are written. Several producers run in their own processes and
-    keep buffering during the writes, so each holds its whole reserve.
+    keep buffering during the writes, so each holds its whole reserve beside
+    the ``residentBytes`` that it holds throughout, such as the row pointers
+    of its own reader.
     """
-    return int(producers) * int(reserveBytes) if int(producers) > 1 else 0
+    if int(producers) <= 1:
+        return 0
+    return int(producers) * (int(reserveBytes) + int(residentBytes))
 
 
 def _run_worker(
@@ -2016,9 +2022,9 @@ class H5adToZarr:
         """Return the bytes that this process holds from the start of the counts write to its end.
 
         They are what :meth:`_resident_bytes` counts and the count summaries
-        of every cell, into which the windows of writer processes merge. A
-        process that writes its own window holds what
-        :meth:`_writer_process_bytes` counts instead.
+        of every cell, which this process fills from the bands it writes or
+        merges the windows of writer processes into. A process that reads its
+        own window holds what :meth:`_window_process_bytes` counts instead.
         """
         from ..storage.identity import CountSummary
 
@@ -2027,16 +2033,17 @@ class H5adToZarr:
             for width in self._assay_widths().values()
         )
 
-    def _writer_process_bytes(self) -> int:
-        """Return the bytes that each process writing its own window of the counts holds throughout.
+    def _window_process_bytes(self) -> int:
+        """Return the bytes that each process reading its own window of the counts holds throughout.
 
         They are what :meth:`_resident_bytes` counts less what this process
         alone holds: the IDs, names and memberships of :meth:`_kept_bytes`, a
         shuffled import's order of the cells, and the count of the values in
-        each row of a dense matrix, which its value scan recorded. A writer
-        process reads its window through its own reader, which holds the row
-        pointers of every row, as this process's reader does. It summarizes
-        only its window, whose summaries its admission adds, while this
+        each row of a dense matrix, which its value scan recorded. A process
+        reads its window through its own reader, which holds the row
+        pointers of every row, as this process's reader does, whether it
+        writes the window or sends its bands here. A writer process also
+        summarizes its window, whose summaries its admission adds, while this
         process holds those of every cell.
         """
         held = self._resident_bytes() - self._kept_bytes()
@@ -2370,7 +2377,7 @@ class H5adToZarr:
             if direct:
                 # Each writer process holds its batch, the bands it fills, and
                 # the count summaries of its window, beside what
-                # _writer_process_bytes counts.
+                # _window_process_bytes counts.
                 window_rows = max(stop - start for start, stop in candidate_windows)
                 candidate_resources = ResourceBudget(
                     (self.resources.memoryBytes - resident) // candidate,
@@ -2380,7 +2387,7 @@ class H5adToZarr:
                     window_tasks(start, stop) for start, stop in candidate_windows
                 )
                 candidate_resident = (
-                    self._writer_process_bytes()
+                    self._window_process_bytes()
                     + sum(
                         CountSummary.nbytes_for(window_rows, array.shape[1])
                         for array in arrays
@@ -2545,9 +2552,9 @@ class H5adToZarr:
         resident_source_bytes, extra_producer_bytes, canonical_batches = (
             self._count_import_requirements()
         )
-        # Processes that write their own windows hold what
-        # _writer_process_bytes counts beside the summaries of their windows.
-        process_resident_bytes = self._writer_process_bytes()
+        # Each process that reads its own window, to write it or to send its
+        # bands here, holds what _window_process_bytes counts.
+        process_resident_bytes = self._window_process_bytes()
 
         plan = resolve_sparse_import_batch(
             tuple(destinations.values()),
@@ -2596,7 +2603,7 @@ class H5adToZarr:
             else:
                 candidate_resources = self.resources
                 candidate_resident = resident_source_bytes + _producer_process_bytes(
-                    candidate, plan.producerReserveBytes
+                    candidate, plan.producerReserveBytes, process_resident_bytes
                 )
                 candidate_batch_rows = resolved_batch_rows
             try:
@@ -2684,7 +2691,7 @@ class H5adToZarr:
             )
         else:
             extra_producer_resident = _producer_process_bytes(
-                n_producers, plan.producerReserveBytes
+                n_producers, plan.producerReserveBytes, process_resident_bytes
             )
             write_sparse_bands(
                 self._count_shard_tasks(

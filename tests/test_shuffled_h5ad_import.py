@@ -691,9 +691,10 @@ def test_producer_processes_read_and_delete_their_buckets(
     np.testing.assert_array_equal(_open(destination)["RNA/counts"][...], counts[order])
 
 
+@pytest.mark.parametrize("direct", [True, False], ids=["writers", "readers"])
 @pytest.mark.parametrize("encoding", ["csr", "dense"])
-def test_writer_processes_hold_their_row_pointers_and_leave_the_cell_order_to_the_parent(
-    tmp_path, monkeypatch, encoding
+def test_import_processes_hold_their_row_pointers_and_leave_the_cell_order_to_the_parent(
+    tmp_path, monkeypatch, encoding, direct
 ) -> None:
     import cytearc.storage.sharding as sharding
     from cytearc.storage.schema import load_count_array
@@ -705,31 +706,25 @@ def test_writer_processes_hold_their_row_pointers_and_leave_the_cell_order_to_th
         obs=pd.DataFrame(index=[f"c{row}" for row in range(12)]),
         var=pd.DataFrame(index=["f0", "f1", "f2"]),
     ).write_h5ad(source)
-    destination = tmp_path / "shuffled.zarr"
+    # Processes write their own windows of a destination path, and send their
+    # bands to the parent for a store in memory.
+    destination = str(tmp_path / "shuffled.zarr") if direct else MemoryStore()
 
     class Planned(Exception):
         pass
 
-    chosen: list[bool] = []
-
-    def stop(processes: bool):
-        def record(*_args, **_kwargs):
-            chosen.append(processes)
-            raise Planned
-
-        return record
+    def planned(*_args, **_kwargs):
+        raise Planned
 
     reader = H5adReader(str(source), temp_dir=str(tmp_path))
     try:
-        writer = H5adToZarr(
-            reader, str(destination), shuffle_cells=True, **_SHARD_BANDS
-        )
+        writer = H5adToZarr(reader, destination, shuffle_cells=True, **_SHARD_BANDS)
         destinations = {
             name: load_count_array(writer.z, name, None) for name in writer.assayNames
         }
 
-        def uses_processes(budget: int) -> bool:
-            chosen.clear()
+        def producers(budget: int) -> int:
+            writer._lastImportProducerCount = 0
             writer.resources = ResourceBudget(budget, 4)
             try:
                 # The admission alone, which leaves the shuffled rows for the
@@ -737,26 +732,28 @@ def test_writer_processes_hold_their_row_pointers_and_leave_the_cell_order_to_th
                 writer._write_sparse_counts(2, destinations, {})
             except (Planned, MemoryError):
                 pass
-            return chosen == [True]
+            return writer._lastImportProducerCount
 
         def smallest_process_budget() -> int:
-            """Return the smallest budget at which the parent starts writer processes."""
+            """Return the smallest budget at which two processes read the shuffled rows."""
             with monkeypatch.context() as patch:
-                patch.setattr(H5adToZarr, "_write_parallel_count_windows", stop(True))
-                patch.setattr(sharding, "write_sparse_bands", stop(False))
+                # Writer processes start through the first; the parent writes
+                # through the second, beside reader processes or alone.
+                patch.setattr(H5adToZarr, "_write_parallel_count_windows", planned)
+                patch.setattr(sharding, "write_sparse_bands", planned)
                 low, high = 1_000, 1_000_000
-                assert not uses_processes(low)
-                assert uses_processes(high)
+                assert producers(low) < 2
+                assert producers(high) == 2
                 while high - low > 1:
                     middle = (low + high) // 2
-                    if uses_processes(middle):
+                    if producers(middle) == 2:
                         high = middle
                     else:
                         low = middle
             return high
 
         budget = smallest_process_budget()
-        # Two processes write the shuffled rows (0, 8) and (8, 12). The parent
+        # Two processes read the shuffled rows (0, 8) and (8, 12). The parent
         # alone holds the order of the cells, which places the other per-cell
         # arrays, so an order that takes 1,000 bytes more raises the budget at
         # which the two start by 1,000 bytes.
@@ -788,7 +785,7 @@ def test_writer_processes_hold_their_row_pointers_and_leave_the_cell_order_to_th
                     lambda self: counted(self) + 1_000,
                 )
                 assert smallest_process_budget() == budget + 1_000
-        # At that budget the two processes write every count.
+        # At that budget the two processes read every count.
         writer.resources = ResourceBudget(budget, 4)
         writer._write_counts(batch_size=2)
     finally:

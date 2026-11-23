@@ -724,16 +724,126 @@ def test_h5ad_parallel_producer_count_is_memory_admitted(tmp_path):
     # as bytes objects, 33 bytes and one a character each with a reference of
     # 8, and the names as text, 4 bytes a character of the longest. The count
     # summary of the 12 cells holds 8 bytes more for each cell's count of its
-    # nonzero values, 96 bytes beside the 5,300 of the rest.
+    # nonzero values, 96 bytes beside the 5,300 of the rest. Each process's
+    # own reader also holds the file's row pointers, as the parent's does:
+    # 13 int32 values, 52 bytes.
     cells = [f"c{i}" for i in range(12)]
     kept = sum(8 + 33 + len(text) for text in [*cells, "f0", "f1", "f2"]) + 3 * 4 * 2
     assert kept == 671
-    producers, store = write(5_300 + 8 * 12 + kept)
+    pointers = 13 * 4
+    producers, store = write(5_300 + 8 * 12 + kept + 2 * pointers)
     assert producers == 2
-    assert write(5_299 + 8 * 12 + kept)[0] == 1
+    assert write(5_299 + 8 * 12 + kept + 2 * pointers)[0] == 1
 
     root = zarr.open_group(store=store, mode="r")
     np.testing.assert_array_equal(root["RNA/counts"][:], values)
+
+
+def test_h5ad_reader_processes_are_charged_the_row_pointers_their_readers_load(
+    tmp_path, monkeypatch
+):
+    import cytearc.storage.sharding as sharding
+    from cytearc.readers import H5adReader
+    from cytearc.storage.budget import ResourceBudget
+    from cytearc.storage.identity import CountSummary
+    from cytearc.storage.io_policy import StorageIoPolicy
+    from cytearc.writers import H5adToZarr
+
+    values = _band_counts(12, 3)
+    path = _write_h5ad(tmp_path / "reader_processes.h5ad", values, encoding="csr")
+
+    class Planned(Exception):
+        pass
+
+    planned_beside: list[int] = []
+
+    def planned(*_args, residentBytes, **_kwargs):
+        planned_beside.append(residentBytes)
+        raise Planned
+
+    def smallest_reader_budget() -> tuple[int, int, int]:
+        """Return the smallest budget at which two reader processes send the bands.
+
+        Also return the bytes beside which this process plans its writes,
+        which stay the same at any budget that holds the two, and those
+        beside which it writes alone, one byte below that budget.
+        """
+        reader = H5adReader(str(path), feature_name_key="feature_name")
+        try:
+            # A store in memory cannot be opened by writer processes.
+            writer = H5adToZarr(
+                reader,
+                zarr_loc=MemoryStore(),
+                io=StorageIoPolicy(readWorkers=2),
+                **_SHARD_BAND_BUDGET,
+                shuffle_cells=False,
+            )
+
+            def producers(budget: int) -> int:
+                writer._lastImportProducerCount = 0
+                writer.resources = ResourceBudget(budget, 4)
+                try:
+                    writer._write_counts(batch_size=2)
+                except (Planned, MemoryError):
+                    pass
+                return writer._lastImportProducerCount
+
+            with monkeypatch.context() as patch:
+                # Each probe stops at the write, before a process starts.
+                patch.setattr(sharding, "write_sparse_bands", planned)
+                low, high = 1_000, 1_000_000
+                assert producers(low) < 2
+                assert producers(high) == 2
+                beside = planned_beside[-1]
+                while high - low > 1:
+                    middle = (low + high) // 2
+                    if producers(middle) == 2:
+                        high = middle
+                    else:
+                        low = middle
+                assert producers(high - 1) == 1
+                alone = planned_beside[-1]
+        finally:
+            reader.close()
+        return high, beside, alone
+
+    budget, beside, alone = smallest_reader_budget()
+    # Each reader process reads its window through its own reader, which
+    # loads the file's row pointers as the parent's reader holds them, so
+    # pointers that take 1,000 bytes more raise both the budget at which two
+    # processes start and the bytes beside the writes by 3,000 bytes. A single
+    # producer reads in this process, with its reader, so the bytes beside
+    # the writes it feeds rise by 1,000 bytes only.
+    rows = H5adReader._sparse_import_resident_bytes
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            H5adReader, "_sparse_import_resident_bytes", lambda self: rows(self) + 1_000
+        )
+        assert smallest_reader_budget() == (
+            budget + 3_000,
+            beside + 3_000,
+            alone + 1_000,
+        )
+    # The parent alone holds the summaries of every cell, which it fills from
+    # the bands it writes, so summaries that take 1,000 bytes more raise each
+    # by 1,000 bytes only.
+    original = CountSummary.nbytes_for
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            CountSummary,
+            "nbytes_for",
+            staticmethod(
+                lambda n_rows, columns: (
+                    original(n_rows, columns)
+                    + (1_000 if n_rows == values.shape[0] else 0)
+                )
+            ),
+        )
+        assert smallest_reader_budget() == (
+            budget + 1_000,
+            beside + 1_000,
+            alone + 1_000,
+        )
 
 
 def _log_normalized_band(
@@ -1020,7 +1130,7 @@ def test_h5ad_direct_writers_fit_their_windows_beside_what_the_parent_alone_hold
 
 @pytest.mark.parametrize("shuffle_cells", [False, True], ids=["file", "shuffled"])
 @pytest.mark.parametrize("encoding", ["csr", "dense"])
-def test_h5ad_writer_processes_are_charged_what_tracing_finds_their_reader_keeps(
+def test_h5ad_import_processes_are_charged_what_tracing_finds_their_reader_keeps(
     tmp_path, encoding, shuffle_cells
 ):
     import gc
@@ -1067,13 +1177,14 @@ def test_h5ad_writer_processes_are_charged_what_tracing_finds_their_reader_keeps
         )
         # The sparse counts write loads the row pointers before it plans.
         reader._prepare_sparse_import()
-        charged = writer._writer_process_bytes()
+        charged = writer._window_process_bytes()
         directory = writer._shuffled_rows_directory()
         gc.collect()
         tracemalloc.start()
         try:
-            # A reader opened as a writer process opens it, once it has read
-            # the first batch of the second half of the rows.
+            # A reader opened as a process of the counts write opens it, to
+            # write its window or to send its bands, once it has read the
+            # first batch of the second half of the rows.
             process_reader = H5adReader(**reader._clone_kwargs())
             if directory is not None:
                 process_reader._open_shuffled_rows(directory)
