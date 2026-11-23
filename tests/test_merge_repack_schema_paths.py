@@ -1185,7 +1185,7 @@ def test_merge_counts_signed_values_within_its_budget_or_names_the_budget_it_nee
     # held reach every run that fits only when what is held is left out.
     from tests.storage_helpers import local_read_buffer
 
-    buffer = local_read_buffer(Path(stores[0][0]) / "zarr.json", sharded=True)
+    buffer = local_read_buffer(Path(stores[0][0]) / "zarr.json", ranged=True)
     for budget in range(needed, 136_000 + buffer, 1_499):
         np.testing.assert_array_equal(np.diff(profile(budget)), expected)
     assert sorted(recorded_blocks) == sorted([(0, 12, 0, 600), (12, 24, 0, 600)] * 2)
@@ -1297,7 +1297,7 @@ def test_merge_names_the_count_summaries_that_its_budget_cannot_load(
     # Zarr's read of one chunk.
     from tests.storage_helpers import local_read_buffer
 
-    buffer = local_read_buffer(Path(stores[0][0]) / "zarr.json", sharded=False)
+    buffer = local_read_buffer(Path(stores[0][0]) / "zarr.json", ranged=False)
     summary = 3 * 8 * 400 + 8 * 400 // 128 + 1_024 + buffer + 32_768 + 4_096 + 16_384
     needed = 1_000 + 8 * 601 + summary
     with pytest.raises(MemoryBudgetError) as refused:

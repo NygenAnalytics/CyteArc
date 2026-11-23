@@ -526,9 +526,14 @@ def array_geometry(
     scratch = chunk_read_scratch_bytes(array)
     if scratch < 0:
         raise ValueError(f"Array read scratch cannot be negative, got {scratch}")
-    # A store that computes the array's chunks reads no file.
+    # A store that computes the array's chunks reads no file. A shard of
+    # several chunks can be read in part, as byte ranges of its file; every
+    # other read takes whole files, chunks or shards of one chunk.
     if not scratch:
-        scratch = _file_buffer_bytes(array, sharded=shards is not None)
+        ranged = shards is not None and any(
+            shard > chunk for shard, chunk in zip(shards, resolved_chunks, strict=True)
+        )
+        scratch = _file_buffer_bytes(array, ranged=ranged)
     fused_workers, fused_async = _fused_pool(array)
 
     text = (
@@ -750,18 +755,18 @@ def _utf8_lengths(
     return utf8, widest, part_bytes
 
 
-def _file_buffer_bytes(array: Any, *, sharded: bool) -> int:
+def _file_buffer_bytes(array: Any, *, ranged: bool) -> int:
     """Return the buffer that each fetch of ``array``'s stored bytes holds, 0 for a store that reads no file.
 
-    Zarr's local store reads a whole file, as a chunk of an unsharded array
-    or a whole shard, through ``Path.read_bytes``, and a byte range of a
-    file, as part of a shard, through ``open``. Before Python 3.14 both
-    buffer the file at its file system's block size, or at
+    Zarr's local store reads a whole file, a chunk of an unsharded array or a
+    whole shard, through ``Path.read_bytes``, and a byte range of a file,
+    part of a shard of several chunks, through ``open``. Before Python 3.14
+    both buffer the file at its file system's block size, or at
     ``io.DEFAULT_BUFFER_SIZE`` where that is unknown. From Python 3.14 a
     whole file is read unbuffered, and a byte range is buffered at the block
     size, at least ``io.DEFAULT_BUFFER_SIZE``, 128 KiB, and at most 8 MiB, so
-    a sharded array, read in part, is charged that buffer. Zarr's wrappers of
-    the store are looked through.
+    only an array that is ``ranged``, whose shards hold several chunks, is
+    charged that buffer. Zarr's wrappers of the store are looked through.
     """
     store = getattr(array, "store", None)
     storage: Any = importlib.import_module("zarr.storage")
@@ -772,7 +777,7 @@ def _file_buffer_bytes(array: Any, *, sharded: bool) -> int:
     block = _block_size(str(store.root))
     if not _WHOLE_FILES_UNBUFFERED:
         return block if block > 1 else io.DEFAULT_BUFFER_SIZE
-    if not sharded:
+    if not ranged:
         return 0
     return max(min(block, _FILE_BUFFER_LIMIT_BYTES), io.DEFAULT_BUFFER_SIZE)
 

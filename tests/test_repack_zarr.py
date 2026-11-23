@@ -905,7 +905,7 @@ def test_a_repack_at_a_tight_budget_reads_each_band_within_its_reserve(
     # 128 KiB from Python 3.14, which the budget leaves room for.
     from tests.storage_helpers import local_read_buffer
 
-    buffer = local_read_buffer(f"{source}/zarr.json", sharded=True)
+    buffer = local_read_buffer(f"{source}/zarr.json", ranged=True)
     repack_store(
         str(source),
         str(output),
@@ -978,7 +978,7 @@ def test_a_repack_reserves_the_shard_read_of_another_two_dimensional_array(
     # 32 KiB, 4 KiB for each of the two chunks and 16 KiB for the decode.
     from tests.storage_helpers import local_read_buffer
 
-    buffer = local_read_buffer(source / "RNA/embedding/zarr.json", sharded=True)
+    buffer = local_read_buffer(source / "RNA/embedding/zarr.json", ranged=True)
     assert recorded["embedding"] == (
         80 + 2 * (40 + 1_024) + 40 + buffer + 32_768 + 2 * 4_096 + 16_384
     )

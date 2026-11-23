@@ -346,7 +346,7 @@ def test_a_label_artifact_too_large_for_the_budget_is_refused_in_the_ledgers_wor
     # one, and not for the long ones.
     from tests.storage_helpers import local_read_buffer
 
-    budget = 4_096 + 53_248 + local_read_buffer(path / "zarr.json", sharded=False)
+    budget = 4_096 + 53_248 + local_read_buffer(path / "zarr.json", ranged=False)
     grouped = _group(store, groups=short, ledger=MemoryLedger(budget, "Grouping cells"))
     assert grouped.codes.tolist() == [0, 1] * 4
 

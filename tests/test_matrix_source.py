@@ -328,7 +328,7 @@ def test_mount_rejects_a_budget_below_one_metadata_chunk(default_sources, tmp_pa
     zarr.open_group(source, mode="r+")["cellData"].create_array(
         "barcode", data=barcodes, chunks=(len(barcodes),)
     )
-    needed = 72_212 + local_read_buffer(f"{source}/zarr.json", sharded=False)
+    needed = 72_212 + local_read_buffer(f"{source}/zarr.json", ranged=False)
 
     with pytest.raises(
         MemoryError,

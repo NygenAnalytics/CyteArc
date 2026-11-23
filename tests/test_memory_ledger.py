@@ -509,6 +509,7 @@ def test_a_read_of_a_local_file_is_charged_the_buffer_that_python_gives_it(
     values = np.ones(1_000, dtype=bool)
     sharded = root.create_array("sharded", data=values, chunks=(100,), shards=(1_000,))
     plain = root.create_array("plain", data=values, chunks=(100,))
+    whole = root.create_array("whole", data=values, chunks=(100,), shards=(100,))
     shard, chunk = (
         tmp_path / "store.zarr/sharded/c/0",
         tmp_path / "store.zarr/plain/c/0",
@@ -536,11 +537,14 @@ def test_a_read_of_a_local_file_is_charged_the_buffer_that_python_gives_it(
     with open(shard, "rb") as file, open(shard, "rb", 2) as small:
         buffer = sys.getsizeof(file) - sys.getsizeof(small) + 2
     assert array_geometry(sharded).readScratchBytes == buffer > 0
-    # A whole chunk of the unsharded array is read through Path.read_bytes,
-    # which held a buffer before Python 3.14, beside the objects of a
-    # buffered file, and reads unbuffered from 3.14.
-    whole = held(chunk.read_bytes) - held(unbuffered)
-    assert whole - 1024 <= array_geometry(plain).readScratchBytes <= max(0, whole)
+    # A whole chunk of the unsharded array, as a shard of one chunk, which
+    # every read takes whole, is read through Path.read_bytes, which held a
+    # buffer before Python 3.14, beside the objects of a buffered file, and
+    # reads unbuffered from 3.14.
+    read_whole_file = held(chunk.read_bytes) - held(unbuffered)
+    for array in (plain, whole):
+        scratch = array_geometry(array).readScratchBytes
+        assert read_whole_file - 1024 <= scratch <= max(0, read_whole_file)
     # Zarr's wrappers of a local store are looked through, and a store in
     # memory reads no file.
     logged = zarr.open_array(

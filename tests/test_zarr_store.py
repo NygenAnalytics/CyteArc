@@ -1644,7 +1644,7 @@ def test_copying_an_unsharded_array_reserves_its_chunk_as_stored_and_decoded(
     # decode.
     from tests.storage_helpers import local_read_buffer
 
-    buffer = local_read_buffer(tmp_path / "source.zarr/data/zarr.json", sharded=False)
+    buffer = local_read_buffer(tmp_path / "source.zarr/data/zarr.json", ranged=False)
     assert recorded == [512 + 512 + 4 + 1_024 + buffer + 32_768 + 4 * 4_096 + 16_384]
     np.testing.assert_array_equal(target[:], expected)
 
@@ -1746,7 +1746,7 @@ def test_copying_a_sharded_array_reserves_its_shard_read(tmp_path, monkeypatch):
     # 32 KiB, 4 KiB for each of the four chunks and 16 KiB for the decode.
     from tests.storage_helpers import local_read_buffer
 
-    buffer = local_read_buffer(tmp_path / "source.zarr/data/zarr.json", sharded=True)
+    buffer = local_read_buffer(tmp_path / "source.zarr/data/zarr.json", ranged=True)
     assert recorded == [
         2_048 + 4 * (256 + 2 + 1_024) + 256 + buffer + 32_768 + 4 * 4_096 + 16_384
     ]
