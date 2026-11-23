@@ -2598,6 +2598,21 @@ def test_a_run_paused_twice_ends_its_last_segment() -> None:
     ]
 
 
+def test_an_end_keeps_a_reason_as_long_as_a_record_holds() -> None:
+    root = _root()
+    run = _three_stage_run(root)
+    _finish_stage(root, run.run_id, 0, "one")
+    pause_pipeline_run_record(root, run_id=run.run_id, shutdown=_SHUTDOWN)
+
+    ended = pipeline_run_storage.end_paused_pipeline_run_record(
+        root, run_id=run.run_id, segment=1, reason="x" * 600
+    )
+
+    # A record holds at most 512 characters of a message.
+    assert ended.interruption is not None
+    assert ended.interruption.message == "x" * 509 + "..."
+
+
 def test_a_pause_whose_write_was_cut_off_ends_too() -> None:
     root = _root()
     run = _three_stage_run(root)
@@ -2635,7 +2650,11 @@ def test_an_end_refuses_a_run_that_is_not_paused_and_writes_nothing() -> None:
         for run in (running, failed, interrupted, completed)
     }
 
-    with pytest.raises(ValueError, match="is 'running', and only a paused run ends"):
+    with pytest.raises(
+        ValueError,
+        match="is 'running', and only a paused run ends this way: another process "
+        "runs it, or stopped without recording its end",
+    ):
         _end(root, running.run_id, 0)
     for run, status in (
         (failed, "failed"),
