@@ -647,6 +647,9 @@ def test_contiguous_ranges_cover_the_axis_without_overlap() -> None:
         ([2, 4], False),
         ([3, 2], False),
         ([2, 2], False),
+        # The ends of a run, but not in order.
+        ([0, 2, 1, 3], False),
+        ([0, 1, 1, 3], False),
         # A negative start would wrap around as a slice, so it is no run.
         ([-1, 0, 1], False),
         ([-1], False),
@@ -673,6 +676,24 @@ def test_is_contiguous_does_not_wrap_narrow_integer_steps(
     indices, dtype, expected
 ) -> None:
     assert is_contiguous(np.asarray(indices, dtype=dtype)) is expected
+
+
+def test_is_contiguous_tells_a_selection_that_spans_more_than_a_run_apart_without_a_pass() -> (
+    None
+):
+    import tracemalloc
+
+    # A shuffled million rows, whose ends lie further apart than a run's.
+    rows = np.random.default_rng(0).permutation(2_000_000)[:1_000_000]
+    tracemalloc.start()
+    try:
+        assert not is_contiguous(rows)
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    # A pass would hold the steps and their comparison, 9 bytes a row.
+    assert peak < 64 * 1024
+    assert is_contiguous(np.arange(5, 1_000_005))
 
 
 def test_affordable_width_finds_the_largest_accepted_width() -> None:
