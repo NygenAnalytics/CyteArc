@@ -285,6 +285,8 @@ class LoopbackHub(ThreadingHTTPServer):
     ``", "``. ``received`` records them with what else the request sent:
     ``"recursive"`` or ``"directory"`` for a listing, the ``Range`` header, or
     None, for a file, and the ``Authorization`` header, or None, for a lookup.
+    ``authorizations`` records the kind and the ``Authorization`` header, or
+    None, of every request.
     """
 
     daemon_threads = True
@@ -295,6 +297,7 @@ class LoopbackHub(ThreadingHTTPServer):
         self.plan: dict[str, list[str | int | tuple[int, dict[str, str]]]] = {}
         self.requests: list[tuple[str, str]] = []
         self.received: list[tuple[str, str, str | None]] = []
+        self.authorizations: list[tuple[str, str | None]] = []
         self.closing = threading.Event()
         self._lock = threading.Lock()
 
@@ -343,6 +346,7 @@ class _LoopbackHandler(BaseHTTPRequestHandler):
 
     def _planned(self, kind: str, path: str, detail: str | None) -> str | None:
         """Take the plan of a request: answer a planned status, or return the plan."""
+        self.server.authorizations.append((kind, self.headers.get("Authorization")))
         planned = self.server.take(kind, path, detail)
         if planned == "stall":
             # Once the hub closes, end the request with a status that
@@ -511,9 +515,19 @@ class _LoopbackHandler(BaseHTTPRequestHandler):
         if requested is None or whole:
             self._answer(200, data, content_type="application/octet-stream")
             return
+        # As RFC 9110 answers a range from a start: a range past the end is
+        # unsatisfiable, and one that runs past it ends at the end.
         first, _, last = requested.removeprefix("bytes=").partition("-")
         start = int(first)
-        stop = int(last) + 1 if last else len(data)
+        if start >= len(data):
+            self._answer(
+                416,
+                b"",
+                {"Content-Range": f"bytes */{len(data)}"},
+                content_type="application/octet-stream",
+            )
+            return
+        stop = min(int(last) + 1, len(data)) if last else len(data)
         self._answer(
             206,
             data[start:stop],
