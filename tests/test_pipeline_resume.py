@@ -257,12 +257,17 @@ def test_a_rerun_pauses_with_run_until(paused, tmp_path) -> None:
 def test_a_resumed_run_completes_as_a_single_call_would(paused, tmp_path) -> None:
     store = _paused_copy(paused, tmp_path)
     events: list[tuple[str, str | None]] = []
+    labels: set[str | None] = set()
 
-    run = store.pipeline.resume(
-        paused.run_id, callback=lambda event: events.append((event.kind, event.stage))
-    )
+    def listen(event: Any) -> None:
+        events.append((event.kind, event.stage))
+        labels.add(event.label)
+
+    run = store.pipeline.resume(paused.run_id, callback=listen)
 
     assert (run.run_id, run.status, run.label) == (paused.run_id, "completed", "split")
+    # The resumed process reports the label that the run requested.
+    assert labels == {"split"}
     report = run.report()
     order = report["run"]["stageOrder"]
     assert [record["stage"] for record in report["stages"]] == order
