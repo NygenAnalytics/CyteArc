@@ -20,7 +20,8 @@ from matplotlib.colors import to_hex
 from matplotlib.legend import Legend
 from matplotlib.patches import PathPatch
 
-from cytearc.plotting._style import CUSTOM_PALETTES, NO_VALUE_COLOR, category_label
+from cytearc.plotting._style import NO_VALUE_COLOR, category_label
+from cytearc.utils.palettes import CUSTOM_PALETTES
 from cytearc.storage.refs import ArtifactRef
 from cytearc.utils.memory_budget import MemoryBudgetError
 from tests.clone_helpers import (

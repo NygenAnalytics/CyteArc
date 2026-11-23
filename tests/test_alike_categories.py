@@ -711,11 +711,12 @@ def test_merges_compare_and_keep_the_first_of_levels_that_read_alike() -> None:
         "levels": ["b", "a"],
         "ordered": True,
     }
-    # Levels in another order still differ.
+    # Levels in another order keep the first source's order, which is then
+    # no order that every source agrees on.
     reordered = array("reordered", {"levels": ["a", "b"], "ordered": True})
     assert _reconciled_cell_attributes([earlier, reordered]) == (
-        {},
-        ["levels", "ordered"],
+        {"levels": ["b", "a"], "ordered": False},
+        ["ordered"],
     )
     with pytest.raises(_SourceConflict, match="levels"):
         _merged_column_attributes([earlier, reordered], "kind")

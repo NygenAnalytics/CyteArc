@@ -4,9 +4,14 @@ from functools import partial
 from typing import Any, NoReturn
 
 import numpy as np
+import pandas as pd
 import zarr
 
-from ..metadata.artifacts import distinct_level_positions
+from ..metadata.artifacts import (
+    MAX_STORED_CATEGORIES,
+    distinct_level_positions,
+    validate_display_metadata,
+)
 from ..metadata.rows import (
     array_row_selection_parts,
     iter_metadata_column_blocks,
@@ -19,7 +24,9 @@ from ..storage.arrays import (
     MetadataBlock,
     create_streamed_metadata_column,
 )
+from ..metadata.selection import valid_category_mask
 from ..storage.budget import ResourceBudget
+from ..storage.categorical import CategoricalColumn
 from ..storage.cell_order import (
     SOURCE_ROW,
     SOURCE_ROW_ROLE,
@@ -46,6 +53,7 @@ from ..storage.profiles import StorageProfile
 from ..storage.types import as_zarr_array, as_zarr_group
 from ..utils.logging import logger
 from ..utils.memory_budget import MemoryBudgetError
+from ..utils.palettes import palette_for_n
 from .row_plan import (
     RowPlan,
     RowPlanSegment,
@@ -72,6 +80,9 @@ _MERGED_ATTRIBUTES = tuple(
 _CELL_ATTRIBUTES = tuple(
     key for key in _MERGED_ATTRIBUTES if key not in {"role", "assay"}
 )
+# The attributes through which a cell column records its categories, which a
+# merge reconciles together.
+_CATEGORY_ATTRIBUTES = ("levels", "ordered", "display")
 
 SOURCE_LACKS_ASSAY = "missing"
 """Membership state of a source that does not hold the assay."""
@@ -500,38 +511,218 @@ def _source_attribute(attrs: Mapping[str, Any], key: str) -> Any:
     return [value[position] for position in distinct_level_positions(value)]
 
 
+def _python_label(value: Any) -> Any:
+    """A label as the Python scalar that a stored attribute holds."""
+    return value.item() if isinstance(value, np.generic) else value
+
+
+def _labels_by_first_row(
+    table: Any, column: str, *, block_rows: int
+) -> list[Any] | None:
+    """The labels of a source column in the order of their first rows, or None for too many.
+
+    Rows that the column's missing mask flags, and missing or blank values,
+    hold no label. More than :data:`MAX_STORED_CATEGORIES` labels give None,
+    since a column keeps no categories beyond them.
+    """
+    mask = metadata_missing_mask(table, column)
+    found: dict[Any, None] = {}
+    start = 0
+    for block in iter_metadata_column_blocks(table, column, block_rows=block_rows):
+        stop = start + len(block)
+        missing = None if mask is None else np.asarray(mask[start:stop], dtype=bool)
+        values = np.asarray(block)[valid_category_mask(block, missing_mask=missing)]
+        found.update(dict.fromkeys(_python_label(value) for value in pd.unique(values)))
+        if len(found) > MAX_STORED_CATEGORIES:
+            return None
+        start = stop
+    return list(found)
+
+
+def _storable_category(value: Any) -> bool:
+    """Whether a category is a value that ``levels`` and a display hold: text, a finite number or a boolean."""
+    return isinstance(value, bool | int | str) or (
+        isinstance(value, float) and bool(np.isfinite(value))
+    )
+
+
+def _source_categories(
+    array: Any, recorded: Mapping[str, Any]
+) -> tuple[list[Any] | None, bool]:
+    """A source column's categories in the order its plots list them, or None, and whether they are ordered.
+
+    A categorical display lists them in its order. Otherwise the ``levels``
+    that an import keeps from a source categorical list them, or the
+    categories of a categorical column, which records whether they are
+    ordered; a categorical column of more than
+    :data:`MAX_STORED_CATEGORIES` categories, which a column keeps none of,
+    is not read.
+    """
+    levels = recorded.get("levels")
+    if not isinstance(levels, list | tuple):
+        # Levels of another type are no categories, and are compared as stored.
+        levels = None
+    ordered = recorded.get("ordered") is True
+    if isinstance(array, CategoricalColumn):
+        ordered = ordered or array.ordered
+        if levels is None and array.n_categories <= MAX_STORED_CATEGORIES:
+            levels = [_python_label(value) for value in array.categories.tolist()]
+    display = recorded.get("display")
+    if isinstance(display, Mapping) and display.get("kind") == "categorical":
+        return [category["value"] for category in display["categories"]], ordered
+    return (None if levels is None else list(levels)), ordered
+
+
+def _merged_categories(
+    sources: Sequence[tuple[list[Any] | None, bool]],
+    observed: Callable[[int], list[Any] | None],
+) -> tuple[list[Any], bool] | None:
+    """The categories of a merged column, and whether they stay ordered, or None for too many.
+
+    The first source that records categories gives their order. Every other
+    category follows in the order of its first appearance: the sources in
+    merge order, each with the categories it records and then the labels of
+    its rows that they leave out, in the order of their first rows.
+    ``observed`` gives a source's labels in that order, or None when it holds
+    too many. The categories stay ordered only when every source records
+    them ordered, in the merged order. More than
+    :data:`MAX_STORED_CATEGORIES` categories, or a category that ``levels``
+    and a display cannot hold, such as a date, give None, so the merged
+    column keeps its labels alone, as an import keeps a categorical of that
+    many.
+    """
+    first = next(order for order, _ in sources if order is not None)
+    merged: dict[Any, None] = dict.fromkeys(first)
+    for index, (order, _) in enumerate(sources):
+        merged.update(dict.fromkeys(order or ()))
+        labels = observed(index)
+        if labels is None:
+            return None
+        merged.update(dict.fromkeys(labels))
+        if len(merged) > MAX_STORED_CATEGORIES:
+            return None
+    categories = list(merged)
+    if not all(_storable_category(value) for value in categories):
+        return None
+    ordered = all(is_ordered and order == categories for order, is_ordered in sources)
+    return categories, ordered
+
+
+def _merged_display(
+    displays: Sequence[Mapping[str, Any]], categories: Sequence[Any]
+) -> dict[str, Any]:
+    """The categorical display of a merged column's categories, in their order.
+
+    A category takes its entry from the first display that lists it, and
+    each other category its own text and the color that plots generate for
+    its place in the order (:func:`~cytearc.utils.palettes.palette_for_n`),
+    so the display colors every category of the column. The missing label
+    and color come from the first display that records them.
+    """
+    entries: dict[Any, Mapping[str, Any]] = {}
+    missing: dict[str, Any] = {}
+    for display in displays:
+        for category in display["categories"]:
+            entries.setdefault(category["value"], category)
+        for key in ("missing_label", "missing_color"):
+            if key in display:
+                missing.setdefault(key, display[key])
+    generated: list[str] | None = None
+    listed = []
+    for position, value in enumerate(categories):
+        entry = entries.get(value)
+        if entry is None:
+            if generated is None:
+                generated = palette_for_n(len(categories))
+            entry = {"value": value, "label": str(value), "color": generated[position]}
+        listed.append(dict(entry))
+    return {"kind": "categorical", "categories": listed, **missing}
+
+
 def _reconciled_cell_attributes(
     arrays: Iterable[Any],
+    observed: Callable[[int], list[Any] | None] = lambda _index: [],
 ) -> tuple[dict[str, Any], list[str]]:
     """Merge one cell column's source attributes.
 
-    Equal values are kept. Differing ``levels`` of an unordered column become
-    their union in first-seen order. Any other disagreement drops the
-    attribute, and the dropped names are returned. Membership attributes are
-    never carried.
+    Equal values are kept, and any other disagreement drops the attribute;
+    the dropped names are returned. Membership attributes are never
+    carried. A column whose sources record categories, as ``levels``, a
+    categorical ``display`` or the categories of a categorical column, keeps
+    the categories of :func:`_merged_categories`: as ``levels`` when a source
+    records levels or categories, with ``ordered`` when every source records
+    them ordered in that order, and as a ``display`` that covers each of them
+    when a source records one (:func:`_merged_display`). ``observed`` gives
+    the labels of each source's rows in the order of their first rows.
     """
-    found: dict[str, list[Any]] = {}
+    arrays = list(arrays)
+    recorded: list[dict[str, Any]] = []
     for array in arrays:
         attrs = getattr(array, "attrs", {})
-        for key in _CELL_ATTRIBUTES:
-            if key in attrs:
-                found.setdefault(key, []).append(_source_attribute(attrs, key))
-    ordered = any(value is True for value in found.get("ordered", ()))
+        recorded.append(
+            {
+                key: _source_attribute(attrs, key)
+                for key in _CELL_ATTRIBUTES
+                if key in attrs
+            }
+        )
+    sources = [
+        _source_categories(array, attributes)
+        for array, attributes in zip(arrays, recorded, strict=True)
+    ]
+    categorical = any(order is not None for order, _ in sources)
+    found: dict[str, list[Any]] = {}
+    for attributes in recorded:
+        for key, value in attributes.items():
+            found.setdefault(key, []).append(value)
     kept: dict[str, Any] = {}
     dropped: list[str] = []
     for key, values in found.items():
+        if categorical and key in _CATEGORY_ATTRIBUTES:
+            continue
         if all(value == values[0] for value in values[1:]):
             kept[key] = values[0]
-        elif key == "levels" and not ordered:
-            kept[key] = list(
-                dict.fromkeys(level for group in values for level in group)
-            )
         else:
             dropped.append(key)
-    if "levels" in dropped and "ordered" in kept:
-        # Order is defined by the levels, so it cannot outlive them.
-        del kept["ordered"]
+    if not categorical:
+        return kept, dropped
+    merged = (
+        None
+        # A categorical column of more categories than a column keeps.
+        if any(
+            isinstance(array, CategoricalColumn)
+            and array.n_categories > MAX_STORED_CATEGORIES
+            for array in arrays
+        )
+        else _merged_categories(
+            sources,
+            # A categorical column holds no label beyond its categories.
+            lambda index: (
+                [] if isinstance(arrays[index], CategoricalColumn) else observed(index)
+            ),
+        )
+    )
+    if merged is None:
+        dropped.extend(key for key in _CATEGORY_ATTRIBUTES if key in found)
+        return kept, dropped
+    categories, ordered = merged
+    if "levels" in found or any(
+        isinstance(array, CategoricalColumn) for array in arrays
+    ):
+        kept["levels"] = categories
+        kept["ordered"] = ordered
+    if not ordered and any(is_ordered for _, is_ordered in sources):
         dropped.append("ordered")
+    displays = [
+        display
+        for attributes in recorded
+        if isinstance(display := attributes.get("display"), Mapping)
+        and display.get("kind") == "categorical"
+    ]
+    if displays:
+        kept["display"] = validate_display_metadata(
+            _merged_display(displays, categories)
+        )
     return kept, dropped
 
 
@@ -613,10 +804,14 @@ def plan_cell_metadata(
     dropped_attributes: dict[str, list[str]] = {}
 
     def attributes_for(public: str) -> dict[str, Any]:
-        kept, dropped = _reconciled_cell_attributes(
-            table._get_array(source_col)
+        sources = [
+            (table, source_col)
             for table, mapping in zip(source_cell_tables, per_source, strict=True)
             if (source_col := mapping.get(public)) is not None
+        ]
+        kept, dropped = _reconciled_cell_attributes(
+            (table._get_array(column) for table, column in sources),
+            lambda index: _labels_by_first_row(*sources[index], block_rows=scan_rows),
         )
         if dropped:
             dropped_attributes[public] = dropped

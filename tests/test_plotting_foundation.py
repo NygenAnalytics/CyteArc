@@ -2974,9 +2974,6 @@ def test_artifact_composition_rejects_inputs_it_cannot_align(
     monkeypatch.setattr(module, "_resolve_grouping", resolve_grouping)
     monkeypatch.setattr(module, "_labels_for_cells", labels_for_cells)
     # The categories and the grouping record no categories of their own.
-    monkeypatch.setattr(
-        module, "resolve_artifact_scale", lambda _store, _ref, explicit: explicit
-    )
     monkeypatch.setattr(module, "stored_artifact_scale", lambda _store, _ref: None)
     monkeypatch.setattr(
         module, "_artifact_cell_selection", lambda _store, _ref: selection

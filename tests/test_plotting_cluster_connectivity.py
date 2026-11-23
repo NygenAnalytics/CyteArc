@@ -701,9 +701,7 @@ def _artifact_plot(
         lambda _store, _ref: _SELECTION,
     )
     # The groups record no categories of their own.
-    monkeypatch.setattr(
-        module, "resolve_artifact_scale", lambda _store, _ref, explicit: explicit
-    )
+    monkeypatch.setattr(module, "stored_artifact_scale", lambda _store, _ref: None)
     store = _FakeStore({}, _symmetric_graph(4, [(0, 1, 1.0), (1, 2, 0.5), (2, 3, 1.0)]))
     arguments = {"groups": _GROUPS, "layout": _LAYOUT, "graph": _GRAPH}
     arguments.update(kwargs)
@@ -892,6 +890,34 @@ def test_cluster_connectivity_merges_explicit_scale_over_stored_display():
     )
     assert [text.get_text() for text in ax.texts] == ["Gamma", "First", "Beta"]
     renamed.close()
+
+
+def test_cluster_connectivity_draws_the_groups_that_a_stored_display_leaves_out():
+    # The display lists C and A, and the column also holds B.
+    partial = {
+        **_STORED_CLUSTER_DISPLAY,
+        "categories": _STORED_CLUSTER_DISPLAY["categories"][:2],
+    }
+    result = _plot(_store_with_display(partial), minimum_edge_weight=0.0)
+    try:
+        scale = result.scales[0]
+        # B follows the stored groups, in the third color that plots generate.
+        assert scale.order == ("C", "A", "B")
+        assert scale.palette == {"C": "#0000aa", "A": "#aa0000", "B": "#279e68"}
+        assert result.tables["nodes"]["displayLabel"].tolist() == [
+            "Gamma",
+            "Alpha",
+            "B",
+        ]
+    finally:
+        result.close()
+    # An order of the caller's that leaves out a group is refused.
+    with pytest.raises(ValueError, match="order is missing observed values: B"):
+        _plot(
+            _store_with_display(partial),
+            categorical_scale=CategoricalScale(order=("C", "A")),
+            minimum_edge_weight=0.0,
+        )
 
 
 def test_cluster_connectivity_ignores_non_categorical_stored_display():

@@ -3,6 +3,7 @@
 from collections.abc import Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
+from functools import partial
 from typing import Any, Hashable, Literal
 
 import numpy as np
@@ -56,7 +57,7 @@ from ._data import (
     unmeasured_extras,
 )
 from ._deps import require_matplotlib, require_seaborn
-from ._display import resolve_artifact_scale, resolve_categorical_scale
+from ._display import stored_artifact_scale, stored_categorical_scale
 from ._titles import artifact_titles, label_artifact, label_column
 from ._figure import (
     LegendSpec,
@@ -1268,20 +1269,18 @@ def distribution(
             )
     if not key_list and value_artifact is None:
         raise ValueError("keys must be non-empty")
-    if isinstance(grouping, CellField):
-        categorical_scale = resolve_categorical_scale(
-            store,
-            grouping.key,
-            categorical_scale,
-        )
-    elif isinstance(grouping, ArtifactRef):
-        categorical_scale = resolve_artifact_scale(store, grouping, categorical_scale)
-    if split_by is not None:
-        split_scale = resolve_categorical_scale(
-            store,
-            split_by,
-            split_scale,
-        )
+    # The scales that the grouping and the split store, which the caller's
+    # scales merge over.
+    stored_group_scale = (
+        stored_categorical_scale(store, grouping.key)
+        if isinstance(grouping, CellField)
+        else stored_artifact_scale(store, grouping)
+        if isinstance(grouping, ArtifactRef)
+        else None
+    )
+    stored_split_scale = (
+        None if split_by is None else stored_categorical_scale(store, split_by)
+    )
     metadata_columns = _cell_metadata_columns(store, key_list)
     feature_assays: set[str] = set()
     for key in key_list:
@@ -1548,15 +1547,8 @@ def distribution(
         group_scale = resolve_category_scale(
             groups_arr[selection_mask],
             categorical_scale,
-            universe=(
-                _grouping_universe(store, grouping)
-                if categorical_scale is None
-                or (
-                    categorical_scale.order is None
-                    and categorical_scale.palette is None
-                )
-                else None
-            ),
+            stored=stored_group_scale,
+            universe=partial(_grouping_universe, store, grouping),
             order=None if groups is None else group_order,
         )
         group_order = list(group_scale.order or ())
@@ -1611,12 +1603,8 @@ def distribution(
             split_arr,
             split_scale,
             context="split_scale",
-            universe=(
-                _category_universe(store, split_by)
-                if split_scale is None
-                or (split_scale.order is None and split_scale.palette is None)
-                else None
-            ),
+            stored=stored_split_scale,
+            universe=partial(_category_universe, store, split_by),
         )
         split_order = list(resolved_split_scale.order or ())
         if len(split_order) != 2:

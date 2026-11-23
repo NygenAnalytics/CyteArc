@@ -20,8 +20,8 @@ from ._figure import (
     finish_plot,
     normalize_axes_target,
 )
+from ..utils.palettes import CUSTOM_PALETTES
 from ._style import (
-    CUSTOM_PALETTES,
     MAX_FIGURE_WIDTH_INCHES,
     MAX_NAMED_ITEMS,
     NO_VALUE_COLOR,

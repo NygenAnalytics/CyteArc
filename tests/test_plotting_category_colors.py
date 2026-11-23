@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import matplotlib
 import numpy as np
+import pandas as pd
 import pytest
 
 matplotlib.use("Agg")
@@ -477,6 +478,209 @@ def test_category_scale_assigns_colors_over_the_universe_and_orders_requests():
     # A plain list of tuples holds tuple categories, not rows of an array.
     pairs = resolve_category_scale([("b", 2), None, ("a", 1)], None)
     assert pairs.order == (("a", 1), ("b", 2))
+
+
+def test_a_stored_order_lists_its_categories_first_and_the_others_after_it():
+    # A stored display of T and B, and a category that no cell holds, of a
+    # column that also holds DC and NK.
+    stored = splt.CategoricalScale(
+        order=("T", "B", "unused"),
+        palette={"T": "#ff0000", "B": "#00aa00", "unused": "#0000ff"},
+        labels={"T": "T cells", "B": "B cells", "unused": "unused"},
+        missing_label="unassigned",
+    )
+    universe = np.asarray(["DC", "NK", "T", "B", None], dtype=object)
+    full = resolve_category_scale(
+        ["NK", "B", "T", "DC"], None, stored=stored, universe=universe
+    )
+    # The stored categories come first, then the others in natural order.
+    assert full.order == ("T", "B", "DC", "NK")
+    # Stored colors stay, and DC and NK take the generated colors of the
+    # fourth and fifth places of T, B, unused, DC, NK: scanpy's default
+    # palette, written out.
+    assert full.palette == {
+        "T": "#ff0000",
+        "B": "#00aa00",
+        "DC": "#d62728",
+        "NK": "#aa40fc",
+    }
+    assert full.labels == {"T": "T cells", "B": "B cells", "DC": "DC", "NK": "NK"}
+    assert full.missing_label == "unassigned"
+    # A plot of some cells keeps each color, since every value of the column
+    # places the categories that the stored order leaves out.
+    some = resolve_category_scale(["NK"], None, stored=stored, universe=universe)
+    assert some.palette == {"NK": "#aa40fc"}
+    # The values are read only when a category is left out of the stored order.
+    reads = []
+
+    def every_value():
+        reads.append("read")
+        return universe
+
+    listed = resolve_category_scale(
+        ["B", "T"], None, stored=stored, universe=every_value
+    )
+    assert listed.order == ("T", "B") and reads == []
+    resolve_category_scale(["NK"], None, stored=stored, universe=every_value)
+    assert reads == ["read"]
+    # A caller's order stays strict, and a caller's palette must color every
+    # category shown.
+    with pytest.raises(
+        ValueError, match=r"^categorical_scale\.order is missing observed values: NK$"
+    ):
+        resolve_category_scale(
+            ["NK", "T"], splt.CategoricalScale(order=("T", "B")), stored=stored
+        )
+    with pytest.raises(KeyError, match="NK"):
+        resolve_category_scale(
+            ["NK", "T"],
+            splt.CategoricalScale(palette={"T": "#000000"}),
+            stored=stored,
+        )
+    # A caller's palette name generates every color over the stored order and
+    # the others after it: Okabe and Ito's first and fifth colors.
+    named = resolve_category_scale(
+        ["NK", "T"],
+        splt.CategoricalScale(palette_name="colorblind"),
+        stored=stored,
+        universe=universe,
+    )
+    assert named.order == ("T", "NK")
+    assert named.palette == {"T": "#0072B2", "NK": "#CC79A7"}
+    # A stored order alone colors every category by its place.
+    ordered = resolve_category_scale(
+        ["late", "post", "early"],
+        None,
+        stored=splt.CategoricalScale(order=("early", "mid", "late")),
+    )
+    assert ordered.order == ("early", "late", "post")
+    assert ordered.palette == {
+        "early": "#1f77b4",
+        "late": "#279e68",
+        "post": "#d62728",
+    }
+
+
+def test_plots_draw_the_labels_that_a_stored_display_leaves_out(tmp_path):
+    x = np.arange(12, dtype=np.float64)
+    store, imported, _counts = _imported_plot_store(
+        tmp_path,
+        coordinates=np.column_stack((x, (x % 4) * 1.5)),
+        clusters=np.repeat([1, 2, 3], 4),
+    )
+    layout = imported.embeddingArtifacts["X_umap"]
+    # A display of T and B over a column that also holds NK and DC, as a
+    # merge of an earlier release could store it.
+    store.cells.insert(
+        "cell_type",
+        by_cell_id(store.cells, np.asarray(["NK", "T", "DC", "B"] * 3, dtype=object)),
+    )
+    store.zw["cellData"]["cell_type"].attrs.update(
+        {
+            "display": {
+                "kind": "categorical",
+                "categories": [
+                    {"value": "T", "label": "T", "color": "#ff0000"},
+                    {"value": "B", "label": "B", "color": "#00aa00"},
+                ],
+            }
+        }
+    )
+    try:
+        # Every plot draws T and B first in their stored colors, then DC and
+        # NK in natural order, in the third and fourth generated colors.
+        assert _plotted_orders(store, layout, "cell_type") == _in_every_plot(
+            ("T", "B", "DC", "NK"), ("#ff0000", "#00aa00", "#279e68", "#d62728")
+        )
+        # A caller's order that leaves out a category is still refused.
+        for plot in (
+            lambda scale: splt.embedding(
+                store,
+                layout=layout,
+                color_by="cell_type",
+                categorical_scale=scale,
+                show=False,
+            ),
+            lambda scale: splt.composition(
+                store, category_by="cell_type", categorical_scale=scale, show=False
+            ),
+            lambda scale: splt.distribution(
+                store,
+                "RNA_nCounts",
+                grouping=splt.CellField("cell_type"),
+                categorical_scale=scale,
+                max_points=0,
+                show=False,
+            ),
+        ):
+            with pytest.raises(ValueError, match="order is missing observed values"):
+                plot(splt.CategoricalScale(order=("T", "B", "DC")))
+    finally:
+        plt.close("all")
+
+
+def test_a_merged_column_draws_the_categories_of_every_store(tmp_path):
+    # The reproduction of #493: an import whose categorical cell_type holds T
+    # and B in the file's colors, merged with a store whose cell_type is text
+    # that holds T, B and NK.
+    anndata = pytest.importorskip("anndata")
+    from scipy.sparse import csr_matrix
+
+    from cytearc.merge import DataStoreMerge
+    from cytearc.readers import H5adReader
+    from cytearc.writers import H5adToZarr
+    from tests.clone_helpers import write_selection_embedding
+    from tests.storage_helpers import open_store, write_count_store
+
+    genes = ["CD3E", "MS4A1", "LYZ"]
+    counts = np.arange(18).reshape(6, 3) % 4 + 1
+    source = anndata.AnnData(
+        X=csr_matrix(counts.astype(np.float32)),
+        obs=pd.DataFrame(
+            {"cell_type": pd.Categorical(["T", "B"] * 3, categories=["T", "B"])},
+            index=[f"a{index}" for index in range(6)],
+        ),
+        var=pd.DataFrame(index=genes),
+    )
+    source.uns["cell_type_colors"] = ["#ff0000", "#00aa00"]
+    source.write_h5ad(tmp_path / "first.h5ad")
+    reader = H5adReader(str(tmp_path / "first.h5ad"))
+    try:
+        H5adToZarr(reader, zarr_loc=str(tmp_path / "first.zarr"), nthreads=1).dump()
+    finally:
+        reader.h5.close()
+    write_count_store(
+        str(tmp_path / "second.zarr"),
+        {"RNA": counts},
+        "uint16",
+        feature_ids={"RNA": genes},
+        cell_ids=[f"b{index}" for index in range(6)],
+    )
+    first, second = (
+        open_store(tmp_path / f"{name}.zarr") for name in ("first", "second")
+    )
+    second.cells.insert(
+        "cell_type",
+        by_cell_id(second.cells, np.asarray(["NK", "T", "B"] * 2, dtype=object)),
+    )
+    DataStoreMerge(
+        [first, second], str(tmp_path / "merged.zarr"), ["first", "second"], nthreads=1
+    ).dump()
+    merged = open_store(tmp_path / "merged.zarr")
+    merged.cells.insert("every_cell", by_cell_id(merged.cells, np.ones(12, dtype=bool)))
+    layout = write_selection_embedding(
+        merged,
+        merged.snapshot_cell_selection("every_cell"),
+        np.column_stack((np.arange(12.0), np.arange(12.0) % 3)),
+    )
+    try:
+        # The file's T and B in its colors, and NK, which the second store
+        # adds, in the third color that plots generate.
+        assert _plotted_orders(merged, layout, "orig_cell_type") == _in_every_plot(
+            ("T", "B", "NK"), ("#ff0000", "#00aa00", "#279e68")
+        )
+    finally:
+        plt.close("all")
 
 
 def _labeled_scale(values):

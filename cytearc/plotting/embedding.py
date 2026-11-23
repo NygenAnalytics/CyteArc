@@ -2,6 +2,7 @@
 
 from collections.abc import Collection, Sequence
 from dataclasses import replace
+from functools import partial
 from typing import Any, Hashable
 
 import numpy as np
@@ -49,7 +50,6 @@ from ._deps import require_matplotlib
 from ._display import (
     continuous_display_scale,
     labels_in_stored_order,
-    merge_categorical_scales,
     stored_artifact_scale,
     stored_categorical_scale,
     stored_display_metadata,
@@ -1750,16 +1750,16 @@ def embedding(
                 if clip_fraction > 0
                 else stored_scale
             )
-    # Each categorical color merges the caller's scale over the stored scale
-    # of its column or label artifact; receptor types take the colors that
-    # every repertoire figure gives them.
-    merged_categorical_scales: dict[int, CategoricalScale | None] = {}
+    # The caller's scale of each categorical color merges over the stored
+    # scale of its column or label artifact; receptor types take the colors
+    # that every repertoire figure gives them.
+    stored_categorical_scales: dict[int, CategoricalScale | None] = {}
     for index, (item, column) in enumerate(
         zip(color_items, color_columns, strict=True)
     ):
         if not color_cache[index][2]:
             continue
-        stored = (
+        stored_categorical_scales[index] = (
             RECEPTOR_TYPE_SCALE
             if isinstance(item, ArtifactRef) and item.kind == "immune_receptors"
             else stored_artifact_scale(store, item)
@@ -1767,9 +1767,6 @@ def embedding(
             else None
             if column is None
             else stored_categorical_scale(store, column)
-        )
-        merged_categorical_scales[index] = merge_categorical_scales(
-            stored, categorical_scale
         )
     subset_vals = (
         _selected_metadata_column(
@@ -1923,7 +1920,7 @@ def embedding(
         if is_uniform:
             continue
         if is_cat:
-            source = merged_categorical_scales[color_index] or CategoricalScale()
+            source = categorical_scale or CategoricalScale()
             if missing_color is not None:
                 source = replace(source, missing_color=missing_color)
             requested = (
@@ -1940,15 +1937,13 @@ def embedding(
             categorical_maps[color_index] = resolve_category_scale(
                 np.asarray(vals)[selection_mask],
                 source,
-                universe=(
-                    _color_category_universe(
-                        store,
-                        color_items[color_index],
-                        vals,
-                        layout_selection=layout_selection,
-                    )
-                    if source.order is None and source.palette is None
-                    else None
+                stored=stored_categorical_scales[color_index],
+                universe=partial(
+                    _color_category_universe,
+                    store,
+                    color_items[color_index],
+                    vals,
+                    layout_selection=layout_selection,
                 ),
                 order=requested,
             )

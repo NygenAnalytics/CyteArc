@@ -540,6 +540,27 @@ def test_receptor_types_follow_their_vocabulary(truth_plot, truth_clonotypes) ->
         drawn.close()
 
 
+def test_plot_groups_color_the_groups_that_a_stored_display_leaves_out(
+    plotted,
+) -> None:
+    store, clones = plotted
+    store.cells.insert(
+        "group_listed",
+        by_cell_id(store.cells, np.asarray(GROUPS, dtype=object)),
+        overwrite=True,
+    )
+    # The display lists x, and the column also holds y.
+    store.zw["cellData"]["group_listed"].attrs["display"] = {
+        "kind": "categorical",
+        "categories": [{"value": "x", "label": "x", "color": "#123456"}],
+    }
+    found = plot_groups(store, clones, group_by="group_listed", groups=None, n_cells=6)
+    colors = found.scale(["y", "x"])
+    # y follows x, in the second color that plots generate for two groups.
+    assert colors.order == ("x", "y")
+    assert colors.palette == {"x": "#123456", "y": "#ff7f0e"}
+
+
 def test_clones_of_equal_size_list_in_rank_order(plotted) -> None:
     store, _clones = plotted
     # 9 and 10 hold two cells each and rank by number, 9 first, where their

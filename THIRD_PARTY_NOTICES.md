@@ -20,7 +20,7 @@ CyteArc is copyright Nygen Analytics AB and is licensed under the BSD 3-Clause L
 - Used in: `cytearc/features/scoring.py` (gene-set scoring adapted from `score_genes`),
   `cytearc/datastore/_operations/quality_control.py` (the control-set size of cell-cycle
   scoring, and the `simulation_ratio` and `expected_doublet_rate` defaults of doublet detection,
-  those of `pp.scrublet`), and the categorical palettes in `cytearc/plotting/_style.py`.
+  those of `pp.scrublet`), and the categorical palettes in `cytearc/utils/palettes.py`.
 
 ### Scrublet
 
@@ -353,7 +353,7 @@ CyteArc is copyright Nygen Analytics AB and is licensed under the BSD 3-Clause L
 - **treedata** (<https://github.com/YosefLab/treedata>), BSD-3-Clause: treedata 0.4.0 wrote `tests/data/phylogenies/truth_tree_treedata_0_4_0.h5td`, `truth_tree_treedata_0_4_0.zarr` and `truth_forest_treedata_0_4_0.h5td` from the synthetic experiment of `tests/clone_truth.py`, so they hold no third-party data.
 - **pycea** (<https://github.com/YosefLab/pycea>), BSD-3-Clause: `tests/pycea_0_4_0_golden.json` holds the clades that pycea 0.4.0's `tl.clades` cut from the PEtracer and ConvexML trees above, after treedata 0.4.0's `read_nwk` read them. No code of pycea was copied.
 - **Potency reference**: `tests/data/potency/scent_reference.npz` holds the counts of 64 cells of the `bastidas-ponce_4K_pancreas-d15_rnaseq` example, credited under "Example datasets", on 5,778 genes, the edges among those genes of the mouse STRING v12.5 network credited under "Networks that CyteArc downloads" (CC BY 4.0), and the signaling entropy rate and CCAT that SCENT 1.1 (<https://github.com/aet21/SCENT>, GPL-3, commit 02b4bc64a45431860d7d756bca58ca3306b5eae9) computed from them; `scent_reference.json` records how they were made. SCENT was run to produce the values, and no code of SCENT was copied.
-- **Color palettes** in `cytearc/plotting/_style.py`: the 10- and 20-color sets are Tableau 10 and
+- **Color palettes** in `cytearc/utils/palettes.py`: the 10- and 20-color sets are Tableau 10 and
   20 as distributed with matplotlib (the 10-color set with Scanpy's colorblind substitutions), the
   28-color set is from Zeileis, Hornik, and Murrell (2009), Computational Statistics & Data
   Analysis, doi:10.1016/j.csda.2008.11.033, and the 102-color set is from Tatarize's "Color

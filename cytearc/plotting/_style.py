@@ -2,7 +2,7 @@
 
 import contextlib
 import functools
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from typing import Any
@@ -12,7 +12,8 @@ import numpy as np
 import pandas as pd
 
 from ..utils.arguments import float_argument
-from ..utils.arrays import sort_categories
+from ..utils.palettes import palette_for_n
+from ._display import labels_in_stored_order, merge_categorical_scales
 from ._contracts import (
     CategoricalScale,
     ColorScale,
@@ -171,193 +172,6 @@ class _PointSizeSpec:
 
 _LAYOUT_POINT_SIZE_SPECS: WeakKeyDictionary[Any, _PointSizeSpec] = WeakKeyDictionary()
 
-# Okabe-Ito plus four high-contrast extensions for categorical figures.
-COLORBLIND_PALETTE = [
-    "#0072B2",
-    "#E69F00",
-    "#009E73",
-    "#D55E00",
-    "#CC79A7",
-    "#56B4E9",
-    "#F0E442",
-    "#000000",
-    "#6F4E7C",
-    "#2E8B57",
-    "#A05195",
-    "#8C564B",
-]
-
-# Lifted from scanpy.plotting.palettes.
-CUSTOM_PALETTES: dict[int, list[str]] = {
-    10: [
-        "#1f77b4",
-        "#ff7f0e",
-        "#279e68",
-        "#d62728",
-        "#aa40fc",
-        "#8c564b",
-        "#e377c2",
-        "#7f7f7f",
-        "#b5bd61",
-        "#17becf",
-    ],
-    20: [
-        "#1f77b4",
-        "#aec7e8",
-        "#ff7f0e",
-        "#ffbb78",
-        "#2ca02c",
-        "#98df8a",
-        "#d62728",
-        "#ff9896",
-        "#9467bd",
-        "#c5b0d5",
-        "#8c564b",
-        "#c49c94",
-        "#e377c2",
-        "#f7b6d2",
-        "#7f7f7f",
-        "#c7c7c7",
-        "#bcbd22",
-        "#dbdb8d",
-        "#17becf",
-        "#9edae5",
-    ],
-    28: [
-        "#023fa5",
-        "#7d87b9",
-        "#bec1d4",
-        "#d6bcc0",
-        "#bb7784",
-        "#8e063b",
-        "#4a6fe3",
-        "#8595e1",
-        "#b5bbe3",
-        "#e6afb9",
-        "#e07b91",
-        "#d33f6a",
-        "#11c638",
-        "#8dd593",
-        "#c6dec7",
-        "#ead3c6",
-        "#f0b98d",
-        "#ef9708",
-        "#0fcfc0",
-        "#9cded6",
-        "#d5eae7",
-        "#f3e1eb",
-        "#f6c4e1",
-        "#f79cd4",
-        "#7f7f7f",
-        "#c7c7c7",
-        "#1CE6FF",
-        "#336600",
-    ],
-    102: [
-        "#FFFF00",
-        "#1CE6FF",
-        "#FF34FF",
-        "#FF4A46",
-        "#008941",
-        "#006FA6",
-        "#A30059",
-        "#FFDBE5",
-        "#7A4900",
-        "#0000A6",
-        "#63FFAC",
-        "#B79762",
-        "#004D43",
-        "#8FB0FF",
-        "#997D87",
-        "#5A0007",
-        "#809693",
-        "#6A3A4C",
-        "#1B4400",
-        "#4FC601",
-        "#3B5DFF",
-        "#4A3B53",
-        "#FF2F80",
-        "#61615A",
-        "#BA0900",
-        "#6B7900",
-        "#00C2A0",
-        "#FFAA92",
-        "#FF90C9",
-        "#B903AA",
-        "#D16100",
-        "#DDEFFF",
-        "#000035",
-        "#7B4F4B",
-        "#A1C299",
-        "#300018",
-        "#0AA6D8",
-        "#013349",
-        "#00846F",
-        "#372101",
-        "#FFB500",
-        "#C2FFED",
-        "#A079BF",
-        "#CC0744",
-        "#C0B9B2",
-        "#C2FF99",
-        "#001E09",
-        "#00489C",
-        "#6F0062",
-        "#0CBD66",
-        "#EEC3FF",
-        "#456D75",
-        "#B77B68",
-        "#7A87A1",
-        "#788D66",
-        "#885578",
-        "#FAD09F",
-        "#FF8A9A",
-        "#D157A0",
-        "#BEC459",
-        "#456648",
-        "#0086ED",
-        "#886F4C",
-        "#34362D",
-        "#B4A8BD",
-        "#00A6AA",
-        "#452C2C",
-        "#636375",
-        "#A3C8C9",
-        "#FF913F",
-        "#938A81",
-        "#575329",
-        "#00FECF",
-        "#B05B6F",
-        "#8CD0FF",
-        "#3B9700",
-        "#04F757",
-        "#C8A1A1",
-        "#1E6E00",
-        "#7900D7",
-        "#A77500",
-        "#6367A9",
-        "#A05837",
-        "#6B002C",
-        "#772600",
-        "#D790FF",
-        "#9B9700",
-        "#549E79",
-        "#FFF69F",
-        "#201625",
-        "#72418F",
-        "#BC23FF",
-        "#99ADC0",
-        "#3A2465",
-        "#922329",
-        "#5B4534",
-        "#FDE8DC",
-        "#404E55",
-        "#0089A3",
-        "#CB7E98",
-        "#A4E804",
-        "#324E72",
-    ],
-}
 
 THEMES: dict[str, dict[str, Any]] = {
     "paper": {
@@ -751,41 +565,6 @@ def capped_figsize(
     return (resolved_width, float(height))
 
 
-def palette_for_n(
-    n: int,
-    *,
-    palette_name: str = "default",
-) -> list[str]:
-    if palette_name not in ("default", "colorblind"):
-        raise ValueError("palette_name must be 'default' or 'colorblind'")
-    if palette_name == "colorblind":
-        if n <= len(COLORBLIND_PALETTE):
-            return list(COLORBLIND_PALETTE[:n])
-        from ..utils.logging import logger
-        from ._deps import require_seaborn
-
-        logger.warning(
-            f"Requested {n} colorblind-safe colors but only "
-            f"{len(COLORBLIND_PALETTE)} are available; "
-            "falling back to evenly spaced hues that are distinct but not "
-            "guaranteed colorblind safe"
-        )
-        sns = require_seaborn()
-        return list(sns.color_palette("husl", n_colors=n).as_hex())
-    if n <= 10:
-        return list(CUSTOM_PALETTES[10][:n])
-    if n <= 20:
-        return list(CUSTOM_PALETTES[20][:n])
-    if n <= 28:
-        return list(CUSTOM_PALETTES[28][:n])
-    if n <= 102:
-        return list(CUSTOM_PALETTES[102][:n])
-    from ._deps import require_seaborn
-
-    sns = require_seaborn()
-    return list(sns.color_palette("husl", n_colors=n).as_hex())
-
-
 def categorical_color_map(
     categories: list[Any],
     *,
@@ -938,27 +717,45 @@ def resolve_category_scale(
     scale: CategoricalScale | None,
     *,
     context: str = "categorical_scale",
-    universe: Sequence[Any] | np.ndarray | None = None,
+    universe: Sequence[Any]
+    | np.ndarray
+    | Callable[[], Sequence[Any] | np.ndarray]
+    | None = None,
     order: Sequence[Any] | None = None,
+    stored: CategoricalScale | None = None,
 ) -> CategoricalScale:
     """Resolve the displayed order and colors of the observed categories.
 
-    An explicit ``scale.order`` must list every observed category and sets
+    ``scale`` is the caller's and ``stored`` the scale that the plotted
+    column or label artifact stores, which ``scale`` merges over field by
+    field (:func:`~cytearc.plotting._display.merge_categorical_scales`). A
+    caller's ``scale.order`` must list every observed category and sets
     their display order; categories it lists that no plotted cell carries are
-    left out of the display. Generated colors are assigned over the full
-    explicit order, so they stay stable when a plot shows a subset. Without an
-    explicit order, generated colors are assigned over the natural order of
+    left out of the display. A stored order lists its categories first, in
+    its order, and the categories it leaves out follow in natural order, as
+    the group axes of every plot order them. Without either, the categories
+    take their natural order. Generated colors are assigned over the full
+    order, every category of the explicit or stored order and of
     ``universe``, every value of the plotted column or label artifact, so a
     plot of some of its cells keeps the colors of a plot of all of them.
-    ``order``, such as requested groups, sets the display order instead and
-    must list every observed category; it never changes colors. A ``palette``
-    gives the colors of the categories it names and must name every category
-    shown. Missing values are never categories. The resolved scale fills the
-    missing color, missing label, and palette name that ``scale`` leaves
-    unset with their defaults.
+    ``universe`` may be a function that reads those values, which is called
+    only when generated colors need them. ``order``, such as requested
+    groups, sets the display order instead and must list every observed
+    category; it never changes colors. A caller's ``palette`` gives the
+    colors of the categories it names and must name every category shown. A
+    stored palette colors the categories it names, and each other category
+    takes the generated color of its place in the full order. Missing values
+    are never categories. The resolved scale fills the missing color, missing
+    label, and palette name that the scales leave unset with their defaults.
     """
     given = CategoricalScale() if scale is None else scale
+    merged = merge_categorical_scales(stored, given) or given
     present = _distinct_categories(observed)
+    listed = (
+        ()
+        if given.order is not None or stored is None or stored.order is None
+        else tuple(stored.order)
+    )
     if given.order is not None:
         full_order = list(given.order)
         if len(set(full_order)) != len(full_order):
@@ -970,18 +767,19 @@ def resolve_category_scale(
                 + ", ".join(map(str, unlisted[:10]))
             )
     else:
-        known = set(present)
-        full_order = sort_categories(
-            [
-                *present,
-                *(
-                    value
-                    for value in (
-                        () if universe is None else _distinct_categories(universe)
-                    )
-                    if value not in known
-                ),
-            ]
+        known = set(listed)
+        # Every value of the column places the categories that the stored
+        # order leaves out, unless a caller's palette colors them all.
+        if (
+            callable(universe)
+            and given.palette is None
+            and any(value not in known for value in present)
+        ):
+            universe = universe()
+        values = [] if universe is None or callable(universe) else universe
+        full_order = labels_in_stored_order(
+            dict.fromkeys([*listed, *present, *_distinct_categories(values)]),
+            None if not listed else CategoricalScale(order=listed),
         )
     shown = set(present)
     if order is not None:
@@ -994,16 +792,25 @@ def resolve_category_scale(
         display = list(dict.fromkeys(value for value in order if value in shown))
     else:
         display = [value for value in full_order if value in shown]
-    palette_name = given.palette_name or "default"
-    colors = categorical_color_map(
-        # A palette needs the colors of the categories shown, whichever order
-        # lists them; generated colors follow the full order.
-        display if given.palette is not None else full_order,
-        palette=given.palette,
-        palette_name=palette_name,
-    )
-    labels = given.labels
-    missing_color, missing_label = missing_category_entry(given)
+    palette_name = merged.palette_name or "default"
+    if given.palette is not None:
+        # A caller's palette needs the colors of the categories shown,
+        # whichever order lists them.
+        colors = categorical_color_map(
+            display, palette=given.palette, palette_name=palette_name
+        )
+    else:
+        stored_colors = merged.palette or {}
+        colors = (
+            dict(stored_colors)
+            if all(value in stored_colors for value in display)
+            else {
+                **categorical_color_map(full_order, palette_name=palette_name),
+                **stored_colors,
+            }
+        )
+    labels = merged.labels
+    missing_color, missing_label = missing_category_entry(merged)
     return CategoricalScale(
         order=tuple(display),
         palette={value: colors[value] for value in display},

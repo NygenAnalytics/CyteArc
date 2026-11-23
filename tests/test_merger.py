@@ -4085,15 +4085,337 @@ def test_dataset_merge_reconciles_cell_column_attributes(tmp_path):
         "levels": ["A", "B"],
         "ordered": False,
     }
-    # Ordered levels cannot be unioned, so both the levels and the order go.
-    assert "levels" not in cell_data["stage"].attrs
-    assert "ordered" not in cell_data["stage"].attrs
+    # Ordered levels that differ keep the first source's order with the other
+    # source's levels after it, an order that the sources do not agree on.
+    assert dict(cell_data["stage"].attrs) == {
+        "levels": ["early", "late"],
+        "ordered": False,
+    }
     assert "display" not in cell_data["score"].attrs
     assert cell_data["score"].attrs["unit"] == "count"
     dropped = [message for message in messages if "attributes that differ" in message]
     assert len(dropped) == 1
-    assert "stage (levels, ordered)" in dropped[0]
+    assert "stage (ordered)" in dropped[0]
     assert "score (display)" in dropped[0]
+
+
+# A display of T and B in the colors of a file, as an H5AD import stores it
+# with the levels and order of the file's categorical.
+_IMPORTED_CELL_TYPES = {
+    "levels": ["T", "B"],
+    "ordered": False,
+    "display": {
+        "kind": "categorical",
+        "categories": [
+            {"value": "T", "label": "T cells", "color": "#ff0000"},
+            {"value": "B", "label": "B cells", "color": "#00aa00"},
+        ],
+        "missing_label": "unassigned",
+        "missing_color": "#cccccc",
+    },
+}
+# The first four colors that plots generate, scanpy's default palette.
+_GENERATED = ["#1f77b4", "#ff7f0e", "#279e68", "#d62728"]
+
+
+def _merged_cell_columns(tmp_path, sources, *, names=("first", "second")):
+    """Merge stores of six cells, each given its cell columns, and return the merged cellData group and the merge's warnings.
+
+    ``sources`` holds, for each store, its columns as values or as
+    ``(values, attributes)``, whose attributes the column then records.
+    """
+    from cytearc.utils.logging import logger
+    from tests.storage_helpers import by_cell_id, open_store, write_count_store
+
+    stores = []
+    for name, columns in zip(names, sources, strict=True):
+        location = str(tmp_path / f"{name}.zarr")
+        write_count_store(
+            location,
+            {"RNA": np.ones((6, 3), dtype=int)},
+            "uint16",
+            cell_ids=[f"{name}{index}" for index in range(6)],
+        )
+        store = open_store(location)
+        for column, value in columns.items():
+            values, attributes = value if isinstance(value, tuple) else (value, {})
+            store.cells.insert(column, by_cell_id(store.cells, values))
+            store.zw["cellData"][column].attrs.update(attributes)
+        stores.append(store)
+    messages: list[str] = []
+    sink = logger.add(
+        lambda message: messages.append(message.record["message"]), level="WARNING"
+    )
+    try:
+        DataStoreMerge(
+            stores, str(tmp_path / "merged.zarr"), list(names), nthreads=1
+        ).dump()
+    finally:
+        logger.remove(sink)
+    return zarr.open_group(str(tmp_path / "merged.zarr"), mode="r")["cellData"], [
+        message for message in messages if "attributes that differ" in message
+    ]
+
+
+def test_a_merge_adds_the_labels_that_a_stored_display_leaves_out(tmp_path):
+    first = np.asarray(["T", "B", "T", "B", "T", "B"], dtype=object)
+    # NK first appears before DC; blank text holds no label.
+    second = np.asarray(["NK", "T", "", "DC", "NK", "B"], dtype=object)
+    cell_data, dropped = _merged_cell_columns(
+        tmp_path,
+        [{"cell_type": (first, _IMPORTED_CELL_TYPES)}, {"cell_type": second}],
+    )
+    attributes = dict(cell_data["orig_cell_type"].attrs)
+    # The file's order and colors come first, and the labels that the second
+    # store adds follow in the order of their first rows, in the colors that
+    # plots generate for the third and fourth of four categories.
+    assert attributes["levels"] == ["T", "B", "NK", "DC"]
+    assert attributes["ordered"] is False
+    assert attributes["display"] == {
+        "kind": "categorical",
+        "categories": [
+            {"value": "T", "label": "T cells", "color": "#ff0000"},
+            {"value": "B", "label": "B cells", "color": "#00aa00"},
+            {"value": "NK", "label": "NK", "color": _GENERATED[2]},
+            {"value": "DC", "label": "DC", "color": _GENERATED[3]},
+        ],
+        "missing_label": "unassigned",
+        "missing_color": "#cccccc",
+    }
+    assert dropped == []
+
+
+def test_a_merge_takes_the_order_of_the_first_store_that_records_one(tmp_path):
+    # The first store records no order; its labels follow the second's.
+    first = np.asarray(["X", "B", "X", "B", "X", "B"], dtype=object)
+    second = np.asarray(["T", "B", "T", "B", "T", "B"], dtype=object)
+    cell_data, _dropped = _merged_cell_columns(
+        tmp_path,
+        [{"cell_type": first}, {"cell_type": (second, _IMPORTED_CELL_TYPES)}],
+    )
+    display = cell_data["orig_cell_type"].attrs["display"]
+    assert [category["value"] for category in display["categories"]] == [
+        "T",
+        "B",
+        "X",
+    ]
+    assert display["categories"][2]["color"] == _GENERATED[2]
+    assert cell_data["orig_cell_type"].attrs["levels"] == ["T", "B", "X"]
+
+
+def test_a_merge_keeps_the_color_of_the_first_display_that_lists_a_label(tmp_path):
+    other = {
+        "display": {
+            "kind": "categorical",
+            "categories": [
+                {"value": "B", "label": "B", "color": "#0000ff"},
+                {"value": "NK", "label": "Natural killer", "color": "#aa00aa"},
+            ],
+        }
+    }
+    cell_data, dropped = _merged_cell_columns(
+        tmp_path,
+        [
+            {
+                "cell_type": (
+                    np.asarray(["T", "B"] * 3, dtype=object),
+                    _IMPORTED_CELL_TYPES,
+                )
+            },
+            {"cell_type": (np.asarray(["B", "NK"] * 3, dtype=object), other)},
+        ],
+    )
+    # B keeps the first store's color, and NK its own, which a display of the
+    # second store records; no color is generated.
+    assert [
+        (category["value"], category["label"], category["color"])
+        for category in cell_data["orig_cell_type"].attrs["display"]["categories"]
+    ] == [
+        ("T", "T cells", "#ff0000"),
+        ("B", "B cells", "#00aa00"),
+        ("NK", "Natural killer", "#aa00aa"),
+    ]
+    # Only the first store records levels, which cover every label.
+    assert cell_data["orig_cell_type"].attrs["levels"] == ["T", "B", "NK"]
+    assert dropped == []
+
+
+def test_a_merge_keeps_a_display_without_levels_as_a_display(tmp_path):
+    # A display that a store records without levels, as a column's display
+    # can be set alone.
+    display_only = {"display": _IMPORTED_CELL_TYPES["display"]}
+    cell_data, dropped = _merged_cell_columns(
+        tmp_path,
+        [
+            {"cell_type": (np.asarray(["T", "B"] * 3, dtype=object), display_only)},
+            {"cell_type": np.asarray(["NK", "T"] * 3, dtype=object)},
+        ],
+    )
+    attributes = dict(cell_data["orig_cell_type"].attrs)
+    assert set(attributes) == {"display"}
+    assert [category["value"] for category in attributes["display"]["categories"]] == [
+        "T",
+        "B",
+        "NK",
+    ]
+    assert dropped == []
+
+
+def test_a_merge_keeps_an_order_that_every_store_records(tmp_path):
+    stages = ["late", "early", "mid", "late", "early", "mid"]
+    ordered = pd.Categorical(stages, categories=["early", "mid", "late"], ordered=True)
+    # Categorical columns record their categories as such, not as attributes.
+    cell_data, dropped = _merged_cell_columns(
+        tmp_path, [{"stage": ordered}, {"stage": ordered}]
+    )
+    assert dict(cell_data["orig_stage"].attrs) == {
+        "levels": ["early", "mid", "late"],
+        "ordered": True,
+    }
+    assert dropped == []
+
+
+@pytest.mark.parametrize(
+    "second",
+    [
+        # A store without the order, whose labels the order holds.
+        np.asarray(["mid", "early"] * 3, dtype=object),
+        # A store with the same order whose rows hold a label beyond it, as a
+        # store merged by an earlier release may.
+        (
+            np.asarray(["mid", "post"] * 3, dtype=object),
+            {"levels": ["early", "mid", "late"], "ordered": True},
+        ),
+    ],
+)
+def test_a_merge_drops_an_order_that_a_store_does_not_agree_on(tmp_path, second):
+    stages = pd.Categorical(
+        ["late", "early", "mid"] * 2, categories=["early", "mid", "late"], ordered=True
+    )
+    cell_data, dropped = _merged_cell_columns(
+        tmp_path, [{"stage": stages}, {"stage": second}]
+    )
+    levels = cell_data["orig_stage"].attrs["levels"]
+    assert levels[:3] == ["early", "mid", "late"]
+    assert cell_data["orig_stage"].attrs["ordered"] is False
+    assert len(dropped) == 1 and "orig_stage (ordered)" in dropped[0]
+
+
+@pytest.mark.parametrize("kept", [1, 3, 4])
+def test_a_merge_keeps_the_labels_alone_beyond_the_categories_a_column_keeps(
+    tmp_path, monkeypatch, kept
+):
+    import cytearc.merge.metadata as merge_metadata
+
+    monkeypatch.setattr(merge_metadata, "MAX_STORED_CATEGORIES", kept)
+    cell_data, dropped = _merged_cell_columns(
+        tmp_path,
+        [
+            {
+                "cell_type": (
+                    np.asarray(["T", "B"] * 3, dtype=object),
+                    _IMPORTED_CELL_TYPES,
+                )
+            },
+            # NK and DC make four categories; with one kept, the first store
+            # alone holds too many labels.
+            {"cell_type": np.asarray(["NK", "DC"] * 3, dtype=object)},
+        ],
+    )
+    attributes = cell_data["orig_cell_type"].attrs
+    if kept == 4:
+        # A column keeps as many categories as it may.
+        assert attributes["levels"] == ["T", "B", "NK", "DC"]
+        assert dropped == []
+        return
+    for key in ("levels", "ordered", "display"):
+        assert key not in attributes, key
+    assert len(dropped) == 1
+    assert "orig_cell_type (levels, ordered, display)" in dropped[0]
+
+
+def test_merges_read_a_columns_labels_in_the_order_of_their_first_rows(
+    tmp_path, monkeypatch
+):
+    import cytearc.merge.metadata as merge_metadata
+    from tests.storage_helpers import (
+        by_cell_id,
+        insert_nullable_cell_column,
+        open_store,
+        write_count_store,
+    )
+
+    write_count_store(
+        str(tmp_path / "store.zarr"), {"RNA": np.ones((7, 3), dtype=int)}, "uint16"
+    )
+    store = open_store(tmp_path / "store.zarr")
+    insert_nullable_cell_column(
+        store,
+        "cell_type",
+        np.asarray(["NK", "T", "  ", "DC", "B", "NK", "T"]),
+        np.asarray([False, False, False, False, True, False, False]),
+    )
+    store.cells.insert(
+        "cluster", by_cell_id(store.cells, np.asarray([3, 1, 3, 2, 1, 2, 3]))
+    )
+    read = merge_metadata._labels_by_first_row
+    # Two rows at a time: NK, T, then DC; blank text and the masked B hold no
+    # label.
+    assert read(store.cells, "cell_type", block_rows=2) == ["NK", "T", "DC"]
+    # Whole numbers come as Python numbers, as attributes hold them.
+    clusters = read(store.cells, "cluster", block_rows=3)
+    assert clusters == [3, 1, 2]
+    assert {type(label) for label in clusters} == {int}
+    # As many labels as a column keeps are listed, and one more is too many.
+    monkeypatch.setattr(merge_metadata, "MAX_STORED_CATEGORIES", 3)
+    assert read(store.cells, "cluster", block_rows=3) == [3, 1, 2]
+    monkeypatch.setattr(merge_metadata, "MAX_STORED_CATEGORIES", 2)
+    assert read(store.cells, "cluster", block_rows=3) is None
+    assert read(store.cells, "cell_type", block_rows=2) is None
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        pytest.param(np.datetime64("2026-01-01").item(), id="date"),
+        pytest.param(float("inf"), id="infinite"),
+    ],
+)
+def test_merges_keep_the_labels_alone_of_categories_that_levels_cannot_hold(label):
+    from cytearc.merge.metadata import _reconciled_cell_attributes
+
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    imported = root.create_array("imported", data=np.zeros(2))
+    imported.attrs.update(_IMPORTED_CELL_TYPES)
+    other = root.create_array("other", data=np.zeros(2))
+    labels = [["T", "B"], ["T", label]]
+    assert _reconciled_cell_attributes(
+        [imported, other], lambda index: labels[index]
+    ) == ({}, ["levels", "ordered", "display"])
+
+
+def test_merges_keep_the_labels_alone_of_a_categorical_of_too_many_categories(
+    tmp_path, monkeypatch
+):
+    import cytearc.merge.metadata as merge_metadata
+
+    monkeypatch.setattr(merge_metadata, "MAX_STORED_CATEGORIES", 2)
+    cell_data, dropped = _merged_cell_columns(
+        tmp_path,
+        [
+            {
+                "cell_type": (
+                    np.asarray(["T", "B"] * 3, dtype=object),
+                    _IMPORTED_CELL_TYPES,
+                )
+            },
+            # Three categories, of which the rows hold two the display lists.
+            {"cell_type": pd.Categorical(["T", "B"] * 3, categories=["T", "B", "NK"])},
+        ],
+    )
+    for key in ("levels", "ordered", "display"):
+        assert key not in cell_data["orig_cell_type"].attrs, key
+    assert "orig_cell_type (levels, ordered, display)" in dropped[0]
 
 
 def test_dataset_merge_overwrite_refuses_any_prepared_assay(tmp_path):

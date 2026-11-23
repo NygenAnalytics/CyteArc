@@ -61,6 +61,16 @@ def test_palette_for_n_falls_back_to_evenly_spaced_hues():
     )
 
 
+def test_palette_for_n_asks_for_seaborn_beyond_its_palettes(monkeypatch):
+    import sys
+
+    # A module set to None in sys.modules raises ImportError when imported.
+    monkeypatch.setitem(sys.modules, "seaborn", None)
+    assert palette_for_n(102)[-1] == "#324E72"
+    with pytest.raises(ImportError, match="need seaborn"):
+        palette_for_n(103)
+
+
 @pytest.mark.parametrize("palette_name", ["default", "colorblind"])
 @pytest.mark.parametrize("size", [8, 30, 110])
 def test_palette_for_n_never_recycles_colors(size, palette_name):

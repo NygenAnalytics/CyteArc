@@ -29,7 +29,7 @@ from ._data import (
     _resolve_grouping,
     _resolve_layout,
 )
-from ._display import resolve_artifact_scale, resolve_categorical_scale
+from ._display import stored_artifact_scale, stored_categorical_scale
 from ._titles import artifact_titles, label_artifact, label_column
 from ._figure import (
     LegendSpec,
@@ -309,7 +309,7 @@ def cluster_connectivity(
                 store, group_by=None, groups=groups, cell_key="I"
             )
             group_universe = all_labels[0]
-        categorical_scale = resolve_artifact_scale(store, groups, categorical_scale)
+        stored_group_scale = stored_artifact_scale(store, groups)
         group_label = artifact_titles(store, [(groups, groups_name)])[0]
     else:
         if group_key is None or layout_key is None:
@@ -329,17 +329,14 @@ def cluster_connectivity(
             layout_key=layout_key,
             cell_key=cell_key,
         )
-        categorical_scale = resolve_categorical_scale(
-            store,
-            group_key,
-            categorical_scale,
-        )
+        stored_group_scale = stored_categorical_scale(store, group_key)
         assert group_title is not None
         group_label = group_title
     try:
         resolved_categorical_scale = resolve_category_scale(
             group_values_array,
             categorical_scale,
+            stored=stored_group_scale,
             universe=group_universe,
         )
     except TypeError as exc:

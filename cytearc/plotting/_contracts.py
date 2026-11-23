@@ -79,7 +79,8 @@ class ColorScale:
 class CategoricalScale:
     """Category order, colors and labels for discrete embeddings and compositions.
 
-    ``order`` sets legend and axis order. ``palette`` maps each category to a
+    ``order`` sets legend and axis order; a category that a plot shows and
+    ``order`` leaves out raises an error. ``palette`` maps each category to a
     color string; a category that a plot shows and ``palette`` leaves out
     raises an error, so pass a complete map when you customize colors.
     ``labels`` maps categories to the text that ticks and legends show.
@@ -93,6 +94,8 @@ class CategoricalScale:
     keeps the stored colors, and ``palette`` alone keeps the stored order.
     ``labels`` merge with the stored labels category by category. A
     ``palette_name`` replaces the stored colors and keeps the stored order.
+    Categories that the stored order leaves out follow it in natural order,
+    each in the generated color of its place.
     Fields still unset when a plot is drawn take the defaults: the natural
     order of the categories, colors of the ``"default"`` palette, each
     category's own text, ``"#bdbdbd"`` and ``"NA"``.

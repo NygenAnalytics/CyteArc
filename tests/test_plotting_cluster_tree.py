@@ -460,6 +460,45 @@ def test_cluster_tree_samples_a_colormap_in_the_stored_order_of_its_column():
     ]
 
 
+def test_cluster_tree_colors_the_categories_that_a_stored_display_leaves_out():
+    # The display lists T and B; the column also holds NK, and DC outside
+    # the tree.
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    column = root.create_group("cellData").create_array(
+        "cell_type", data=np.array(["DC", "B", "T", "NK", "T", "B", "NK"])
+    )
+    column.attrs["display"] = {
+        "kind": "categorical",
+        "categories": [
+            {"value": "T", "label": "T", "color": "#ff0000"},
+            {"value": "B", "label": "B", "color": "#00aa00"},
+        ],
+    }
+    store = _tree_store(
+        ["B", "T", "NK", "T", "B", "NK"],
+        column=["DC", "B", "T", "NK", "T", "B", "NK"],
+    )
+    store.zw = root
+    result = splt.cluster_tree(
+        store,
+        graph=_GRAPH,
+        clusters=_CLUSTERS,
+        fill_by_value="cell_type",
+        show_labels=False,
+        show=False,
+    )
+    try:
+        # NK follows T and B, in the color of the fourth place of T, B, DC
+        # and NK, as a plot of every cell colors it.
+        assert list(result.scales[0].palette.items()) == [
+            ("T", "#ff0000"),
+            ("B", "#00aa00"),
+            ("NK", DEFAULT_COLORS[3]),
+        ]
+    finally:
+        result.close()
+
+
 def test_cluster_tree_keeps_a_single_category_categorical():
     result = splt.cluster_tree(
         _tree_store(np.asarray(["A"] * 6)),
