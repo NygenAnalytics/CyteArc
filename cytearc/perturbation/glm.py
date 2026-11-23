@@ -57,6 +57,8 @@ _FIT_TOLERANCE = 1e-12
 _LOGISTIC_ITERATIONS = 50
 # Counts up to this sum their digamma differences term by term.
 _FINITE_SUM_COUNTS = 8
+# The relative rounding of a double.
+_EPSILON = float(np.finfo(np.float64).eps)
 # A set whose cells the covariates determine, such as the cells of a sample
 # that holds no other cell of the fit, has a score variance of exactly 0. Its
 # computed variance is rounding, which grows with the cells summed by about
@@ -313,14 +315,22 @@ def trigamma(x: float) -> float:
 
 
 @njit(cache=True, nogil=True)
-def size_derivatives(y: np.ndarray, mu: np.ndarray, size: float) -> tuple[float, float]:
-    """Return the first two derivatives of the log-likelihood in log(size).
+def size_derivatives(
+    y: np.ndarray, mu: np.ndarray, size: float
+) -> tuple[float, float, float]:
+    """Return the first two derivatives of the log-likelihood in log(size), and the first's rounding.
 
     The means are held fixed. For an integer count y, psi(size + y) -
-    psi(size) is the sum of 1 / (size + k) for k below y.
+    psi(size) is the sum of 1 / (size + k) for k below y. Near the maximum,
+    the terms of the first derivative cancel to far below their own size, so
+    its error is the rounding of the terms themselves: the finite sums, or the
+    digamma values that a large count subtracts, the logarithm of size /
+    (size + mean), whose error near 1 is absolute, and (mean - y) / (size +
+    mean). The rounding returned sums those roundings over the cells.
     """
     first = 0.0
     second = 0.0
+    rounded = 0.0
     base_first = digamma(size)
     base_second = trigamma(size)
     for i in range(len(y)):
@@ -335,14 +345,19 @@ def size_derivatives(y: np.ndarray, mu: np.ndarray, size: float) -> tuple[float,
                     gap_first += inverse
                     gap_second -= inverse * inverse
             else:
-                gap_first = digamma(size + count) - base_first
+                larger = digamma(size + count)
+                gap_first = larger - base_first
                 gap_second = trigamma(size + count) - base_second
+                rounded += abs(larger) + abs(base_first)
         total = size + mean
-        first += gap_first + math.log(size / total) + (mean - count) / total
+        ratio = math.log(size / total)
+        share = (mean - count) / total
+        first += gap_first + ratio + share
+        rounded += abs(gap_first) + abs(ratio) + abs(share) + 1.0
         second += (
             gap_second + 1.0 / size - 1.0 / total - (mean - count) / (total * total)
         )
-    return size * first, size * first + size * size * second
+    return size * first, size * first + size * size * second, size * _EPSILON * rounded
 
 
 @njit(cache=True, nogil=True)
@@ -364,7 +379,12 @@ def size_dispersion(y: np.ndarray, mu: np.ndarray, degrees: float) -> float:
         return pearson_dispersion(y, mu, degrees)
     log_size = math.log(squares / excess)
     for _ in range(100):
-        gradient, curvature = size_derivatives(y, mu, math.exp(log_size))
+        gradient, curvature, rounding = size_derivatives(y, mu, math.exp(log_size))
+        # A gradient within its rounding gives no direction. Near Poisson
+        # counts, the likelihood is so flat in the size that steps from such
+        # a gradient would follow its rounding and never fall below 1e-10.
+        if abs(gradient) <= rounding:
+            break
         # Newton's step where the likelihood curves down enough, and otherwise
         # a step of at most 1 uphill.
         step = -gradient / min(curvature, -abs(gradient) - 1e-300)

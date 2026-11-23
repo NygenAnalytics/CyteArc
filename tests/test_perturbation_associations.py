@@ -459,16 +459,41 @@ def _exact_size_score(y: np.ndarray, mu: np.ndarray, size: Decimal) -> Decimal:
     return total
 
 
-@pytest.mark.parametrize("compiled", [True, False], ids=["jit", "python"])
-def test_a_size_search_that_rounding_keeps_from_settling_ends_at_its_maximum(
-    monkeypatch, compiled
-) -> None:
-    # Poisson counts whose small excess puts the likelihood's maximum at a
-    # size near 1e5, where the likelihood is so flat in the size that the
-    # rounding of its gradient moves each step by more than 1e-10.
+def _exact_size_gradient(y: np.ndarray, mu: np.ndarray, size: float) -> float:
+    """The likelihood's derivative in log(size) of integer counts, to 40 digits."""
+    with localcontext(prec=40):
+        exact = Decimal(size)
+        return float(exact * _exact_size_score(y, mu, exact))
+
+
+def _exact_log_size(y: np.ndarray, mu: np.ndarray, low: float, high: float) -> float:
+    """The log size of the likelihood's maximum between two sizes, by bisection to 40 digits."""
+    with localcontext(prec=40):
+        below, above = Decimal(low), Decimal(high)
+        assert _exact_size_score(y, mu, below) > 0 > _exact_size_score(y, mu, above)
+        for _ in range(40):
+            middle = (below * above).sqrt()
+            if _exact_size_score(y, mu, middle) > 0:
+                below = middle
+            else:
+                above = middle
+        return float(below.ln())
+
+
+def _near_poisson_counts() -> tuple[np.ndarray, np.ndarray]:
+    """Poisson counts whose small excess puts the likelihood's maximum at a size near 1e5."""
     rng = np.random.default_rng(1948)
     mu = rng.gamma(2.0, 5.0, size=200)
-    y = rng.poisson(mu).astype(np.float64)
+    return rng.poisson(mu).astype(np.float64), mu
+
+
+@pytest.mark.parametrize("compiled", [True, False], ids=["jit", "python"])
+def test_a_near_poisson_size_search_stops_once_its_gradient_is_rounding(
+    monkeypatch, compiled
+) -> None:
+    # The likelihood is so flat in the size near its maximum that the
+    # rounding of the gradient would move each step by more than 1e-10.
+    y, mu = _near_poisson_counts()
     steps = []
     if not compiled:
         derivatives = glm.size_derivatives
@@ -482,21 +507,80 @@ def test_a_size_search_that_rounding_keeps_from_settling_ends_at_its_maximum(
 
     found = -math.log(size_dispersion(y, mu, 199.0))
 
-    with localcontext(prec=40):
-        low, high = Decimal(10) ** 4, Decimal(10) ** 6
-        assert _exact_size_score(y, mu, low) > 0 > _exact_size_score(y, mu, high)
-        for _ in range(40):
-            middle = (low * high).sqrt()
-            if _exact_size_score(y, mu, middle) > 0:
-                low = middle
-            else:
-                high = middle
-        best = float(low.ln())
-    # The search ends within the rounding of its steps of the maximum, where
-    # the likelihood differs from it by less than 1e-8.
+    best = _exact_log_size(y, mu, 1e4, 1e6)
+    # The search ends within the rounding of its gradient of the maximum,
+    # where the likelihood differs from it by less than 1e-8.
     assert abs(found - best) < 0.1
     if not compiled:
-        assert len(steps) == 100
+        # A step from the moment estimate, whose gradient is more than its
+        # rounding, then a stop where steps would follow the rounding.
+        assert 2 <= len(steps) <= 5
+
+
+def test_a_size_search_whose_gradient_never_settles_ends_at_its_maximum_steps(
+    monkeypatch,
+) -> None:
+    # A gradient that errs by ten times its rounding, alternating in sign,
+    # never comes within its rounding and keeps each step above 1e-10.
+    y, mu = _near_poisson_counts()
+    derivatives = glm.size_derivatives.py_func
+    sizes = []
+
+    def unsettled(counts, means, size):
+        gradient, curvature, rounding = derivatives(counts, means, size)
+        sizes.append(size)
+        return gradient + (-1) ** len(sizes) * 10.0 * rounding, curvature, rounding
+
+    monkeypatch.setattr(glm, "size_derivatives", unsettled)
+
+    found = -math.log(glm.size_dispersion.py_func(y, mu, 199.0))
+
+    assert len(sizes) == 100
+    # The steps swing around the maximum by the error over the curvature.
+    assert abs(found - _exact_log_size(y, mu, 1e4, 1e6)) < 1.0
+
+
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_the_size_gradient_rounding_covers_its_error_near_the_maximum(
+    monkeypatch, python_kernels
+) -> None:
+    _python_kernels(monkeypatch, python_kernels)
+    y, mu = _near_poisson_counts()
+    best = _exact_log_size(y, mu, 1e4, 1e6)
+    for offset in (-0.1, 0.0, 0.1):
+        size = math.exp(best + offset)
+        exact = _exact_size_gradient(y, mu, size)
+
+        gradient, _, rounding = glm.size_derivatives(y, mu, size)
+
+        assert abs(gradient - exact) <= rounding
+        if offset:
+            # The gradient 0.1 from the maximum exceeds the rounding, so the
+            # search steps on from there.
+            assert abs(exact) > rounding
+    # Overdispersed counts, most of them above the finite sums' limit, and
+    # 2,000 Poisson counts, at the sizes that the search finds; and Poisson
+    # counts of means near 1 at a size of 1e6, where each cell's terms cancel
+    # to far below the error of the logarithm near 1.
+    rng = np.random.default_rng(7)
+    large_mu = rng.lognormal(np.log(40.0), 0.3, 200)
+    large = rng.negative_binomial(3.0, 3.0 / (3.0 + large_mu)).astype(np.float64)
+    rng = np.random.default_rng(180)
+    many_mu = rng.gamma(2.0, 5.0, size=2_000)
+    many = rng.poisson(many_mu).astype(np.float64)
+    rng = np.random.default_rng(3)
+    small_mu = rng.lognormal(0.0, 0.3, 200)
+    small = rng.poisson(small_mu).astype(np.float64)
+    for counts, means, size in (
+        (large, large_mu, 1.0 / glm.size_dispersion(large, large_mu, 199.0)),
+        (many, many_mu, 1.0 / glm.size_dispersion(many, many_mu, 1_999.0)),
+        (small, small_mu, 1e6),
+    ):
+        exact = _exact_size_gradient(counts, means, size)
+
+        gradient, _, rounding = glm.size_derivatives(counts, means, size)
+
+        assert abs(gradient - exact) <= rounding
 
 
 @pytest.mark.parametrize("compiled", [True, False], ids=["jit", "python"])
@@ -546,7 +630,7 @@ def test_large_counts_take_the_digamma_function(monkeypatch, python_kernels) -> 
     mu = rng.lognormal(np.log(40.0), 0.3, 200)
     y = rng.negative_binomial(3.0, 3.0 / (3.0 + mu)).astype(np.float64) + 0.5
 
-    first, second = glm.size_derivatives(y, mu, 2.5)
+    first, second, _ = glm.size_derivatives(y, mu, 2.5)
 
     expected = (
         special.digamma(y + 2.5)
