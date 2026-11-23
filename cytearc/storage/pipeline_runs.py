@@ -2527,6 +2527,7 @@ def resume_pipeline_run_record(
     Raises:
         ValueError: If the run is not paused, its pause was not written
             completely, or it holds fewer segments than ``segment``.
+        TypeError: If ``segment`` is not a non-negative integer.
         RuntimeError: If another process resumed the run after the caller
             read it, another process claimed this pause, or the store cannot
             claim it.
@@ -2548,8 +2549,8 @@ def resume_pipeline_run_record(
         )
     if len(run.segments) != segment:
         raise ValueError(
-            f"Pipeline run {run_id} holds {len(run.segments)} segments, not the "
-            f"{segment} of the pause that the caller read"
+            "segment must be the number of segments of the paused run, "
+            f"{len(run.segments)}, not {segment}"
         )
     if not _claim_pipeline_run_resume(root, run_id, segment):
         if len(load_pipeline_run_record(root, run_id).segments) > segment:

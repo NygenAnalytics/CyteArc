@@ -2230,6 +2230,10 @@ def test_a_run_pauses_resumes_and_completes_with_one_segment_per_process() -> No
         pipeline_run_storage.resume_pipeline_run_record(
             root, run_id=run.run_id, segment=-1, shutdown=_SHUTDOWN
         )
+    with pytest.raises(ValueError, match="segments of the paused run, 2, not 3"):
+        pipeline_run_storage.resume_pipeline_run_record(
+            root, run_id=run.run_id, segment=3, shutdown=_SHUTDOWN
+        )
     assert load_pipeline_run_record(root, run.run_id) == again
     pipeline_run_storage.resume_pipeline_run_record(
         root, run_id=run.run_id, segment=2, shutdown=_SHUTDOWN, started_at_ns=500
