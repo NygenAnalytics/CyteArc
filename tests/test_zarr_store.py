@@ -21,6 +21,7 @@ from cytearc.storage.copy import (
     copy_zarr_array,
     copy_zarr_group_tree,
     create_or_open_staged_normed_array,
+    row_band_reader,
 )
 from cytearc.storage.layout import (
     ZarrArraySpec,
@@ -1643,6 +1644,76 @@ def test_copying_an_unsharded_array_reserves_its_chunk_as_stored_and_decoded(
     # decode.
     assert recorded == [512 + 512 + 4 + 1_024 + 32_768 + 4 * 4_096 + 16_384]
     np.testing.assert_array_equal(target[:], expected)
+
+
+def test_the_band_reader_of_copies_reads_the_rows_it_is_asked_for() -> None:
+    values = np.arange(30 * 4, dtype=np.int32).reshape(30, 4)
+    array = zarr.create_array(MemoryStore(), data=values, chunks=(8, 4))
+    read = row_band_reader(array)
+    np.testing.assert_array_equal(read(5, 21), values[5:21])
+    np.testing.assert_array_equal(read(29, 30), values[29:30])
+    assert read(30, 30).shape == (0, 4)
+
+
+@pytest.mark.parametrize("held", [False, True], ids=["error dropped", "error held"])
+def test_a_copy_whose_band_read_fails_frees_the_band_it_read(
+    tmp_path, monkeypatch, held
+):
+    import gc
+    import time
+    import tracemalloc
+
+    from zarr.storage import LocalStore
+
+    # Two bands of 2,000 rows by 500 uint16 values, 2 MB each, of which the
+    # second band's shard cannot be read.
+    root = zarr.open_group(store=LocalStore(str(tmp_path)), mode="w")
+    values = np.arange(4_000 * 500, dtype=np.uint16).reshape(4_000, 500)
+    source = root.create_array(
+        "source", data=values, chunks=(1_000, 500), shards=(2_000, 500)
+    )
+    target = root.create_array(
+        "target",
+        shape=values.shape,
+        dtype=values.dtype,
+        chunks=(1_000, 500),
+        shards=(2_000, 500),
+    )
+    # A first copy starts the pools that every copy shares.
+    copy_zarr_array(source, target, resources=ResourceBudget(256 * 1024**2, 1))
+    get = LocalStore.get
+
+    async def failing_get(self, key, prototype, byte_range=None):
+        if key == "source/c/1/0":
+            raise OSError(f"the store could not read {key}")
+        return await get(self, key, prototype, byte_range)
+
+    monkeypatch.setattr(LocalStore, "get", failing_get)
+    kept: list[BaseException] = []
+    gc.collect()
+    gc.disable()
+    tracemalloc.start()
+    try:
+        try:
+            copy_zarr_array(source, target, resources=ResourceBudget(256 * 1024**2, 1))
+        except OSError as error:
+            if held:
+                kept.append(error)
+        # The failed band read allocated its 2 MB band before it fetched the
+        # shard. With the collector off, only reference counting frees it,
+        # once the copy's threads have let go.
+        deadline = time.monotonic() + 10
+        while (traced := tracemalloc.get_traced_memory()[0]) >= 500_000:
+            if time.monotonic() > deadline:
+                break
+            time.sleep(0.02)
+    finally:
+        tracemalloc.stop()
+        gc.enable()
+    assert traced < 500_000
+    if held:
+        [error] = kept
+        assert "the store could not read source/c/1/0" in repr(error)
 
 
 def test_copying_a_sharded_array_reserves_its_shard_read(tmp_path, monkeypatch):

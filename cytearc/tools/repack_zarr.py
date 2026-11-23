@@ -2,7 +2,6 @@
 
 import argparse
 import json
-from collections.abc import Callable
 
 import numpy as np
 import zarr
@@ -17,6 +16,7 @@ from cytearc.storage.copy import (
     band_read_bytes,
     copy_zarr_array,
     copy_zarr_group_tree,
+    row_band_reader,
     validate_metadata_dependencies,
 )
 from cytearc.storage.identity import (
@@ -99,13 +99,6 @@ def _retired_assay_state_paths(store: zarr.Group) -> frozenset[str]:
 def _copy_array_attrs(src: zarr.Array, dst: zarr.Array) -> None:
     for attr_key, attr_val in src.attrs.items():
         dst.attrs[attr_key] = attr_val
-
-
-def _row_block_producer(source: zarr.Array) -> Callable[[int, int], np.ndarray]:
-    def produce(start: int, end: int) -> np.ndarray:
-        return np.asarray(source[start:end, :])
-
-    return produce
 
 
 def _fit_counts_layout(
@@ -541,7 +534,7 @@ def _write_repacked_store(
             summary = CountSummary(counts)
             write_dense_in_shard_rows(
                 counts,
-                _row_block_producer(source_counts),
+                row_band_reader(source_counts),
                 resources=resources,
                 msg=f"Repacking {path}",
                 producerBytes=band_read_bytes(source_counts, array_shard_rows(counts)),

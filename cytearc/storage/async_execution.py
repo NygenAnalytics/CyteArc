@@ -1047,7 +1047,13 @@ class AsyncStorageRunner:
         # Outside an except clause, so a failure is not chained to the error
         # that found no running loop.
         if not _in_event_loop():
-            return asyncio.run(self._run(operation))
+            try:
+                return asyncio.run(self._run(operation))
+            except BaseException as failure:
+                # asyncio's run_until_complete raises the operation's error
+                # from a frame that keeps its task, which keeps the error.
+                release_exception_frames(failure)
+                raise
         error: list[BaseException] = []
         result: list[T] = []
         context = contextvars.copy_context()
@@ -1065,6 +1071,7 @@ class AsyncStorageRunner:
             try:
                 result.append(context.run(lambda: asyncio.run(_main())))
             except BaseException as exc:
+                release_exception_frames(exc)
                 error.append(exc)
             finally:
                 started.set()
@@ -1085,9 +1092,12 @@ class AsyncStorageRunner:
                     pass
             thread.join()
             raise
+        # The operation's task holds its error, and neither the task nor the
+        # error stays in a local of this frame once the error leaves it.
+        main.clear()
         if error:
-            raise error[0]
-        return result[0]
+            raise error.pop()
+        return result.pop()
 
     async def _run(
         self,
