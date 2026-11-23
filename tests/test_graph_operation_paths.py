@@ -324,8 +324,10 @@ def test_a_local_cache_directory_reuses_its_completed_staging_copy(
     normalized = refs["rna_normalized"]
     # Stage the normalized data as if the store were remote.
     monkeypatch.setattr(graph_operations, "is_remote_datastore", lambda *_: True)
-    copy_array = Mock(side_effect=graph_operations.copy_zarr_array)
-    monkeypatch.setattr(graph_operations, "copy_zarr_array", copy_array)
+    import cytearc.storage.copy as copy_module
+
+    copy_array = Mock(side_effect=copy_module.copy_zarr_array)
+    monkeypatch.setattr(copy_module, "copy_zarr_array", copy_array)
     cache = tmp_path / "normalized_cache"
 
     first = store.reduction.pca(normalized, dims=2, local_cache=str(cache))
