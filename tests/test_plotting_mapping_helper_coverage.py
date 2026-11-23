@@ -1194,6 +1194,15 @@ def test_mapping_artifact_writer_contract_edges(monkeypatch) -> None:
             metadata={"method": "symphony"},
             **common,
         )
+    # Only the arrays that a normalizer fits enter beside the PCA.
+    with pytest.raises(ValueError, match="'feature_totals' is outside the payload"):
+        mapping_artifact.write_artifact_mapping_reference_from_sources(
+            root.create_group("unknown_fit"),
+            symphony_sources=None,
+            metadata={"method": "pca"},
+            normalization_arrays={"feature_totals": np.ones(2)},
+            **common,
+        )
 
     high_rank = _array(root, "high_rank", np.ones((1, 1, 1)))
     with pytest.raises(ValueError, match="one or two axes"):

@@ -185,13 +185,11 @@ def reference_fit_array_names(parameters: Mapping[str, Any]) -> tuple[str, ...]:
     return ()
 
 
-def reference_fit_arrays(fit: NormalizationFit) -> dict[str, np.ndarray]:
+def reference_fit_arrays(fit: PearsonResidualFit | ClrFit) -> dict[str, np.ndarray]:
     """Return the arrays that a reference saves of ``fit``, by name."""
     if isinstance(fit, PearsonResidualFit):
         return {REFERENCE_FIT_ARRAYS[PearsonResidualFit]: fit.fractions}
-    if isinstance(fit, ClrFit):
-        return {REFERENCE_FIT_ARRAYS[ClrFit]: fit.scales}
-    return {}
+    return {REFERENCE_FIT_ARRAYS[ClrFit]: fit.scales}
 
 
 def reference_normalization(

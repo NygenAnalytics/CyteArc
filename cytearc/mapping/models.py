@@ -6,6 +6,7 @@ import pandas as pd
 
 from ..metadata.alignment import align_to_cell_ids, keyed_values_remedy
 from ..storage.refs import ArtifactRef, ExternalArtifactRef
+from ..utils.arguments import bool_argument
 from ..utils.arrays import read_only_copy
 from .confidence import _conformal_membership, _validated_conformal_calibration
 
@@ -31,8 +32,11 @@ class ScaledPCAProjectionModel:
     feature_scaling: bool = True
 
     def __post_init__(self) -> None:
-        if not isinstance(self.feature_scaling, bool):
-            raise TypeError("feature_scaling must be a boolean")
+        object.__setattr__(
+            self,
+            "feature_scaling",
+            bool_argument(self.feature_scaling, "feature_scaling"),
+        )
         feature_means = np.asarray(self.feature_means)
         feature_scales = np.asarray(self.feature_scales)
         center = np.asarray(self.center)

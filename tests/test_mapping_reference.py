@@ -1167,6 +1167,14 @@ def test_build_mapping_reference_rejects_each_inconsistent_chain_record(
         ),
         (
             plain,
+            "reduction",
+            "parameters",
+            "feat_scaling",
+            None,
+            "require a PCA that records feat_scaling",
+        ),
+        (
+            plain,
             "normalized",
             None,
             "operation",

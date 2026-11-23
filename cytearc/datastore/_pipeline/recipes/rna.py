@@ -271,10 +271,8 @@ def _check_doublet_normalization(assay: str, normalizer: NormMethod) -> None:
     run normalized the graph's cells, with what a built-in normalizer fitted
     over them, and projects them onto the PCA of those cells.
     """
-    try:
-        recorded = recorded_normalizer(callable_identity(normalizer))
-    except ValueError:
-        recorded = None
+    # The run has already refused a normalizer that provenance cannot identify.
+    recorded = recorded_normalizer(callable_identity(normalizer))
     if recorded is not None and recorded is not norm_tf_idf:
         return
     raise ValueError(
