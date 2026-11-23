@@ -701,6 +701,7 @@ class DenseBandBuffer:
                     band_rows[...] = piece
                     stored_rows = band_rows.astype(self.destinationDtype, copy=False)
                 bad_row = first_nonfinite_row(stored_rows)
+                del stored_rows
                 if bad_row is not None:
                     operation, name = self._finite
                     raise NonFiniteArtifactError(
@@ -715,7 +716,12 @@ class DenseBandBuffer:
                 start = self._bandStart
                 self._bandStart += band.shape[0]
                 self._band = None
-                yield DenseRowBand(start, self._bandStart, band)
+                handed = DenseRowBand(start, self._bandStart, band)
+                # The band's values live as long as its consumer keeps them:
+                # this buffer lets go of them before it makes the next band.
+                del band, band_rows
+                yield handed
+                del handed
 
     def finish(self) -> None:
         """Check that every row of the window arrived.

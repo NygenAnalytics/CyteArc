@@ -2448,11 +2448,9 @@ class H5adToZarr:
                 )
             else:
                 # Each reader process holds its batch and a band of every
-                # assay, which it sends without a copy, and the last band it
-                # sent, which its buffer keeps until the next band is made;
-                # this process holds one band that it received beside its
-                # writes.
-                held = producer_bytes + sum(band_bytes) + max(band_bytes)
+                # assay, which it sends without a copy; this process holds one
+                # band that it received beside its writes.
+                held = producer_bytes + sum(band_bytes)
                 candidate_resources = ResourceBudget(
                     self.resources.memoryBytes, max(1, workers - candidate)
                 )

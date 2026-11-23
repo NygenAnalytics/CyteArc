@@ -1074,6 +1074,46 @@ def test_dense_band_buffer_names_the_row_of_a_non_finite_value():
     assert (refused.value.array, refused.value.row) == ("scores", 6)
 
 
+@pytest.mark.parametrize("finite", [False, True], ids=["counts", "checked scores"])
+def test_dense_band_buffer_holds_one_band_beside_its_batch(finite):
+    import gc
+    import tracemalloc
+
+    from cytearc.storage.sharding import DenseBandBuffer
+
+    dtype = np.dtype(np.float32 if finite else np.uint8)
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    destination = _sharded(root, "values", (10_000, 100), 1_000, dtype=dtype)
+    values = np.ones((10_000, 100), dtype=dtype)
+    buffer = DenseBandBuffer(
+        destination, finiteOperation="score_cells" if finite else None
+    )
+    handed = 0
+    gc.collect()
+    tracemalloc.start()
+    try:
+        before, _ = tracemalloc.get_traced_memory()
+        # Batches of 300 rows cross the boundary of every band of 1,000, and
+        # the consumer lets go of each band as soon as it is handed over.
+        for start in range(0, 10_000, 300):
+            for band in buffer.add(values[start : start + 300]):
+                handed += 1
+                del band
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    buffer.finish()
+    assert handed == 10
+
+    # The batches are views of the source. Beside one, the buffer holds the
+    # band it fills, 1,000 rows of 100 values, and the rows of the batch that
+    # it casts or checks; a band that it kept after handing it over would add
+    # another band.
+    band_bytes = 1_000 * 100 * dtype.itemsize
+    batch_bytes = 300 * 100 * dtype.itemsize
+    assert peak - before <= band_bytes + batch_bytes + 16 * 1024
+
+
 def test_dense_bands_of_several_destinations_write_in_any_order():
     from cytearc.storage.execution import execution_report_scope
     from cytearc.storage.identity import CountSummary

@@ -1576,7 +1576,7 @@ def test_dense_h5ad_reader_processes_hold_their_batches_beside_the_writes(
     )
 
 
-def test_dense_h5ad_reader_processes_are_charged_their_batch_and_the_bands_they_hold(
+def test_dense_h5ad_reader_processes_are_charged_their_batch_and_a_band_of_every_assay(
     tmp_path, monkeypatch
 ):
     import cytearc.storage.sharding as sharding
@@ -1631,14 +1631,83 @@ def test_dense_h5ad_reader_processes_are_charged_their_batch_and_the_bands_they_
 
     three, resident, batch = beside(3)
     two, _resident, _batch = beside(2)
-    # Each reader process holds its batch, the band of the one assay that it
-    # fills, four rows of three uint8 counts, and the band that it last sent,
-    # which its buffer keeps until it makes the next one; it sends a band
-    # without a copy. The import holds the one band that it received beside
-    # its writes.
+    # Each reader process holds its batch and the band of the one assay that
+    # it fills, four rows of three uint8 counts, which it sends without a
+    # copy. The import holds the one band that it received beside its writes.
     band = 4 * 3
-    assert three - two == batch + 2 * band
-    assert two - 2 * (batch + 2 * band) - resident == band
+    assert three - two == batch + band
+    assert two - 2 * (batch + band) - resident == band
+
+
+def test_a_dense_h5ad_reader_process_holds_no_more_than_its_charge(tmp_path):
+    import gc
+    import threading
+    import tracemalloc
+    from multiprocessing.reduction import ForkingPickler
+
+    from cytearc.readers import H5adReader
+    from cytearc.storage.layout import array_shard_rows
+    from cytearc.writers import H5adToZarr
+    from cytearc.writers import h5ad as h5ad_writer
+
+    n_cells, n_feats = 20_000, 64
+    rng = np.random.default_rng(6)
+    values = (
+        rng.integers(1, 10, (n_cells, n_feats)) * (rng.random((n_cells, n_feats)) < 0.5)
+    ).astype(np.uint32)
+    path = _write_h5ad(tmp_path / "dense.h5ad", values, encoding="dense")
+
+    class SentPipeEnd:
+        """One end of a pipe that keeps nothing of what is sent, as a pipe once written."""
+
+        def send(self, message) -> None:
+            ForkingPickler.dumps(message)
+
+        def send_bytes(self, buffer) -> None:
+            memoryview(buffer)
+
+        def close(self) -> None:
+            pass
+
+    reader = H5adReader(str(path), feature_name_key="feature_name")
+    try:
+        writer = H5adToZarr(
+            reader,
+            str(tmp_path / "dense.zarr"),
+            nthreads=1,
+            shuffle_cells=False,
+            policy=CountMatrixPolicy(unitBytes=320_000, chunkBytes=320_000),
+        )
+        counts = writer.z["RNA/counts"]
+        # Bands of 5,000 cells of 64 uint8 counts, filled by batches of 300
+        # rows that cross every band boundary.
+        assert counts.dtype == np.uint8 and array_shard_rows(counts) == 5_000
+        charge = writer._dense_producer_bytes(300) + 5_000 * n_feats
+        gc.collect()
+        tracemalloc.start()
+        try:
+            before, _ = tracemalloc.get_traced_memory()
+            h5ad_writer._read_dense_h5ad_process_window(
+                reader._clone_kwargs(),
+                300,
+                0,
+                n_cells,
+                {"RNA": counts},
+                None,
+                SentPipeEnd(),
+                threading.Event(),
+                {},
+            )
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+    finally:
+        reader.close()
+
+    # The process holds its batch and the band it fills, which its admission
+    # charges, beside a few kilobytes of the objects of its reader; the band
+    # of 320,000 bytes that it sent last is freed before it makes the next.
+    assert peak - before <= charge + 64 * 1024
 
 
 @pytest.mark.parametrize("encoding", ["csr", "dense"])
