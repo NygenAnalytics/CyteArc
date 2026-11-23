@@ -672,10 +672,31 @@ class _LentPool(ThreadPoolExecutor):
 
 
 def _finish_tasks(loop: asyncio.AbstractEventLoop) -> None:
-    """Run every task left on ``loop`` to its end, then close its async generators."""
+    """Run every task left on ``loop`` to its end, then close its async generators.
+
+    An interruption while the tasks run, such as a second Ctrl-C, cancels
+    the tasks still pending and waits for them to stop before it is raised,
+    so the loop never closes with a task pending. A further interruption
+    while they stop is raised at once.
+    """
+    interruption: BaseException | None = None
     while pending := [task for task in asyncio.all_tasks(loop) if not task.done()]:
-        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        if interruption is not None:
+            for task in pending:
+                task.cancel()
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            continue
+        try:
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        except BaseException as error:
+            interruption = error
     loop.run_until_complete(loop.shutdown_asyncgens())
+    if interruption is not None:
+        try:
+            raise interruption
+        finally:
+            # This frame stays in the interruption's traceback.
+            del interruption
 
 
 class ReadStopped(BaseException):
@@ -854,8 +875,10 @@ def run_read(coroutine: Coroutine[Any, Any, T]) -> T:
             raise
         finally:
             del task, cancel
-            _finish_tasks(loop)
-            pool.wait_for_calls()
+            try:
+                _finish_tasks(loop)
+            finally:
+                pool.wait_for_calls()
     finally:
         loop.close()
 
