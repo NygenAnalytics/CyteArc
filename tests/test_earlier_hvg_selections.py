@@ -14,8 +14,7 @@ releases, so a default call has the provenance of the saved selection.
 
 import shutil
 import warnings
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -31,8 +30,12 @@ from cytearc.storage.artifacts import (
     require_complete_artifact,
 )
 from cytearc.storage.operation_revisions import OPERATION_REVISIONS
-from cytearc.utils.logging import logger
-from tests.storage_helpers import by_cell_id
+from tests.storage_helpers import (
+    by_cell_id,
+    recomputation,
+    recomputations,
+    rewrite_as_saved_by_1_4,
+)
 
 # Batch b expresses only its first 10 genes, so a selection by batch with a
 # larger top_n has a batch of too few candidates.
@@ -77,18 +80,20 @@ def _write_store(path: Path) -> DataStore:
 
 
 def _as_saved_by_1_4(store: DataStore, ref: ArtifactRef) -> None:
-    """Rewrite a selection's record as CyteArc 1.4.0 saved it for the same call."""
-    group = artifact_group(store.zw, ref)
-    provenance = dict(group.attrs["provenance"])
-    assert provenance.pop("revision") == _REVISION_3.revision
+    """Rewrite a selection's record as CyteArc 1.4.0 saved it for the same call.
+
+    The selection of revision 3 becomes revision 2 where revision 2 applies to
+    its record, and revision 1 otherwise.
+    """
+    provenance = artifact_group(store.zw, ref).attrs["provenance"]
+    assert provenance["revision"] == _REVISION_3.revision
     assert _REVISION_2.applies is not None
-    if _REVISION_2.applies(ref.kind, provenance["parameters"], provenance["inputs"]):
-        provenance["revision"] = _REVISION_2.revision
-    group.attrs["provenance"] = provenance
-    group.attrs["diagnostics"] = {
-        key: value for key, value in group.attrs["diagnostics"].items() if key != _RATIO
-    }
-    group.attrs["cytearc_version"] = "1.4.0"
+    earlier = (
+        _REVISION_2.revision
+        if _REVISION_2.applies(ref.kind, provenance["parameters"], provenance["inputs"])
+        else 1
+    )
+    rewrite_as_saved_by_1_4(store, ref, revision=earlier, without=_RATIO)
 
 
 @pytest.fixture(scope="module")
@@ -115,25 +120,8 @@ def copy(saved, tmp_path) -> SimpleNamespace:
     )
 
 
-@contextmanager
-def _recomputations() -> Iterator[list[str]]:
-    """Collect the INFO lines that name an artifact computed anew for a revision."""
-    messages: list[str] = []
-    sink = logger.add(
-        lambda message: messages.append(message.record["message"]), level="INFO"
-    )
-    try:
-        yield messages
-    finally:
-        logger.remove(sink)
-    messages[:] = [message for message in messages if message.startswith("Recomputing")]
-
-
 def _expected_recomputation(selection: ArtifactRef) -> str:
-    return (
-        f"Recomputing select_hvgs: artifact {selection.artifact_id[:12]} is "
-        f"revision 2, current 3: {_REVISION_3.change}"
-    )
+    return recomputation("select_hvgs", selection, 2, 3, _REVISION_3.change)
 
 
 def _genes(store: DataStore, ref: ArtifactRef) -> np.ndarray:
@@ -226,10 +214,10 @@ def test_a_plan_of_a_saved_run_names_the_revision_that_supersedes_its_selection(
 def test_a_rerun_of_a_saved_run_selects_the_same_genes_and_logs_why(copy) -> None:
     store = copy.store
 
-    with _recomputations() as recomputations:
+    with recomputations() as logged:
         again = store.pipeline.rerun(copy.run, label="again")
 
-    assert recomputations == [_expected_recomputation(copy.selection)]
+    assert logged == [_expected_recomputation(copy.selection)]
     selection = again["highly_variable_features"]
     status = store.artifacts.inspect(selection)
     assert selection != copy.selection
@@ -249,19 +237,19 @@ def test_a_default_call_selects_anew_and_logs_why(copy) -> None:
     store = copy.store
     cells = copy.run["analysis_cell_selection"]
 
-    with _recomputations() as recomputations:
+    with recomputations() as logged:
         selection = store.features.hvgs(cells, top_n=_TOP_N, show_plot=False)
 
-    assert recomputations == [_expected_recomputation(copy.selection)]
+    assert logged == [_expected_recomputation(copy.selection)]
     assert selection != copy.selection
     assert store.artifacts.inspect(selection).revision == 3
     np.testing.assert_array_equal(
         _genes(store, selection), _genes(store, copy.selection)
     )
     # The selection of the current revision is reused, without a log line.
-    with _recomputations() as recomputations:
+    with recomputations() as logged:
         assert store.features.hvgs(cells, top_n=_TOP_N, show_plot=False) == selection
-    assert recomputations == []
+    assert logged == []
 
 
 def test_a_current_selection_without_the_ratio_is_refused_and_computed_anew(

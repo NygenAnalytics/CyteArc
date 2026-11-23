@@ -14,12 +14,15 @@ is the one exception: an artifact saved before the operation saved it
 reads it as None.
 
 Keys are camelCase. A value is an integer, a finite float, a text, None for
-a number that was not measured, or, under a key that ends in ``Examples``, a
-list of at most five texts. Diagnostics never enter an artifact's identity
-and hold nothing that varies between runs on the same inputs, such as
-timings. Operations warn from them through :func:`warn_diagnostics` after
-they compute or reuse an artifact, so a reused artifact warns as a computed
-one does. An export saves no artifact: it returns its diagnostics in an
+a number that was not measured, under a key that ends in ``Examples`` a list
+of at most five texts, or, under a key that ends in ``PerFile``, a list of
+counts, one for each file of an import in the order of its files, which
+reads as None only in an artifact saved before a revision added it.
+Diagnostics never enter an artifact's identity and hold nothing that varies
+between runs on the same inputs, such as timings. Operations warn from them
+through :func:`warn_diagnostics` after they compute or reuse an artifact, so
+a reused artifact warns as a computed one does. An export saves no
+artifact: it returns its diagnostics in an
 :class:`ExportSummary`, checked against the keys it declares, and warns from
 them as an operation does.
 """
@@ -58,8 +61,10 @@ EXAMPLES = 5
 _KEY = re.compile(r"^[a-z][A-Za-z0-9]*$")
 # The suffix of a key whose value lists examples.
 _EXAMPLES_SUFFIX = "Examples"
+# The suffix of a key whose value lists a count for each file of an import.
+_PER_FILE_SUFFIX = "PerFile"
 
-type DiagnosticValue = int | float | str | list[str] | None
+type DiagnosticValue = int | float | str | list[str] | list[int] | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,6 +145,18 @@ def _checked_value(operation: str, key: str, value: Any) -> DiagnosticValue:
                 f"it lists at most {EXAMPLES}"
             )
         return list(value)
+    if key.endswith(_PER_FILE_SUFFIX):
+        if not isinstance(value, list | tuple) or not all(
+            isinstance(item, int | np.integer)
+            and not isinstance(item, bool | np.bool_)
+            and item >= 0
+            for item in value
+        ):
+            raise ValueError(
+                f"The diagnostic {key!r} of {operation} must be a list of counts, "
+                f"one for each file, not {value!r}"
+            )
+        return [int(item) for item in value]
     if value is None or isinstance(value, str):
         return value
     if isinstance(value, bool | np.bool_):
@@ -242,16 +259,20 @@ def read_diagnostics(
             f"with every artifact; {_recompute(operation)}"
         )
     stored = attributes[DIAGNOSTICS_ATTRIBUTE]
+    unmeasured: frozenset[str] = frozenset()
     if revision is not None and isinstance(stored, Mapping):
         unmeasured = diagnostics_added_after(operation, revision).difference(stored)
-        stored = {**stored, **dict.fromkeys(unmeasured)}
     try:
-        return checked_diagnostics(stored, keys, operation=operation)
+        checked = checked_diagnostics(
+            stored, [key for key in keys if key not in unmeasured], operation=operation
+        )
     except ValueError as error:
         raise ValueError(
             f"The artifact at {path} holds other diagnostics than {operation} saves: "
             f"{error}. To read it, {_recompute(operation)}"
         ) from None
+    # What a later revision added was not measured, whatever its kind.
+    return {key: None if key in unmeasured else checked[key] for key in keys}
 
 
 @dataclass(frozen=True, slots=True)

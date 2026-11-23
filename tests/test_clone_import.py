@@ -22,6 +22,8 @@ from cytearc import DiagnosticWarning, ExportSummary
 from cytearc.clones import Clones
 from cytearc.storage.artifacts import artifact_group
 from cytearc.storage.refs import ArtifactRef
+from cytearc.storage.operation_revisions import OPERATION_REVISIONS
+from cytearc.utils.digest import file_sha256
 from cytearc.utils.logging import collect_warnings
 from tests.clone_helpers import (
     assert_joined,
@@ -30,7 +32,13 @@ from tests.clone_helpers import (
     write_cells_store,
     write_truth_store,
 )
-from tests.storage_helpers import by_cell_id, copy_store, open_store
+from tests.storage_helpers import (
+    by_cell_id,
+    computed_anew,
+    copy_store,
+    open_store,
+    rewrite_as_saved_by_1_4,
+)
 from tests.clone_truth import (
     CLONE_SIZES,
     N_CELLS,
@@ -791,6 +799,36 @@ def _no_row_warning(names: list[str]) -> str:
     )
 
 
+def _empty_files_warning(names: list[str], n_files: int) -> str:
+    """A pattern of the import's warning of some of its ``n_files`` files that hold no row."""
+    files, those, remedy = (
+        (
+            "the clone file",
+            "that file gives",
+            "file you meant in its place, or leave it",
+        )
+        if len(names) == 1
+        else (
+            "the clone files",
+            "those files give",
+            "files you meant in their place, or leave them",
+        )
+    )
+    return (
+        f"The import read no row from {files} "
+        + ", ".join(f"'[^']*{re.escape(name)}'" for name in names)
+        + rf", {len(names)} of its {n_files} clone files, so {those} no cell a "
+        rf"clone\. Pass the {remedy} out\."
+    )
+
+
+def _rows_per_file(store, ref: ArtifactRef, rows: dict[Path, int]) -> list[int]:
+    """The rows of each file, by its path, in the order of the import's recorded files."""
+    by_digest = {file_sha256(path): count for path, count in rows.items()}
+    sources = store.artifacts.inspect(ref).inputs["sources"]
+    return [by_digest[source["sha256"]] for source in sources]
+
+
 #: The refusal of the clones of an import of one file that read no row.
 _NO_ROW_REFUSAL = (
     "^The clones give no cell a clone: their import read no row from the clone "
@@ -820,8 +858,8 @@ def test_an_import_that_reads_no_row_warns_naming_its_file_again_on_reuse(
         assert re.fullmatch(_no_row_warning([path.name]), str(warning))
         assert (warning.operation, warning.diagnostic, warning.value) == (
             "import_clones",
-            "fileRows",
-            0,
+            "rowsPerFile",
+            [0],
         )
     assert refs[0] == refs[1]
     loaded = shared.store.clones.load_clones(refs[0])
@@ -835,6 +873,7 @@ def test_an_import_that_reads_no_row_warns_naming_its_file_again_on_reuse(
         assert loaded.cells["clone_probability"].isna().all()
     diagnostics = shared.store.artifacts.inspect(refs[0]).diagnostics
     assert (diagnostics["fileRows"], diagnostics["cellsWithClone"]) == (0, 0)
+    assert diagnostics["rowsPerFile"] == [0]
     assert_joined(diagnostics, n_file=0)
 
 
@@ -862,8 +901,8 @@ def test_probabilities_that_no_selected_cell_takes_are_saved_unknown(
     assert cells.index.tolist() == TRUTH.cell_ids[d2].tolist()
     assert cells["clone"].isna().all()
     assert cells["clone_probability"].isna().all()
-    # TREX's rows beside a Numbat header alone keep TREX's clones, and no
-    # cell has a probability.
+    # TREX's rows beside a Numbat header alone keep TREX's clones, no cell
+    # has a probability, and the warning names the header.
     first, second, third = (str(cell) for cell in TRUTH.cell_ids[:3])
     trex = _write_lines(
         tmp_path / "trex.txt",
@@ -872,10 +911,16 @@ def test_probabilities_that_no_selected_cell_takes_are_saved_unknown(
     header = _write_lines(tmp_path / "numbat.tsv", "cell\tclone_opt\tGT_opt\tp_opt\n")
     with collect_warnings() as messages:
         alone = store.clones.import_clones(trex, cell_selection=every_cell(store))
+    assert messages == []
+    with pytest.warns(DiagnosticWarning) as caught:
         both = store.clones.import_clones(
             [trex, header], cell_selection=every_cell(store)
         )
-    assert messages == []
+    assert len(caught) == 1
+    assert re.fullmatch(_empty_files_warning(["numbat.tsv"], 2), str(caught[0].message))
+    assert store.artifacts.inspect(both).diagnostics["rowsPerFile"] == _rows_per_file(
+        store, both, {trex: 3, header: 0}
+    )
     partition = {frozenset({first, second}), frozenset({third})}
     assert loaded_partition(store, alone) == loaded_partition(store, both) == partition
     loaded = store.clones.load_clones(both)
@@ -904,12 +949,36 @@ def test_only_an_import_that_reads_no_row_warns_of_its_files(shared, tmp_path) -
         "list the cells' clones$",
     ):
         store.clones.expansion(empty)
-    # One row of a selected cell beside an empty file is enough.
+    # An empty file beside one row of a selected cell is named alone, again
+    # when the import is reused, and the clones are the row's.
     first = TRUTH.cell_ids[0]
     one = _write_lines(tmp_path / "one.csv", f"Cell_ID,Clone_ID\n{first},A\n")
-    with collect_warnings() as messages:
-        store.clones.import_clones([trex, one], cell_selection=cells)
-    assert messages == []
+    for _call in range(2):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            beside = store.clones.import_clones([trex, one], cell_selection=cells)
+        assert [type(item.message) for item in caught] == [DiagnosticWarning]
+        warning = caught[0].message
+        assert isinstance(warning, DiagnosticWarning)
+        assert re.fullmatch(_empty_files_warning(["trex.txt"], 2), str(warning))
+        expected = _rows_per_file(store, beside, {trex: 0, one: 1})
+        assert (warning.diagnostic, warning.value) == ("rowsPerFile", expected)
+    assert loaded_partition(store, beside) == {frozenset({first})}
+    # Two empty files of three are named in one warning.
+    with pytest.warns(DiagnosticWarning) as caught:
+        three = store.clones.import_clones([trex, cospar, one], cell_selection=cells)
+    assert len(caught) == 1
+    named = re.fullmatch(
+        "The import read no row from the clone files '([^']*)', '([^']*)', 2 of "
+        "its 3 clone files, so those files give no cell a clone. Pass the files "
+        "you meant in their place, or leave them out.",
+        str(caught[0].message),
+    )
+    assert named is not None
+    assert {Path(name).name for name in named.groups()} == {"trex.txt", "cospar.csv"}
+    assert store.artifacts.inspect(three).diagnostics["rowsPerFile"] == _rows_per_file(
+        store, three, {trex: 0, cospar: 0, one: 1}
+    )
     # A row of no cell of the store is named only by the barcodes' warning,
     # and a row of a cell outside the selection gives no warning.
     stray = _write_lines(tmp_path / "stray.csv", "Cell_ID,Clone_ID\nstray,A\n")
@@ -927,6 +996,61 @@ def test_only_an_import_that_reads_no_row_warns_of_its_files(shared, tmp_path) -
             one, cell_selection=store.snapshot_cell_selection("not_first")
         )
     assert messages == []
+
+
+def test_the_warnings_name_five_files_and_count_the_others(shared, tmp_path) -> None:
+    store, cells = shared.store, shared.cells
+    # Seven tables of a header alone, told apart by their prefixes, which
+    # order them too.
+    paths = [
+        _write_lines(tmp_path / f"e{index}.csv", "Cell_ID,Clone_ID\n")
+        for index in range(7)
+    ]
+    prefixes = [f"p{index}_" for index in range(7)]
+    with pytest.warns(DiagnosticWarning) as caught:
+        empty = store.clones.import_clones(
+            paths, cell_selection=cells, barcode_prefix=prefixes
+        )
+    assert len(caught) == 1
+    first_five = ", ".join(f"'[^']*e{index}\\.csv'" for index in range(5))
+    assert re.fullmatch(
+        f"The import read no row from the clone files {first_five} and 2 more, so "
+        "no selected cell has a clone\\. Pass files that list the cells' clones\\.",
+        str(caught[0].message),
+    )
+    # The saved counts keep every file.
+    assert store.artifacts.inspect(empty).diagnostics["rowsPerFile"] == [0] * 7
+    # Five of them are named, with none more.
+    with pytest.warns(DiagnosticWarning) as caught:
+        store.clones.import_clones(
+            paths[:5], cell_selection=cells, barcode_prefix=prefixes[:5]
+        )
+    assert len(caught) == 1
+    assert re.fullmatch(
+        f"The import read no row from the clone files {first_five}, so no selected "
+        "cell has a clone\\. Pass files that list the cells' clones\\.",
+        str(caught[0].message),
+    )
+    # Six of them beside a file with a row.
+    one = _write_lines(
+        tmp_path / "one.csv", f"Cell_ID,Clone_ID\n{TRUTH.cell_ids[0]},A\n"
+    )
+    with pytest.warns(DiagnosticWarning) as caught:
+        beside = store.clones.import_clones(
+            [*paths[:6], one],
+            cell_selection=cells,
+            barcode_prefix=[*prefixes[:6], None],
+        )
+    assert len(caught) == 1
+    assert re.fullmatch(
+        f"The import read no row from the clone files {first_five} and 1 more, 6 of "
+        "its 7 clone files, so those files give no cell a clone\\. Pass the files "
+        "you meant in their place, or leave them out\\.",
+        str(caught[0].message),
+    )
+    assert store.artifacts.inspect(beside).diagnostics["rowsPerFile"] == _rows_per_file(
+        store, beside, {**dict.fromkeys(paths[:6], 0), one: 1}
+    )
 
 
 def _clone_summaries(store, clones: ArtifactRef) -> dict[str, Callable[[], object]]:
@@ -1065,6 +1189,476 @@ def test_one_row_is_enough_for_the_clone_summaries(store, tmp_path) -> None:
     ):
         with pytest.raises(ValueError, match=f"^{re.escape(refusal)}$"):
             summaries[name]()
+
+
+# The ten cells of the truth that the files of no clone name.
+_LISTED = [str(cell) for cell in TRUTH.cell_ids[:10]]
+
+
+def _write_mito_unassigned(path: Path) -> Path:
+    import anndata
+
+    obs = pd.DataFrame(
+        {"MiTo_clone": pd.Categorical(["unassigned"] * len(_LISTED))},
+        index=pd.Index(_LISTED, dtype=str),
+    )
+    anndata.AnnData(obs=obs).write_h5ad(path)
+    return path
+
+
+def _write_na_labels(path: Path, cells: list[str]) -> Path:
+    """Write CoSpar's clone table of an NA label for each of ``cells``."""
+    return _write_lines(
+        path, "Cell_ID,Clone_ID\n" + "".join(f"{cell},NA\n" for cell in cells)
+    )
+
+
+def _write_cospar_h5ad_without_entries(path: Path) -> Path:
+    import anndata
+    from scipy.sparse import csr_matrix
+
+    anndata.AnnData(
+        obs=pd.DataFrame(index=pd.Index(_LISTED, dtype=str)),
+        obsm={"X_clone": csr_matrix((len(_LISTED), 3), dtype=np.float32)},
+    ).write_h5ad(path)
+    return path
+
+
+def _write_matrix_without_entries(folder: Path) -> Path:
+    _write_lines(folder / "cells.tsv", "cell\n" + "".join(f"{c}\n" for c in _LISTED))
+    return _write_lines(
+        folder / "clones.mtx",
+        f"%%MatrixMarket matrix coordinate integer general\n{len(_LISTED)} 3 0\n",
+    )
+
+
+# Files whose rows name the ten cells but give none of them a clone, with how
+# the warning says so: MiTo's cells left unassigned, Cassiopeia's rows of
+# lineage group 0, two for each cell, and CoSpar's table of NA labels label
+# the cells with no clone, and a clone matrix that lists the cells and
+# CoSpar's AnnData clone matrix hold no entry for them.
+_CLONELESS: dict[str, tuple[Callable[[Path], Path], str]] = {
+    "mito_unassigned": (
+        lambda folder: _write_mito_unassigned(folder / "afm.h5ad"),
+        "labels them with no clone",
+    ),
+    "cassiopeia_group_0": (
+        lambda folder: _write_lines(
+            folder / "alleles.tsv",
+            "cellBC\tintBC\tallele\tlineageGrp\n"
+            + "".join(f"{c}\t{i}\tx\t0\n" for c in _LISTED for i in ("AAAA", "CCCC")),
+        ),
+        "labels them with no clone",
+    ),
+    "matrix_without_entries": (
+        _write_matrix_without_entries,
+        "holds no entry for them",
+    ),
+    "cospar_h5ad_without_entries": (
+        lambda folder: _write_cospar_h5ad_without_entries(folder / "clones.h5ad"),
+        "holds no entry for them",
+    ),
+    "cospar_na": (
+        lambda folder: _write_na_labels(folder / "clones.csv", _LISTED),
+        "labels them with no clone",
+    ),
+}
+
+#: The refusal of the clones of one table whose rows label the ten cells with no clone.
+_NO_CLONE_REFUSAL = (
+    "^The clones give no cell a clone: their clone file names 10 selected cells "
+    "but labels them with no clone; import a file that lists the cells' clones$"
+)
+
+
+@pytest.mark.parametrize("case", sorted(_CLONELESS))
+def test_files_whose_rows_give_no_selected_cell_a_clone_warn_naming_them(
+    shared, tmp_path, case
+) -> None:
+    write, cause = _CLONELESS[case]
+    path = write(_folder(tmp_path, case))
+
+    refs = []
+    for _call in range(2):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            refs.append(
+                shared.store.clones.import_clones(path, cell_selection=shared.cells)
+            )
+        assert [type(item.message) for item in caught] == [DiagnosticWarning]
+        warning = caught[0].message
+        assert isinstance(warning, DiagnosticWarning)
+        # The selection holds every cell, so the warning suggests no other.
+        assert re.fullmatch(
+            f"The clone file '[^']*{re.escape(path.name)}' names 10 selected cells "
+            rf"but {cause}\. Pass a file that lists the cells' clones\.",
+            str(warning),
+        )
+        assert (warning.operation, warning.diagnostic, warning.value) == (
+            "import_clones",
+            "cellsWithClone",
+            0,
+        )
+    assert refs[0] == refs[1]
+    diagnostics = shared.store.artifacts.inspect(refs[0]).diagnostics
+    assert (diagnostics["cellsWithClone"], diagnostics["cellsInSeveralClones"]) == (
+        0,
+        0,
+    )
+    assert_joined(diagnostics, n_file=10)
+    # Cassiopeia's table holds two rows for each cell.
+    assert diagnostics["rowsPerFile"] == [20 if case == "cassiopeia_group_0" else 10]
+    assert shared.store.clones.load_clones(refs[0]).clones.empty
+    # The summaries name the same cause.
+    with pytest.raises(
+        ValueError,
+        match="^The clones give no cell a clone: their clone file names 10 selected "
+        f"cells but {cause}; import a file that lists the cells' clones$",
+    ):
+        shared.store.clones.expansion(refs[0])
+
+
+def test_summaries_and_the_export_name_files_whose_rows_give_no_clone(
+    store, tmp_path
+) -> None:
+    write, cause = _CLONELESS["cospar_na"]
+    path = write(tmp_path)
+    with pytest.warns(DiagnosticWarning, match=cause):
+        clones = store.clones.import_clones(path, cell_selection=every_cell(store))
+    summaries = _clone_summaries(store, clones)
+    saved = store.artifacts.list(scope="datastore")
+
+    for name, summary in summaries.items():
+        with pytest.raises(ValueError, match=_NO_CLONE_REFUSAL):
+            summary()
+        assert store.artifacts.list(scope="datastore") == saved, name
+    out = _folder(tmp_path, "out")
+    for format, name in (("cospar", "clones.csv"), ("matrix", "clones.mtx")):
+        with pytest.raises(ValueError, match=_NO_CLONE_REFUSAL):
+            store.clones.export_clones(clones, out / name, format=format)
+    assert list(out.iterdir()) == []
+    assert store.clones.load_clones(clones).clones.empty
+    with pytest.raises(
+        ValueError, match="^No cell has a clone, so there is nothing to plot$"
+    ):
+        store.plots.clone_abundance(clones, show=False)
+    # Files of no clone, of which one holds no row: the warning of the empty
+    # file names it, that of no clone names the files that hold rows, and the
+    # summaries name the import's files.
+    first = write(_folder(tmp_path, "first"))
+    second = _write_na_labels(_folder(tmp_path, "second") / "more.csv", _LISTED[:4])
+    empty = _write_lines(tmp_path / "empty.csv", "Cell_ID,Clone_ID\n")
+    with pytest.warns(DiagnosticWarning) as caught:
+        several = store.clones.import_clones(
+            [first, second, empty], cell_selection=every_cell(store)
+        )
+    messages = sorted(str(item.message) for item in caught)
+    assert len(messages) == 2
+    assert re.fullmatch(_empty_files_warning(["empty.csv"], 3), messages[1])
+    named = re.fullmatch(
+        "The clone files '([^']*)', '([^']*)' name 10 selected cells but label "
+        "them with no clone. Pass files that list the cells' clones.",
+        messages[0],
+    )
+    assert named is not None
+    assert {Path(name).name for name in named.groups()} == {"clones.csv", "more.csv"}
+    with pytest.raises(
+        ValueError,
+        match="^The clones give no cell a clone: their clone files name 10 selected "
+        "cells but label them with no clone; import files that list the cells' "
+        "clones$",
+    ):
+        store.clones.expansion(several)
+
+
+def test_the_cause_of_no_clone_fits_the_layouts_of_the_files_that_hold_rows(
+    shared, tmp_path
+) -> None:
+    store, cells = shared.store, shared.cells
+    matrix = _write_matrix_without_entries(_folder(tmp_path, "matrix"))
+    labels = _write_na_labels(tmp_path / "labels.csv", _LISTED[:4])
+    # A matrix without entries beside a table of NA labels gives the cells
+    # no clone in two ways, which the warning and the summaries both name.
+    with pytest.warns(DiagnosticWarning) as caught:
+        mixed = store.clones.import_clones([matrix, labels], cell_selection=cells)
+    assert len(caught) == 1
+    named = re.fullmatch(
+        "The clone files '([^']*)', '([^']*)' name 10 selected cells but give them "
+        "no clone, as no matrix holds an entry for them and no other file labels "
+        "them with a clone. Pass files that list the cells' clones.",
+        str(caught[0].message),
+    )
+    assert named is not None
+    assert {Path(name).name for name in named.groups()} == {"clones.mtx", "labels.csv"}
+    with pytest.raises(
+        ValueError,
+        match="^The clones give no cell a clone: their clone files name 10 selected "
+        "cells but give them no clone, as no matrix holds an entry for them and no "
+        "other file labels them with a clone; import files that list the cells' "
+        "clones$",
+    ):
+        store.clones.expansion(mixed)
+    # Beside a table of a header alone, the matrix is the one file that holds
+    # rows, so the matrix's cause is named alone.
+    empty = _write_lines(tmp_path / "empty.csv", "Cell_ID,Clone_ID\n")
+    with pytest.warns(DiagnosticWarning) as caught:
+        beside = store.clones.import_clones([matrix, empty], cell_selection=cells)
+    messages = sorted(str(item.message) for item in caught)
+    assert len(messages) == 2
+    assert re.fullmatch(
+        "The clone file '[^']*clones\\.mtx' names 10 selected cells but holds no "
+        "entry for them\\. Pass a file that lists the cells' clones\\.",
+        messages[0],
+    )
+    assert re.fullmatch(_empty_files_warning(["empty.csv"], 2), messages[1])
+    with pytest.raises(
+        ValueError,
+        match="^The clones give no cell a clone: their clone files name 10 selected "
+        "cells but hold no entry for them; import files that list the cells' "
+        "clones$",
+    ):
+        store.clones.expansion(beside)
+    # One selected cell is named as one.
+    one = _write_na_labels(tmp_path / "one.csv", _LISTED[:1])
+    with pytest.warns(DiagnosticWarning) as caught:
+        single = store.clones.import_clones(one, cell_selection=cells)
+    assert len(caught) == 1
+    assert re.fullmatch(
+        "The clone file '[^']*one\\.csv' names 1 selected cell but labels it with "
+        "no clone\\. Pass a file that lists the cells' clones\\.",
+        str(caught[0].message),
+    )
+    with pytest.raises(
+        ValueError,
+        match="^The clones give no cell a clone: their clone file names 1 selected "
+        "cell but labels it with no clone; import a file that lists the cells' "
+        "clones$",
+    ):
+        store.clones.expansion(single)
+
+
+def test_clones_that_some_listed_cell_takes_or_that_drop_left_out_give_no_warning(
+    store, tmp_path
+) -> None:
+    # One labeled cell among unassigned ones is enough for the summaries.
+    labeled = _write_lines(
+        tmp_path / "one_label.csv",
+        "Cell_ID,Clone_ID\n"
+        + "".join(f"{c},{'A' if c == _LISTED[0] else 'NA'}\n" for c in _LISTED),
+    )
+    with collect_warnings() as messages:
+        clones = store.clones.import_clones(labeled, cell_selection=every_cell(store))
+    assert messages == []
+    expansion = store.clones.load_expansion(store.clones.expansion(clones))
+    assert expansion.cells["category"].dropna().astype(str).to_dict() == {
+        _LISTED[0]: "1 cell"
+    }
+    # Every listed cell in two clones, which multiple="drop" leaves out: the
+    # file gave clones, so the import gives no warning, and the summaries and
+    # the export name the cells that drop left out.
+    doubled = _write_lines(
+        tmp_path / "doubled.csv",
+        "Cell_ID,Clone_ID\n" + "".join(f"{c},A\n{c},B\n" for c in _LISTED[:3]),
+    )
+    with collect_warnings() as messages:
+        dropped = store.clones.import_clones(
+            doubled, cell_selection=every_cell(store), multiple="drop"
+        )
+    assert messages == []
+    diagnostics = store.artifacts.inspect(dropped).diagnostics
+    assert (diagnostics["cellsWithClone"], diagnostics["cellsInSeveralClones"]) == (
+        0,
+        3,
+    )
+    out = tmp_path / "dropped.csv"
+    for call in (
+        lambda: store.clones.expansion(dropped),
+        lambda: store.clones.diversity(dropped),
+        lambda: store.clones.export_clones(dropped, out),
+    ):
+        with pytest.raises(
+            ValueError,
+            match="^The clones give no cell a clone: multiple='drop' left out the 3 "
+            "cells that their clone file lists in several clones; import it with "
+            "multiple='error' to name such cells$",
+        ):
+            call()
+    assert not out.exists()
+    # A cell that two files list in two clones is the files' one cell left out.
+    first = _write_lines(tmp_path / "a.csv", f"Cell_ID,Clone_ID\n{_LISTED[0]},A\n")
+    second = _write_lines(tmp_path / "b.csv", f"Cell_ID,Clone_ID\n{_LISTED[0]},B\n")
+    with collect_warnings() as messages:
+        across = store.clones.import_clones(
+            [first, second], cell_selection=every_cell(store), multiple="drop"
+        )
+    assert messages == []
+    with pytest.raises(
+        ValueError,
+        match="^The clones give no cell a clone: multiple='drop' left out the 1 "
+        "cell that their clone files list in several clones; import them with "
+        "multiple='error' to name such cells$",
+    ):
+        store.clones.expansion(across)
+    # multiple="error" names such cells, as the refusal says.
+    with pytest.raises(ValueError, match=f"for example '{_LISTED[0]}' in 'a_A' and"):
+        store.clones.import_clones([first, second], cell_selection=every_cell(store))
+
+
+def test_files_that_give_clones_only_to_cells_outside_the_selection_suggest_them(
+    store, tmp_path
+) -> None:
+    d2 = TRUTH.samples == "d2"
+    store.cells.insert("only_d2", by_cell_id(store.cells, d2))
+    store.cells.insert("only_d4", by_cell_id(store.cells, ~d2))
+    early = store.snapshot_cell_selection("only_d2")
+    n_early = int(d2.sum())
+    late_cells = [str(cell) for cell in TRUTH.cell_ids[~d2]]
+    # The selected cells of d2 have NA labels, and the cells of d4, outside
+    # the selection, a clone; the warning counts the selected cells alone.
+    path = _write_lines(
+        tmp_path / "every.csv",
+        "Cell_ID,Clone_ID\n"
+        + "".join(
+            f"{cell},{'NA' if is_early else 'A'}\n"
+            for cell, is_early in zip(TRUTH.cell_ids, d2, strict=True)
+        ),
+    )
+    with pytest.warns(DiagnosticWarning) as caught:
+        clones = store.clones.import_clones(path, cell_selection=early)
+    assert len(caught) == 1
+    assert re.fullmatch(
+        f"The clone file '[^']*every\\.csv' names {n_early} selected cells but "
+        "labels them with no clone\\. Pass a file that lists the cells' clones, or "
+        "a cell_selection of the cells to which it gives a clone\\.",
+        str(caught[0].message),
+    )
+    with pytest.raises(
+        ValueError,
+        match=f"^The clones give no cell a clone: their clone file names {n_early} "
+        "selected cells but labels them with no clone; import a file that lists "
+        "the cells' clones, or import it on a cell_selection of the cells to which "
+        "it gives a clone$",
+    ):
+        store.clones.expansion(clones)
+    # The cells to which the file gives a clone take it, without a warning.
+    with collect_warnings() as messages:
+        late = store.clones.import_clones(
+            path, cell_selection=store.snapshot_cell_selection("only_d4")
+        )
+    assert messages == []
+    assert loaded_partition(store, late) == {frozenset(late_cells)}
+    # Two files, one of the selected cells' NA labels and one of clones of
+    # cells outside the selection, are named together.
+    labels = _write_na_labels(
+        tmp_path / "labels.csv", [str(cell) for cell in TRUTH.cell_ids[d2]]
+    )
+    others = _write_lines(
+        tmp_path / "others.csv",
+        "Cell_ID,Clone_ID\n" + "".join(f"{cell},A\n" for cell in late_cells),
+    )
+    with pytest.warns(DiagnosticWarning) as caught:
+        both = store.clones.import_clones([labels, others], cell_selection=early)
+    assert len(caught) == 1
+    named = re.fullmatch(
+        f"The clone files '([^']*)', '([^']*)' name {n_early} selected cells but "
+        "label them with no clone. Pass files that list the cells' clones, or a "
+        "cell_selection of the cells to which they give a clone.",
+        str(caught[0].message),
+    )
+    assert named is not None
+    assert {Path(name).name for name in named.groups()} == {"labels.csv", "others.csv"}
+    with pytest.raises(
+        ValueError,
+        match=f"^The clones give no cell a clone: their clone files name {n_early} "
+        "selected cells but label them with no clone; import files that list the "
+        "cells' clones, or import them on a cell_selection of the cells to which "
+        "they give a clone$",
+    ):
+        store.clones.expansion(both)
+
+
+def test_an_import_saved_before_its_rows_per_file_still_reads_and_is_imported_anew(
+    store, tmp_path
+) -> None:
+    first, second, third = _LISTED[:3]
+    path = _write_lines(
+        tmp_path / "clones.csv",
+        f"Cell_ID,Clone_ID\n{first},A\n{second},A\n{third},B\n",
+    )
+    saved = store.clones.import_clones(path, cell_selection=every_cell(store))
+    status = rewrite_as_saved_by_1_4(store, saved, revision=1, without="rowsPerFile")
+    assert (status.revision, status.current_revision, status.is_current) == (
+        1,
+        2,
+        False,
+    )
+    assert status.diagnostics["rowsPerFile"] is None
+
+    assert store.artifacts.inspect(saved).diagnostics["fileRows"] == 3
+    # It still serves the calls that pass it.
+    partition = {frozenset({first, second}), frozenset({third})}
+    assert loaded_partition(store, saved) == partition
+    expansion = store.clones.load_expansion(store.clones.expansion(saved))
+    assert expansion.cells["category"].dropna().astype(str).to_dict() == {
+        first: "2 cells",
+        second: "2 cells",
+        third: "1 cell",
+    }
+    # The import is computed anew, which the log explains, and counts the
+    # file's rows.
+    (revision,) = OPERATION_REVISIONS["import_clones"]
+    again = computed_anew(
+        store,
+        saved,
+        lambda: store.clones.import_clones(path, cell_selection=every_cell(store)),
+        operation="import_clones",
+        revision=1,
+        current=2,
+        change=revision.change,
+    )
+    assert store.artifacts.inspect(again).diagnostics["rowsPerFile"] == [3]
+    assert loaded_partition(store, again) == partition
+    # The summaries name the cause of a clone matrix without entries saved so,
+    # from the layout of its one file.
+    matrix = _write_matrix_without_entries(_folder(tmp_path, "matrix"))
+    with pytest.warns(DiagnosticWarning, match="holds no entry for them"):
+        unlisted = store.clones.import_clones(matrix, cell_selection=every_cell(store))
+    rewrite_as_saved_by_1_4(store, unlisted, revision=1, without="rowsPerFile")
+    with pytest.raises(
+        ValueError,
+        match="^The clones give no cell a clone: their clone file names 10 selected "
+        "cells but holds no entry for them; import a file that lists the cells' "
+        "clones$",
+    ):
+        store.clones.expansion(unlisted)
+
+
+def test_an_import_of_this_revision_whose_rows_per_file_read_none_is_imported_anew(
+    store, tmp_path
+) -> None:
+    first, second = _LISTED[:2]
+    path = _write_lines(
+        tmp_path / "clones.csv", f"Cell_ID,Clone_ID\n{first},A\n{second},A\n"
+    )
+    saved = store.clones.import_clones(path, cell_selection=every_cell(store))
+    group = artifact_group(store.zw, saved)
+    group.attrs["diagnostics"] = {**group.attrs["diagnostics"], "rowsPerFile": None}
+
+    # Only an import saved before its rows per file reads them as None, so
+    # this one is refused, and the same call imports it anew.
+    with pytest.raises(
+        ValueError,
+        match="The diagnostic 'rowsPerFile' of import_clones must be a list of "
+        "counts, one for each file, not None. To read it, call "
+        "ds.clones.import_clones again with the same arguments",
+    ):
+        store.artifacts.inspect(saved).diagnostics
+    with collect_warnings() as messages:
+        again = store.clones.import_clones(path, cell_selection=every_cell(store))
+    assert messages == []
+    assert again != saved
+    assert store.artifacts.inspect(again).diagnostics["rowsPerFile"] == [2]
+    assert loaded_partition(store, again) == {frozenset({first, second})}
 
 
 def test_unicode_and_very_long_labels_survive_the_round_trip(store, tmp_path) -> None:

@@ -19,6 +19,8 @@ from cytearc.storage.identity import CountSummary, finalize_counts
 
 if TYPE_CHECKING:
     from cytearc.datastore.datastore import DataStore
+    from cytearc.storage.artifacts import ArtifactStatus
+    from cytearc.storage.refs import ArtifactRef
 
 
 def open_store(path: str | Path, **options: Any) -> "DataStore":
@@ -52,6 +54,84 @@ def written(store: "DataStore") -> tuple[Any, ...]:
         store.artifacts.list(scope="datastore"),
         *(store.artifacts.list(from_assay=assay) for assay in store.assay_names),
     )
+
+
+def rewrite_as_saved_by_1_4(
+    store: "DataStore", ref: "ArtifactRef", *, revision: int, without: str
+) -> "ArtifactStatus":
+    """Rewrite an artifact's record as CyteArc 1.4.0 saved it for the same call.
+
+    Its provenance records ``revision``, none for revision 1, its diagnostics
+    lose ``without``, a diagnostic that a later revision added, and its
+    ``cytearc_version`` is 1.4.0.
+
+    Returns:
+        The artifact's status as it now reads.
+    """
+    from cytearc.storage.artifacts import artifact_group
+
+    group = artifact_group(store.zw, ref)
+    provenance = dict(group.attrs["provenance"])
+    provenance.pop("revision", None)
+    if revision > 1:
+        provenance["revision"] = revision
+    group.attrs["provenance"] = provenance
+    group.attrs["diagnostics"] = {
+        name: value
+        for name, value in group.attrs["diagnostics"].items()
+        if name != without
+    }
+    group.attrs["cytearc_version"] = "1.4.0"
+    return store.artifacts.inspect(ref)
+
+
+@contextmanager
+def recomputations() -> Iterator[list[str]]:
+    """Collect the INFO lines that name an artifact computed anew for a revision."""
+    from cytearc.utils.logging import logger
+
+    messages: list[str] = []
+    sink = logger.add(
+        lambda message: messages.append(message.record["message"]), level="INFO"
+    )
+    try:
+        yield messages
+    finally:
+        logger.remove(sink)
+    messages[:] = [message for message in messages if message.startswith("Recomputing")]
+
+
+def recomputation(
+    operation: str, ref: "ArtifactRef", revision: int, current: int, change: str
+) -> str:
+    """The INFO line of ``ref``, of ``revision``, that a call computes anew at ``current``, as the revision guide documents it."""
+    return (
+        f"Recomputing {operation}: artifact {ref.artifact_id[:12]} is revision "
+        f"{revision}, current {current}: {change}"
+    )
+
+
+def computed_anew(
+    store: "DataStore",
+    saved: "ArtifactRef",
+    call: Any,
+    *,
+    operation: str,
+    revision: int,
+    current: int,
+    change: str,
+) -> "ArtifactRef":
+    """Check that ``call``, which saved ``saved`` of ``revision``, computes it anew at ``current`` and logs why.
+
+    Returns:
+        What ``call`` computes, of revision ``current``.
+    """
+    with recomputations() as lines:
+        computed = call()
+    assert computed != saved
+    assert lines == [recomputation(operation, saved, revision, current, change)]
+    assert store.artifacts.inspect(computed).revision == current
+    return computed
 
 
 def finalize_test_counts(counts: zarr.Array) -> str:

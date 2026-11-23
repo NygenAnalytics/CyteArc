@@ -46,6 +46,7 @@ __all__ = [
     "barcode_pattern",
     "derived_id_bytes",
     "empty_files_rule",
+    "file_names",
     "id_hashing_bytes",
     "join_bytes",
     "lookup_bytes",
@@ -619,6 +620,8 @@ class CellBarcodeJoin:
         self._unselected_examples: list[str] = []
         self.n_rows = 0
         self.n_unmatched_rows = 0
+        # The rows that each file gives, as the import names its files.
+        self._file_rows: dict[BarcodeFile, int] = {}
 
     @property
     def n_file_barcodes(self) -> int:
@@ -744,6 +747,7 @@ class CellBarcodeJoin:
         matched = positions >= 0
         self._named[positions[matched]] = True
         self.n_rows += len(positions)
+        self._file_rows[file] = self._file_rows.get(file, 0) + len(positions)
         if matched.all():
             return positions
         rows = np.flatnonzero(~matched)
@@ -808,6 +812,10 @@ class CellBarcodeJoin:
         )
         return positions
 
+    def file_rows(self, files: Sequence[BarcodeFile]) -> list[int]:
+        """Return the rows that each of ``files`` gave the join, in their order, 0 for a file that gave none."""
+        return [self._file_rows.get(file, 0) for file in files]
+
     def diagnostics(self) -> dict[str, Any]:
         """Return the join's diagnostics, as an importer saves them.
 
@@ -861,32 +869,64 @@ def unmatched_barcode_rules(files: str) -> tuple[DiagnosticRule, ...]:
     )
 
 
+def file_names(files: Sequence[BarcodeFile]) -> str:
+    """The paths of files as warnings name them: five at most, quoted and joined by commas, then how many more."""
+    named = ", ".join(quoted_value(os.fspath(file.path)) for file in files[:EXAMPLES])
+    more = len(files) - EXAMPLES
+    return named + (f" and {more} more" if more > 0 else "")
+
+
 def empty_files_rule(
     diagnostic: str,
     noun: str,
     files: Sequence[BarcodeFile],
     *,
     kind: str,
-    outcome: str,
+    item: str,
     remedy: tuple[str, str],
 ) -> DiagnosticRule:
-    """Return an import's warning when its files hold nothing that it reads, naming them.
+    """Return an import's warning of its files that hold nothing that it reads, naming them.
 
-    The warning applies when the saved ``diagnostic``, the import's count of
-    each ``noun`` that it read from its files, such as ``"row"`` or
-    ``"contig"``, is 0, as a table of a header alone gives, so a reused
-    import gives it again. It names the files of ``kind``, such as
-    ``"clone"`` for "the clone file", says the ``outcome``, such as "no
-    selected cell has a clone", and ends with the first ``remedy`` for one
-    file and the second for several.
+    ``diagnostic`` saves, for each of ``files`` in their order, the count of
+    each ``noun`` that the import read from it, such as ``"row"`` or
+    ``"contig"``, so a reused import gives the warning again. When no file,
+    of ``kind``, such as ``"clone"`` for "the clone file", holds one, as a
+    table of a header alone gives, the warning names them, says that no
+    selected cell has ``item``, such as ``"a clone"``, and ends with the
+    first ``remedy`` for one file and the second for several. When some of
+    several files hold none, it names those, says that they give no cell
+    ``item`` and asks for the files meant in their place. It names five files
+    at most and counts the others, as :func:`file_names` does.
     """
-    text = files_text(kind, len(files))
-    names = ", ".join(quoted_value(os.fspath(file.path)) for file in files)
-    advice = remedy[0] if len(files) == 1 else remedy[1]
+
+    def empty(diagnostics: Mapping[str, Any]) -> list[BarcodeFile]:
+        counts = diagnostics[diagnostic]
+        return [file for file, count in zip(files, counts, strict=True) if not count]
+
+    def message(diagnostics: Mapping[str, Any]) -> str:
+        found = empty(diagnostics)
+        named = f"{files_text(kind, len(found))} {file_names(found)}"
+        if len(found) == len(files):
+            advice = remedy[0] if len(files) == 1 else remedy[1]
+            return (
+                f"The import read no {noun} from {named}, so no selected cell has "
+                f"{item}. {advice}"
+            )
+        share = f"{len(found)} of its {len(files)} {kind} files"
+        if len(found) == 1:
+            return (
+                f"The import read no {noun} from {named}, {share}, so that file "
+                f"gives no cell {item}. Pass the file you meant in its place, or "
+                "leave it out."
+            )
+        return (
+            f"The import read no {noun} from {named}, {share}, so those files give "
+            f"no cell {item}. Pass the files you meant in their place, or leave "
+            "them out."
+        )
+
     return DiagnosticRule(
         diagnostic,
-        applies=lambda diagnostics: int(diagnostics[diagnostic]) == 0,
-        message=lambda _diagnostics: (
-            f"The import read no {noun} from {text} {names}, so {outcome}. {advice}"
-        ),
+        applies=lambda diagnostics: bool(empty(diagnostics)),
+        message=message,
     )

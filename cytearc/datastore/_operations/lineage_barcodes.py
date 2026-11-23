@@ -188,12 +188,13 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
         Cell barcodes that match no selected cell are counted in the join's
         diagnostics, which ``ds.artifacts.inspect(ref).diagnostics`` returns,
         apart from those of cells outside the selection, beside
-        ``fileRows``, the files' rows, and ``unmatchedRows``, those of no
+        ``fileRows``, the files' rows, ``rowsPerFile``, those of each file in
+        the canonical order of the files, and ``unmatchedRows``, those of no
         selected cell, which count each item of a list field and each nonzero
         count of a merged table or a matrix. Barcodes of no cell of the
         store, such as droplets that cell calling rejected, are named in a
-        warning; when the files hold no row, such as a table of a header
-        alone, another warning names them. A reused import gives both again.
+        warning, and the files that hold no row, such as a table of a header
+        alone, in another. A reused import gives both again.
         A file is identified by the SHA-256 of its bytes and by its library,
         the file's name unless ``library`` names it, so a file moved to
         another folder reuses the saved barcodes, as does a renamed one whose
@@ -304,22 +305,22 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             self._require_measured_cells(
                 assay.name, cell_selection, operation=arguments.operation
             )
-        warnings = unmatched_barcode_rules(files_text("barcode", len(files)))
-        if assay is None:
-            warnings = (
-                *warnings,
-                empty_files_rule(
-                    "fileRows",
-                    "row",
-                    files,
-                    kind="barcode",
-                    outcome="no selected cell has a barcode",
-                    remedy=(
-                        "Pass a file that lists the cells' lineage barcodes.",
-                        "Pass files that list the cells' lineage barcodes.",
-                    ),
+        # An assay's counts are read from no file, so the rule of files without
+        # rows names none.
+        warnings = (
+            *unmatched_barcode_rules(files_text("barcode", len(files))),
+            empty_files_rule(
+                "rowsPerFile",
+                "row",
+                files,
+                kind="barcode",
+                item="a barcode",
+                remedy=(
+                    "Pass a file that lists the cells' lineage barcodes.",
+                    "Pass files that list the cells' lineage barcodes.",
                 ),
-            )
+            ),
+        )
         planned = self._plan_barcodes(arguments, cell_selection, n_cells)
         if planned.reused:
             # Saved barcodes warn as they did when they were imported.
@@ -436,6 +437,7 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             {
                 **join.diagnostics(),
                 "fileRows": join.n_rows,
+                "rowsPerFile": join.file_rows(files),
                 "unmatchedRows": join.n_unmatched_rows,
                 "emptyRows": n_empty,
             },
@@ -671,6 +673,8 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
                 "unmatchedBarcodeExamples": [],
                 "unselectedBarcodeExamples": [],
                 "fileRows": n_rows,
+                # An assay's counts are read from no file.
+                "rowsPerFile": [],
                 "unmatchedRows": 0,
                 "emptyRows": 0,
             },

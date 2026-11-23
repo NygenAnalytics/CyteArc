@@ -332,6 +332,59 @@ _OPERATION_REVISIONS: dict[str, tuple[OperationRevision, ...]] = {
             added_diagnostics=("selectedDetectionRatio",),
         ),
     ),
+    "import_clones": (
+        OperationRevision(
+            revision=2,
+            release="1.5.0",
+            change=(
+                "Imports save each file's rows in the rowsPerFile diagnostic, "
+                "which earlier imports lack, so that a reused import warns of a "
+                "file that holds no row; the same files give the same clones"
+            ),
+            applies=None,
+            added_diagnostics=("rowsPerFile",),
+        ),
+    ),
+    "import_immune_receptors": (
+        OperationRevision(
+            revision=2,
+            release="1.5.0",
+            change=(
+                "Imports save each file's contigs in the contigsPerFile "
+                "diagnostic, which earlier imports lack, so that a reused import "
+                "warns of a file that holds no contig; the same files give the "
+                "same receptors"
+            ),
+            applies=None,
+            added_diagnostics=("contigsPerFile",),
+        ),
+    ),
+    "import_lineage_barcodes": (
+        OperationRevision(
+            revision=2,
+            release="1.5.0",
+            change=(
+                "Imports save each file's rows in the rowsPerFile diagnostic, "
+                "which earlier imports lack, so that a reused import warns of a "
+                "file that holds no row; the same files give the same barcodes"
+            ),
+            applies=None,
+            added_diagnostics=("rowsPerFile",),
+        ),
+    ),
+    "import_recorder_alleles": (
+        OperationRevision(
+            revision=2,
+            release="1.5.0",
+            change=(
+                "Imports save each file's rows in the rowsPerFile diagnostic, "
+                "which earlier imports lack, so that a reused import warns of a "
+                "file that holds no row; the same files give the same alleles"
+            ),
+            applies=None,
+            added_diagnostics=("rowsPerFile",),
+        ),
+    ),
 }
 
 

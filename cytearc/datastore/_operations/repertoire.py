@@ -803,11 +803,12 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         ``ds.artifacts.inspect(ref).diagnostics`` returns, hold the join's
         counts of the files' barcodes, those that match no cell of the store
         and those of cells outside the selection, with examples of each,
-        then ``fileContigs``, the files' contigs, ``unmatchedContigs``, those
-        that match no selected cell, and ``cellsWithChain``, the selected
-        cells with a chain. Barcodes that match no cell of the store are
-        named in a warning, and an import that reads no contig names its files
-        in another, since the calls that read contigs refuse its receptors; a
+        then ``fileContigs``, the files' contigs, ``contigsPerFile``, those
+        of each file in the canonical order of the files, ``unmatchedContigs``,
+        those that match no selected cell, and ``cellsWithChain``, the
+        selected cells with a chain. Barcodes that match no cell of the store
+        are named in a warning, and the files that hold no contig in another;
+        the calls that read contigs refuse receptors whose import read none. A
         reused import gives both warnings again. A file is identified by the
         SHA-256 of its bytes, so a moved file reuses the saved receptors and
         an edited file gives new ones, and the order of the files does not
@@ -918,11 +919,11 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         warnings = (
             *unmatched_barcode_rules(files_text("contig", len(sources))),
             empty_files_rule(
-                "fileContigs",
+                "contigsPerFile",
                 "contig",
                 [source.file for source in sources],
                 kind="contig",
-                outcome="no selected cell has a receptor",
+                item="a receptor",
                 remedy=(
                     "Pass a file that holds the V(D)J library's contigs, such as "
                     "Cell Ranger's filtered_contig_annotations.csv.",
@@ -1020,6 +1021,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             diagnostics={
                 **join.diagnostics(),
                 "fileContigs": join.n_rows,
+                "contigsPerFile": join.file_rows([source.file for source in sources]),
                 "unmatchedContigs": join.n_unmatched_rows,
                 "cellsWithChain": int(np.count_nonzero(index.has_receptor)),
             },

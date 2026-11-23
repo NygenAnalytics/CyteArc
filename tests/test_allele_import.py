@@ -16,8 +16,19 @@ import pandas as pd
 import pytest
 
 from cytearc import DiagnosticWarning
-from tests.clone_helpers import assert_joined, every_cell, write_truth_store
-from tests.storage_helpers import by_cell_id, copy_store
+from cytearc.storage.operation_revisions import OPERATION_REVISIONS
+from cytearc.utils.digest import file_sha256
+from tests.clone_helpers import (
+    assert_joined,
+    every_cell,
+    write_truth_store,
+)
+from tests.storage_helpers import (
+    by_cell_id,
+    computed_anew,
+    copy_store,
+    rewrite_as_saved_by_1_4,
+)
 from tests.clone_truth import (
     CHAIN_TAPES,
     DARLIN_ARRAYS,
@@ -799,8 +810,8 @@ def _import_warning_of_no_row(store, path: Path, name: str, **options):
     )
     assert (warning.operation, warning.diagnostic, warning.value) == (
         "import_recorder_alleles",
-        "fileRows",
-        0,
+        "rowsPerFile",
+        [0],
     )
     return ref
 
@@ -838,6 +849,74 @@ def test_allele_files_that_hold_no_row_are_named_in_one_warning(store, tmp_path)
         "petracer.csv",
         "typewriter.csv",
     }
+
+
+def test_an_allele_file_without_rows_beside_one_with_rows_is_named_alone(
+    store, tmp_path
+):
+    columns = {"cell": "cell", "integration": "integration", "allele": "allele"}
+    cell = str(clone_truth().cell_ids[0])
+    one = tmp_path / "one.csv"
+    one.write_text(f"cell,integration,allele\n{cell},A,x\n")
+    empty = tmp_path / "empty.csv"
+    empty.write_text("cell,integration,allele\n")
+    with pytest.warns(DiagnosticWarning) as caught:
+        ref = store.clones.import_alleles(
+            [one, empty],
+            cell_selection=every_cell(store),
+            format="table",
+            columns=columns,
+        )
+    assert len(caught) == 1
+    assert re.fullmatch(
+        r"The import read no row from the allele file '[^']*empty\.csv', 1 of its "
+        r"2 allele files, so that file gives no cell an allele\. Pass the file you "
+        r"meant in its place, or leave it out\.",
+        str(caught[0].message),
+    )
+    # Its rows, file by file in the order of the recorded files.
+    rows = {file_sha256(one): 1, file_sha256(empty): 0}
+    sources = store.artifacts.inspect(ref).inputs["sources"]
+    assert store.artifacts.inspect(ref).diagnostics["rowsPerFile"] == [
+        rows[source["sha256"]] for source in sources
+    ]
+    assert len(store.clones.load_alleles(ref).records) == 1
+
+
+def test_an_allele_import_saved_before_its_rows_per_file_is_imported_anew(
+    store, tmp_path
+):
+    columns = {"cell": "cell", "integration": "integration", "allele": "allele"}
+    path = tmp_path / "one.csv"
+    path.write_text(f"cell,integration,allele\n{clone_truth().cell_ids[0]},A,x\n")
+
+    def imported():
+        return store.clones.import_alleles(
+            path, cell_selection=every_cell(store), format="table", columns=columns
+        )
+
+    saved = imported()
+    status = rewrite_as_saved_by_1_4(store, saved, revision=1, without="rowsPerFile")
+    assert (status.revision, status.current_revision, status.is_current) == (
+        1,
+        2,
+        False,
+    )
+    assert status.diagnostics["rowsPerFile"] is None
+    # It still serves the calls that pass it.
+    assert len(store.clones.load_alleles(saved).records) == 1
+
+    (revision,) = OPERATION_REVISIONS["import_recorder_alleles"]
+    again = computed_anew(
+        store,
+        saved,
+        imported,
+        operation="import_recorder_alleles",
+        revision=1,
+        current=2,
+        change=revision.change,
+    )
+    assert store.artifacts.inspect(again).diagnostics["rowsPerFile"] == [1]
 
 
 def test_a_pair_listed_twice_keeps_each_listings_integration(tmp_path):
