@@ -1,6 +1,7 @@
 """Native cluster-tree plotting."""
 
 import math
+from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -354,13 +355,11 @@ def cluster_tree(
         )
         scale = resolve_category_scale(
             color_values.cat.categories,
-            stored,
+            None,
+            stored=stored,
             universe=(
-                _category_universe(store, cast(str, fill_by_value))
-                if stored is None
-                and not using_clusters
-                and color_key is None
-                and cmap is None
+                partial(_category_universe, store, cast(str, fill_by_value))
+                if not using_clusters and color_key is None and cmap is None
                 else None
             ),
         )

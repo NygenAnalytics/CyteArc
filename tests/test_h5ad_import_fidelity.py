@@ -313,9 +313,9 @@ def test_categoricals_with_many_categories_keep_no_levels(tmp_path, monkeypatch)
     ],
 )
 def test_stored_levels_follow_the_stored_column_type(dtype, categories, levels):
-    from cytearc.writers.h5ad import _stored_levels
+    from cytearc.metadata.artifacts import stored_levels
 
-    assert _stored_levels(dtype, categories) == levels
+    assert stored_levels(dtype, categories) == levels
 
 
 def test_display_metadata_that_would_be_invalid_is_not_stored() -> None:

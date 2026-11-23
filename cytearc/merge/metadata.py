@@ -1,16 +1,31 @@
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import (
+    Callable,
+    Collection,
+    Iterable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import Any, NoReturn
 
 import numpy as np
+import pandas as pd
 import zarr
 
-from ..metadata.artifacts import distinct_level_positions
+from ..metadata.artifacts import (
+    MAX_STORED_CATEGORIES,
+    distinct_level_positions,
+    stored_levels,
+    validate_display_metadata,
+)
+from ..metadata.palettes import stored_category_colors
 from ..metadata.rows import (
     array_row_selection_parts,
     iter_metadata_column_blocks,
     metadata_missing_mask,
+    read_array_rows_chunkwise,
     read_metadata_missing_rows_chunkwise,
     read_metadata_rows_chunkwise,
 )
@@ -19,7 +34,9 @@ from ..storage.arrays import (
     MetadataBlock,
     create_streamed_metadata_column,
 )
+from ..metadata.selection import valid_category_mask
 from ..storage.budget import ResourceBudget
+from ..storage.categorical import CategoricalColumn
 from ..storage.cell_order import (
     SOURCE_ROW,
     SOURCE_ROW_ROLE,
@@ -44,6 +61,7 @@ from ..storage.metadata_keys import (
 from ..storage.partition import affordable_width
 from ..storage.profiles import StorageProfile
 from ..storage.types import as_zarr_array, as_zarr_group
+from ..utils.arrays import sort_categories
 from ..utils.logging import logger
 from ..utils.memory_budget import MemoryBudgetError
 from .row_plan import (
@@ -72,6 +90,9 @@ _MERGED_ATTRIBUTES = tuple(
 _CELL_ATTRIBUTES = tuple(
     key for key in _MERGED_ATTRIBUTES if key not in {"role", "assay"}
 )
+# The attributes through which a cell column records its categories, which a
+# merge reconciles together.
+_CATEGORY_ATTRIBUTES = ("levels", "ordered", "display")
 
 SOURCE_LACKS_ASSAY = "missing"
 """Membership state of a source that does not hold the assay."""
@@ -359,24 +380,113 @@ def _public_column_name(
     return f"{prepend_text}_{column}"
 
 
+class _Labels:
+    """The labels of a merged column, as it stores them, up to the categories that a column keeps.
+
+    Missing and blank values hold no label. More than
+    :data:`MAX_STORED_CATEGORIES` labels overflow, and the merged column then
+    keeps its labels alone.
+    """
+
+    def __init__(self) -> None:
+        self.found: set[Any] = set()
+        self.overflow = False
+
+    def add(self, values: np.ndarray, missing: np.ndarray | None) -> None:
+        if self.overflow:
+            return
+        valid = valid_category_mask(values, missing_mask=missing)
+        self.found.update(pd.unique(np.asarray(values)[valid]).tolist())
+        if len(self.found) > MAX_STORED_CATEGORIES:
+            self.overflow = True
+            self.found = set()
+
+
 def _max_text_width(
     table: Any,
     column: str,
     *,
     block_rows: int,
+    labels: _Labels | None = None,
+    taken: np.ndarray | None = None,
 ) -> int:
+    """The width of a source column's widest value as text, read a block at a time.
+
+    With ``labels``, the same pass adds the labels of the rows that the
+    merged store takes, ``taken`` in increasing order or every row for None,
+    as text, which the merged column stores them as. Its missing mask is
+    read at those rows alone, as the merge reads it to write them.
+    """
     width = 1
+    mask = None if labels is None else metadata_missing_mask(table, column)
+    start = 0
     for values in iter_metadata_column_blocks(
         table,
         column,
         block_rows=block_rows,
     ):
+        stop = start + len(values)
+        strings = None
         if np.asarray(values).dtype.kind == "O":
             width = max(width, max((len(str(value)) for value in values), default=0))
-            continue
-        strings = np.asarray(values, dtype=str)
-        width = max(width, int(np.char.str_len(strings).max(initial=0)))
+        else:
+            strings = np.asarray(values, dtype=str)
+            width = max(width, int(np.char.str_len(strings).max(initial=0)))
+        if labels is not None:
+            if strings is None:
+                strings = np.asarray(values, dtype=str)
+            if taken is None:
+                labels.add(
+                    strings,
+                    None if mask is None else np.asarray(mask[start:stop], dtype=bool),
+                )
+            else:
+                rows = taken[
+                    np.searchsorted(taken, start) : np.searchsorted(taken, stop)
+                ]
+                labels.add(
+                    strings[rows - start],
+                    None
+                    if mask is None
+                    else np.asarray(read_array_rows_chunkwise(mask, rows), dtype=bool),
+                )
+        start = stop
     return width
+
+
+def _add_column_labels(
+    labels: _Labels,
+    table: Any,
+    column: str,
+    dtype: np.dtype[Any],
+    *,
+    block_rows: int,
+    taken: np.ndarray | None,
+) -> None:
+    """Add the labels of a source column's rows that the merged store takes, cast to the merged ``dtype`` as the merge writes them.
+
+    Without ``taken`` every row is read a block at a time; with it, the
+    rows that it lists, as the merge reads them to write them.
+    """
+    if taken is None:
+        mask = metadata_missing_mask(table, column)
+        start = 0
+        for values in iter_metadata_column_blocks(table, column, block_rows=block_rows):
+            stop = start + len(values)
+            labels.add(
+                np.asarray(values).astype(dtype, copy=False),
+                None if mask is None else np.asarray(mask[start:stop], dtype=bool),
+            )
+            start = stop
+        return
+    for start in range(0, len(taken), block_rows):
+        rows = taken[start : start + block_rows]
+        labels.add(
+            np.asarray(read_metadata_rows_chunkwise(table, column, rows)).astype(
+                dtype, copy=False
+            ),
+            read_metadata_missing_rows_chunkwise(table, column, rows),
+        )
 
 
 def _string_itemsize_bound(dtype: np.dtype[Any]) -> int:
@@ -500,38 +610,236 @@ def _source_attribute(attrs: Mapping[str, Any], key: str) -> Any:
     return [value[position] for position in distinct_level_positions(value)]
 
 
+def _records_categories(array: Any) -> bool:
+    """Whether a source column records categories: ``levels``, a categorical ``display``, or the categories of a categorical column."""
+    attrs = getattr(array, "attrs", {})
+    display = attrs.get("display")
+    return (
+        isinstance(array, CategoricalColumn)
+        or isinstance(attrs.get("levels"), list | tuple)
+        or (isinstance(display, Mapping) and display.get("kind") == "categorical")
+    )
+
+
+def _storable_category(value: Any) -> bool:
+    """Whether a category is a value that ``levels`` and a display hold: text, a finite number or a boolean."""
+    return isinstance(value, bool | int | str) or (
+        isinstance(value, float) and bool(np.isfinite(value))
+    )
+
+
+def _source_categories(
+    array: Any, recorded: Mapping[str, Any]
+) -> tuple[list[Any] | None, bool]:
+    """A source column's categories in the order its plots list them, or None, and whether they are ordered.
+
+    A categorical display lists them in its order. Otherwise the ``levels``
+    that an import keeps from a source categorical list them, or the
+    categories of a categorical column, which records whether they are
+    ordered; a categorical column of more than
+    :data:`MAX_STORED_CATEGORIES` categories, which a column keeps none of,
+    is not read.
+    """
+    levels = recorded.get("levels")
+    if not isinstance(levels, list | tuple):
+        # Levels of another type are no categories, and are compared as stored.
+        levels = None
+    ordered = recorded.get("ordered") is True
+    if isinstance(array, CategoricalColumn):
+        ordered = ordered or array.ordered
+        if levels is None and array.n_categories <= MAX_STORED_CATEGORIES:
+            levels = array.categories.tolist()
+    display = recorded.get("display")
+    if isinstance(display, Mapping) and display.get("kind") == "categorical":
+        return [category["value"] for category in display["categories"]], ordered
+    return (None if levels is None else list(levels)), ordered
+
+
+def _merged_categories(
+    sources: Sequence[tuple[list[Any] | None, bool]],
+    observed: Collection[Any] | None,
+    dtype: np.dtype[Any],
+) -> tuple[list[Any], bool] | None:
+    """The categories of a merged column, as it stores them, and whether they stay ordered, or None.
+
+    Each source's categories are compared as the merged column of ``dtype``
+    stores its values (:func:`~cytearc.metadata.artifacts.stored_levels`),
+    as are ``observed``, the labels of the rows that the merged store takes.
+    The first source that records categories gives their order, and every
+    other category and label follows in natural order, as plots draw the
+    labels that a stored order leaves out. The categories stay ordered only
+    when every source records them ordered, in that order. None, which
+    keeps the merged column's labels alone, as an import keeps a categorical
+    that a column cannot hold, stands for ``observed`` of more labels than a
+    column keeps, a merged column of a type that holds no levels, such as
+    dates, a source's categories that the merged column cannot hold, or
+    more than :data:`MAX_STORED_CATEGORIES` categories in all.
+    """
+    if observed is None:
+        return None
+    orders: list[list[Any] | None] = []
+    for order, _ordered in sources:
+        stored = None if order is None else stored_levels(dtype, order)
+        if order is not None and stored is None:
+            return None
+        orders.append(None if stored is None else list(dict.fromkeys(stored)))
+    listed = dict.fromkeys(next(order for order in orders if order is not None))
+    others = {label for order in orders for label in order or ()}
+    others.update(observed)
+    categories = [
+        *listed,
+        *sort_categories([label for label in others if label not in listed]),
+    ]
+    if len(categories) > MAX_STORED_CATEGORIES or not all(
+        _storable_category(value) for value in categories
+    ):
+        return None
+    ordered = all(
+        is_ordered and order == categories
+        for order, (_order, is_ordered) in zip(orders, sources, strict=True)
+    )
+    return categories, ordered
+
+
+def _merged_display(
+    displays: Sequence[Mapping[str, Any]],
+    categories: Sequence[Any],
+    dtype: np.dtype[Any],
+) -> dict[str, Any]:
+    """The categorical display of a merged column's categories, in their order.
+
+    A category takes its label and color from the first display that lists
+    it, its value as the merged column of ``dtype`` stores it. A later
+    display's color is kept only where no earlier entry has it, and each
+    category without a color takes the color that a stored display gives its
+    place in the order (:func:`~cytearc.metadata.palettes.stored_category_colors`),
+    so the display colors every category of the column. The missing label
+    and color come from the first display that records them.
+    """
+    entries: dict[Any, dict[str, Any]] = {}
+    used: set[str] = set()
+    missing: dict[str, Any] = {}
+    for number, display in enumerate(displays):
+        values = stored_levels(
+            dtype, [category["value"] for category in display["categories"]]
+        )
+        assert values is not None
+        for value, category in zip(values, display["categories"], strict=True):
+            if value in entries:
+                continue
+            color = str(category["color"])
+            kept = number == 0 or color.lower() not in used
+            entries[value] = {
+                "value": value,
+                "label": category["label"],
+                "color": color if kept else None,
+            }
+            if kept:
+                used.add(color.lower())
+        for key in ("missing_label", "missing_color"):
+            if key in display:
+                missing.setdefault(key, display[key])
+    generated: list[str] | None = None
+    listed = []
+    for position, value in enumerate(categories):
+        entry = entries.get(value) or {
+            "value": value,
+            "label": str(value),
+            "color": None,
+        }
+        if entry["color"] is None:
+            if generated is None:
+                generated = stored_category_colors(len(categories))
+            entry = {**entry, "color": generated[position]}
+        listed.append(entry)
+    return {"kind": "categorical", "categories": listed, **missing}
+
+
 def _reconciled_cell_attributes(
     arrays: Iterable[Any],
+    observed: Collection[Any] | None,
+    dtype: np.dtype[Any],
 ) -> tuple[dict[str, Any], list[str]]:
     """Merge one cell column's source attributes.
 
-    Equal values are kept. Differing ``levels`` of an unordered column become
-    their union in first-seen order. Any other disagreement drops the
-    attribute, and the dropped names are returned. Membership attributes are
-    never carried.
+    Equal values are kept, and any other disagreement drops the attribute;
+    the dropped names are returned. Membership attributes are never
+    carried. A column whose sources record categories, as ``levels``, a
+    categorical ``display`` or the categories of a categorical column, keeps
+    the categories of :func:`_merged_categories`: as ``levels`` when a source
+    records levels or categories, with ``ordered`` when every source records
+    them ordered in that order, and as a ``display`` that covers each of them
+    when a source records one (:func:`_merged_display`); a display of
+    another kind is dropped. ``observed`` holds the labels of the rows that
+    the merged store takes, as the merged column of ``dtype`` stores them,
+    or None for more labels than a column keeps.
     """
-    found: dict[str, list[Any]] = {}
+    arrays = list(arrays)
+    recorded: list[dict[str, Any]] = []
     for array in arrays:
         attrs = getattr(array, "attrs", {})
-        for key in _CELL_ATTRIBUTES:
-            if key in attrs:
-                found.setdefault(key, []).append(_source_attribute(attrs, key))
-    ordered = any(value is True for value in found.get("ordered", ()))
+        recorded.append(
+            {
+                key: _source_attribute(attrs, key)
+                for key in _CELL_ATTRIBUTES
+                if key in attrs
+            }
+        )
+    sources = [
+        _source_categories(array, attributes)
+        for array, attributes in zip(arrays, recorded, strict=True)
+    ]
+    categorical = any(order is not None for order, _ in sources)
+    found: dict[str, list[Any]] = {}
+    for attributes in recorded:
+        for key, value in attributes.items():
+            found.setdefault(key, []).append(value)
     kept: dict[str, Any] = {}
     dropped: list[str] = []
     for key, values in found.items():
+        if categorical and key in _CATEGORY_ATTRIBUTES:
+            continue
         if all(value == values[0] for value in values[1:]):
             kept[key] = values[0]
-        elif key == "levels" and not ordered:
-            kept[key] = list(
-                dict.fromkeys(level for group in values for level in group)
-            )
         else:
             dropped.append(key)
-    if "levels" in dropped and "ordered" in kept:
-        # Order is defined by the levels, so it cannot outlive them.
-        del kept["ordered"]
+    if not categorical:
+        return kept, dropped
+    displays = [
+        display
+        for attributes in recorded
+        if isinstance(display := attributes.get("display"), Mapping)
+        and display.get("kind") == "categorical"
+    ]
+    # A display of another kind, such as a continuous one, holds no categories.
+    other_display = len(displays) < len(found.get("display", ()))
+    merged = (
+        None
+        # A categorical column of more categories than a column keeps.
+        if any(
+            isinstance(array, CategoricalColumn)
+            and array.n_categories > MAX_STORED_CATEGORIES
+            for array in arrays
+        )
+        else _merged_categories(sources, observed, dtype)
+    )
+    if merged is None:
+        dropped.extend(key for key in _CATEGORY_ATTRIBUTES if key in found)
+        return kept, dropped
+    categories, ordered = merged
+    if "levels" in found or any(
+        isinstance(array, CategoricalColumn) for array in arrays
+    ):
+        kept["levels"] = categories
+        kept["ordered"] = ordered
+    if not ordered and any(is_ordered for _, is_ordered in sources):
         dropped.append("ordered")
+    if other_display:
+        dropped.append("display")
+    if displays:
+        kept["display"] = validate_display_metadata(
+            _merged_display(displays, categories, dtype)
+        )
     return kept, dropped
 
 
@@ -547,11 +855,15 @@ def plan_cell_metadata(
     scan_rows: int | None = None,
     excluded_columns: list[frozenset[str]] | None = None,
     n_cells: int | None = None,
+    row_plan: RowPlan | None = None,
 ) -> CellMetadataPlan:
     """Resolve the destination cell-metadata schema without writing.
 
     ``n_cells``, the cells that the merge takes from its sources, sizes what
     writing ``sourceRow`` holds; None counts every cell of every source.
+    ``row_plan``, the rows that a composite takes from each source, limits
+    the labels that become a column's categories to those rows; None takes
+    every row.
     """
     block_rows = max(1, int(block_rows))
     scan_rows = block_rows if scan_rows is None else max(1, int(scan_rows))
@@ -612,11 +924,64 @@ def plan_cell_metadata(
     columns: list[MetadataColumnSpec] = []
     dropped_attributes: dict[str, list[str]] = {}
 
-    def attributes_for(public: str) -> dict[str, Any]:
-        kept, dropped = _reconciled_cell_attributes(
-            table._get_array(source_col)
-            for table, mapping in zip(source_cell_tables, per_source, strict=True)
+    taken_rows: dict[int, np.ndarray] = {}
+
+    def taken(index: int) -> np.ndarray | None:
+        """The rows of source ``index`` that the plan takes, in increasing order, or None for every row."""
+        if row_plan is None:
+            return None
+        if index not in taken_rows:
+            parts = [
+                segment.localRows
+                for segment in iter_row_plan_segments(row_plan)
+                if segment.sourceIdx == index
+            ]
+            taken_rows[index] = (
+                np.sort(np.concatenate(parts)) if parts else np.empty(0, np.int64)
+            )
+        return taken_rows[index]
+
+    def sources_of(public: str) -> list[tuple[int, Any, str]]:
+        """Each source that holds the column, by its index, table and column name."""
+        return [
+            (index, table, source_col)
+            for index, (table, mapping) in enumerate(
+                zip(source_cell_tables, per_source, strict=True)
+            )
             if (source_col := mapping.get(public)) is not None
+        ]
+
+    def category_labels(public: str) -> _Labels | None:
+        """A collector of the column's labels, when a source records its categories."""
+        if any(
+            _records_categories(table._get_array(column))
+            for _, table, column in sources_of(public)
+        ):
+            return _Labels()
+        return None
+
+    def attributes_for(
+        public: str, dtype: np.dtype[Any], labels: _Labels | None = None
+    ) -> dict[str, Any]:
+        """The column's attributes, from ``labels`` that a scan of its text widths collected, or else read here."""
+        sources = sources_of(public)
+        arrays = [table._get_array(column) for _, table, column in sources]
+        if labels is None and (labels := category_labels(public)) is not None:
+            for (index, table, column), array in zip(sources, arrays, strict=True):
+                # A categorical column holds no label beyond its categories.
+                if not isinstance(array, CategoricalColumn):
+                    _add_column_labels(
+                        labels,
+                        table,
+                        column,
+                        dtype,
+                        block_rows=scan_rows,
+                        taken=taken(index),
+                    )
+        kept, dropped = _reconciled_cell_attributes(
+            arrays,
+            () if labels is None else None if labels.overflow else labels.found,
+            dtype,
         )
         if dropped:
             dropped_attributes[public] = dropped
@@ -663,7 +1028,7 @@ def plan_cell_metadata(
                     value_arrays=(
                         table._get_array("ids") for table in source_cell_tables
                     ),
-                    attributes=attributes_for(public),
+                    attributes=attributes_for(public, np.dtype(f"U{max_len}")),
                 )
             )
             continue
@@ -686,7 +1051,7 @@ def plan_cell_metadata(
                     value_arrays=(
                         table._get_array("names") for table in source_cell_tables
                     ),
-                    attributes=attributes_for(public),
+                    attributes=attributes_for(public, np.dtype(f"U{max_len}")),
                 )
             )
             continue
@@ -701,7 +1066,7 @@ def plan_cell_metadata(
                         if reset_cell_filter
                         else (table._get_array("I") for table in source_cell_tables)
                     ),
-                    attributes=attributes_for(public),
+                    attributes=attributes_for(public, np.dtype(bool)),
                 )
             )
             continue
@@ -769,18 +1134,21 @@ def plan_cell_metadata(
             if (source_col := mapping.get(public)) is not None
         )
         dtype = _promote_dtypes(present_dtypes)
+        labels: _Labels | None = None
         if dtype.kind in {"U", "S", "O"}:
+            # The pass that measures the text widths also collects the labels
+            # of a column whose sources record categories.
+            labels = category_labels(public)
             max_len = 1
-            for table, mapping in zip(source_cell_tables, per_source, strict=True):
-                source_col = mapping.get(public)
-                if source_col is None:
-                    continue
+            for index, _table, source_col in sources_of(public):
                 max_len = max(
                     max_len,
                     _max_text_width(
-                        table,
+                        source_cell_tables[index],
                         source_col,
                         block_rows=scan_rows,
+                        labels=labels,
+                        taken=None if labels is None else taken(index),
                     ),
                 )
             dtype = np.dtype(f"U{max_len}")
@@ -801,7 +1169,7 @@ def plan_cell_metadata(
                 has_missing,
                 value_arrays=value_arrays,
                 mask_arrays=mask_arrays,
-                attributes=attributes_for(public),
+                attributes=attributes_for(public, dtype, labels),
             )
         )
 

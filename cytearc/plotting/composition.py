@@ -1,5 +1,6 @@
 """Sample-level composition figures, including paired subject lines."""
 
+from functools import partial
 from typing import Any, Hashable, Literal
 
 import numpy as np
@@ -18,8 +19,6 @@ from ._data import (
 from ._deps import require_matplotlib
 from ._display import (
     labels_in_stored_order,
-    resolve_artifact_scale,
-    resolve_categorical_scale,
     stored_artifact_scale,
     stored_categorical_scale,
 )
@@ -524,11 +523,7 @@ def composition(
         grouping_values = np.asarray(resolved_grouping[0], dtype=object)
     if categories is None:
         assert category_key is not None and category_title is not None
-        categorical_scale = resolve_categorical_scale(
-            store,
-            category_key,
-            categorical_scale,
-        )
+        stored_category_scale = stored_categorical_scale(store, category_key)
         cats = _fetch_cell_column(
             store,
             category_key,
@@ -539,7 +534,7 @@ def composition(
         category_axis_label = category_title
     else:
         assert category_values is not None
-        categorical_scale = resolve_artifact_scale(store, categories, categorical_scale)
+        stored_category_scale = stored_artifact_scale(store, categories)
         cats = np.asarray(category_values[0], dtype=object).copy()
         category_axis_label = artifact_title_of["categories"]
     if len(cats) == 0:
@@ -550,17 +545,11 @@ def composition(
     category_scale = resolve_category_scale(
         cats,
         categorical_scale,
+        stored=stored_category_scale,
         universe=(
-            _category_universe(store, category_key)
-            if category_key is not None
-            and (
-                categorical_scale is None
-                or (
-                    categorical_scale.order is None
-                    and categorical_scale.palette is None
-                )
-            )
-            else None
+            None
+            if category_key is None
+            else partial(_category_universe, store, category_key)
         ),
     )
     missing_mask = pd.isna(cats)

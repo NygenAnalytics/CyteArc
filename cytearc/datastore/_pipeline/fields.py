@@ -11,6 +11,7 @@ from ...metadata.artifacts import (
     continuous_display,
     levels_display,
 )
+from ...metadata.palettes import palette_for_n
 from ...metadata.rows import array_block_rows
 from ...storage.arrays import linked_missing_mask
 from ...storage.artifacts import ArtifactRef, artifact_group
@@ -148,8 +149,6 @@ def _frozen_column_display(root: Any, column: str) -> dict[str, Any] | None:
     order = column_category_order(root, column)
     if order is None:
         return None
-    from ...plotting._style import palette_for_n
-
     return levels_display(list(order), tuple(palette_for_n(len(order))), False)
 
 

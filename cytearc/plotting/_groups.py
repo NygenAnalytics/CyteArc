@@ -228,15 +228,17 @@ def _colors(
         _store_labels(store)
         return resolve_category_scale(
             list(names),
-            stored,
-            universe=_column_labels(store, column) if stored is None else None,
+            None,
+            stored=stored,
+            universe=partial(_column_labels, store, column),
         )
     if not group_by and groups is not None and column == groups.kind:
         _store_labels(store)
         return resolve_category_scale(
             list(names),
-            stored,
-            universe=_artifact_labels(store, groups) if stored is None else None,
+            None,
+            stored=stored,
+            universe=partial(_artifact_labels, store, groups),
         )
     if column in _VOCABULARY_SCALES:
         return resolve_category_scale(list(names), _VOCABULARY_SCALES[column])

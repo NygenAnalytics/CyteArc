@@ -241,21 +241,3 @@ def merge_categorical_scales(
             else explicit.palette_name
         ),
     )
-
-
-def resolve_categorical_scale(
-    store: Any,
-    column: str,
-    explicit: CategoricalScale | None,
-) -> CategoricalScale | None:
-    """Merge an explicit scale over the scale that a cell column stores."""
-    return merge_categorical_scales(stored_categorical_scale(store, column), explicit)
-
-
-def resolve_artifact_scale(
-    store: Any,
-    ref: ArtifactRef,
-    explicit: CategoricalScale | None,
-) -> CategoricalScale | None:
-    """Merge an explicit scale over the scale that a label artifact stores."""
-    return merge_categorical_scales(stored_artifact_scale(store, ref), explicit)

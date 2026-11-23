@@ -61,6 +61,35 @@ def test_palette_for_n_falls_back_to_evenly_spaced_hues():
     )
 
 
+def test_palette_for_n_asks_for_seaborn_beyond_its_palettes(monkeypatch):
+    import sys
+
+    # A module set to None in sys.modules raises ImportError when imported.
+    monkeypatch.setitem(sys.modules, "seaborn", None)
+    assert palette_for_n(102)[-1] == "#324E72"
+    with pytest.raises(ImportError, match="need seaborn"):
+        palette_for_n(103)
+
+
+def test_stored_category_colors_need_no_seaborn(monkeypatch):
+    import sys
+
+    from cytearc.metadata.palettes import stored_category_colors
+
+    monkeypatch.setitem(sys.modules, "seaborn", None)
+    # Up to the palettes' 102 colors, a stored display takes the colors that
+    # plots generate.
+    assert stored_category_colors(3) == ["#1f77b4", "#ff7f0e", "#279e68"]
+    assert stored_category_colors(102) == palette_for_n(102)
+    assert stored_category_colors(0) == []
+    # Beyond them, it takes the hues that an import gives a categorical of as
+    # many categories: the first is red, hue 0 at saturation 0.55 and value
+    # 0.85, and the 111th the hue of 110 times the golden ratio's conjugate.
+    colors = stored_category_colors(111)
+    assert len(set(colors)) == 111
+    assert (colors[0], colors[110]) == ("#d96262", "#d9626d")
+
+
 @pytest.mark.parametrize("palette_name", ["default", "colorblind"])
 @pytest.mark.parametrize("size", [8, 30, 110])
 def test_palette_for_n_never_recycles_colors(size, palette_name):

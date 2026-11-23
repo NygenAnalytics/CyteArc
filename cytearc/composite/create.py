@@ -1050,10 +1050,12 @@ def _write_composite(
         ]
         if metadata_cache is not None:
             # As plan_cell_metadata and write_cell_metadata read them: the IDs,
-            # the names and every text column in full, and the selected rows of
-            # every column but the filter and the generated ones. Features are
-            # read as write_feature_metadata reads them: the rows of the
-            # features the composite keeps, and text stored as bytes or
+            # the names and every text column in full, where the plan also
+            # takes the labels of the selected rows, and the selected rows of
+            # every column but the filter and the generated ones, which the
+            # plan reads for the labels of other columns with categories.
+            # Features are read as write_feature_metadata reads them: the rows
+            # of the features the composite keeps, and text stored as bytes or
             # objects in full.
             feature_skipped = frozenset(
                 {"ids", "names", "I", *GENERATED_FEATURE_COLUMNS}
@@ -1100,6 +1102,7 @@ def _write_composite(
             scan_rows=scan_rows,
             excluded_columns=excluded_columns,
             n_cells=row_plan.nCells,
+            row_plan=row_plan,
         )
         metadata_plan = admit_cell_metadata_plan(
             metadata_plan, row_plan, resources, resident_bytes=resident
