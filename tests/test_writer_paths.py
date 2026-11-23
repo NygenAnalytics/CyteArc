@@ -30,7 +30,7 @@ from cytearc.writers import (
     SparseToZarr,
     SubsetZarr,
 )
-from tests.memory_helpers import HandedArrays
+from tests.memory_helpers import HandedArrays, received_messages
 from tests.test_seurat_reader import _Wire, _legacy_assay
 from tests.test_writers import _write_h5ad
 from tests.storage_helpers import by_cell_id
@@ -177,15 +177,25 @@ def test_h5ad_cell_id_source_reads_ids_by_position(tmp_path) -> None:
 
 
 class _Connection:
+    """One end of a pipe that records what a process sends through it."""
+
     def __init__(self, on_send: Callable[[], object] | None = None) -> None:
-        self.messages: list[tuple[str, object]] = []
+        self.sent: list[tuple[str, object]] = []
         self.closed = False
         self._onSend = on_send
 
     def send(self, message: tuple[str, object]) -> None:
-        self.messages.append(message)
+        self.sent.append(("message", message))
         if self._onSend is not None:
             self._onSend()
+
+    def send_bytes(self, buffer: Any) -> None:
+        self.sent.append(("bytes", bytes(buffer)))
+
+    @property
+    def messages(self) -> list[tuple[str, Any]]:
+        """The messages as the import reads them, with their arrays."""
+        return received_messages(self.sent)
 
     def close(self) -> None:
         self.closed = True
