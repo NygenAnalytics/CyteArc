@@ -146,7 +146,7 @@ def scatter_block_dense(
     elif out is None:
         dense[:, order_map] = values
     else:
-        dense[target[:, None], order_map] = values
+        dense[np.asarray(rows)[:, None], order_map] = values
     if out is None and destination_dtype.kind in "fc":
         np.copyto(dense, 0, where=dense == 0)
     return dense

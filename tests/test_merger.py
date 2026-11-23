@@ -8004,10 +8004,22 @@ def test_scattered_dense_rows_check_casts_like_sparse_coordinates():
     rng = np.random.default_rng(5)
     block = rng.integers(0, 4, size=(6, 90)).astype(np.uint16)
     for columns in (np.r_[100:130, 0:50, 140:150], rng.permutation(150)[:90]):
+        expected = remap_block_to_coo(
+            block, columns, 150, 1, np.dtype(np.uint32)
+        ).toarray()
         np.testing.assert_array_equal(
-            scatter_block_dense(block, columns, 150, np.dtype(np.uint32)),
-            remap_block_to_coo(block, columns, 150, 1, np.dtype(np.uint32)).toarray(),
+            scatter_block_dense(block, columns, 150, np.dtype(np.uint32)), expected
         )
+        # Into rows of a batch, the rows land there and the others stay.
+        batch = np.full((9, 150), 7, dtype=np.uint32)
+        rows = np.array([0, 2, 3, 5, 6, 8])
+        scatter_block_dense(
+            block, columns, 150, np.dtype(np.uint32), out=batch, rows=rows
+        )
+        placed = np.full((rows.size, 150), 7, dtype=np.uint32)
+        placed[:, columns] = block
+        np.testing.assert_array_equal(batch[rows], placed)
+        np.testing.assert_array_equal(batch[[1, 4, 7]], 7)
 
 
 @pytest.fixture(scope="module")
