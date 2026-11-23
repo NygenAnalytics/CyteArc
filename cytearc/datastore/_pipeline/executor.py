@@ -21,9 +21,11 @@ from ...storage.pipeline_runs import (
     complete_pipeline_run_record,
     create_pipeline_run_record,
     ensure_pipeline_label_claimable,
+    load_pipeline_run_record,
     load_pipeline_stage_records,
     pause_pipeline_run_record,
     resume_pipeline_run_record,
+    resumed_since_read,
 )
 from ...storage.stores import has_atomic_conditional_writes
 from ...utils.logging import logger
@@ -146,6 +148,10 @@ class RecipePlan:
         return tuple(stage.name for stage in self.stages)
 
 
+# The next step of a resume that cannot go on, which reuses what still holds.
+_RERUN = "ds.pipeline.rerun(run) starts a new run that reuses its finished stages"
+
+
 def check_run_until(
     plan: RecipePlan,
     run_until: object,
@@ -162,32 +168,41 @@ def check_run_until(
         TypeError: If ``run_until`` is not a stage's name or None.
         ValueError: If it names no stage of the recipe, a stage that the
             run's settings skip, or a stage that the run has already run;
-            the message lists the stages that the run runs.
+            the message lists the stages that the run runs, or for a run
+            that resumes, the stages that it has left to run.
     """
     if run_until is None:
         return None
-    runs = [stage.name for stage in plan.stages if stage.action is not None]
+    runs = [
+        stage.name
+        for ordinal, stage in enumerate(plan.stages)
+        if stage.action is not None and ordinal >= after
+    ]
+    listed = (
+        f"the stages that this run runs are {runs!r}"
+        if after == 0
+        else f"the stages that run {run_id} has left to run are {runs!r}"
+    )
     if not isinstance(run_until, str):
         raise TypeError(
-            f"run_until must name a stage of the run, one of {runs!r}, or be "
-            f"None, not {run_until!r}"
+            f"run_until must name a stage of the run or be None, not "
+            f"{run_until!r}; {listed}"
         )
     if run_until not in plan.stage_order:
         raise ValueError(
             f"run_until={run_until!r} is not a stage of the {plan.recipe} recipe; "
-            f"the stages that this run runs are {runs!r}"
+            f"{listed}"
         )
     ordinal = plan.stage_order.index(run_until)
     if plan.stages[ordinal].action is None:
         raise ValueError(
             f"run_until={run_until!r} names a stage that this run's settings "
-            f"skip; the stages that it runs are {runs!r}"
+            f"skip; {listed}"
         )
     if ordinal < after:
-        left = [name for name in runs if plan.stage_order.index(name) >= after]
         raise ValueError(
             f"run_until={run_until!r} names a stage that run {run_id} has already "
-            f"run; the stages that it has left to run are {left!r}"
+            f"run; {listed}"
         )
     return ordinal
 
@@ -199,38 +214,51 @@ def check_resumable_record(record: PipelineRunRecord, version: str) -> None:
         ValueError: If the run is not paused, its pause was not written
             completely, or its ``cytearc_version`` is not ``version``.
     """
+    run_id = record.run_id
+    if record.status == "running":
+        # Another process may run it now, so a rerun could duplicate its work.
+        raise ValueError(
+            f"Pipeline run {run_id} is 'running', and only a paused run resumes: "
+            "another process runs it, or stopped without recording its end; open "
+            "the run again to follow it"
+        )
+    if record.status == "completed":
+        raise ValueError(
+            f"Pipeline run {run_id} is 'completed', and only a paused run resumes; "
+            "ds.pipeline.open(run_id=...) reads its outputs"
+        )
     if record.status != "paused":
         raise ValueError(
-            f"Pipeline run {record.run_id} is {record.status!r}, and only a paused "
-            "run resumes; ds.pipeline.rerun(run) starts a new run that reuses its "
-            "finished stages"
+            f"Pipeline run {run_id} is {record.status!r}, and only a paused run "
+            f"resumes; {_RERUN}"
         )
     if not record.complete:
         raise ValueError(
-            f"Pipeline run {record.run_id} did not finish writing its pause, so it "
-            "cannot resume; ds.pipeline.rerun(run) starts a new run that reuses its "
-            "finished stages"
+            f"Pipeline run {run_id} did not finish writing its pause, so it cannot "
+            f"resume; {_RERUN}"
         )
     if record.cytearc_version != version:
         raise ValueError(
-            f"Pipeline run {record.run_id} was recorded by CyteArc "
+            f"Pipeline run {run_id} was recorded by CyteArc "
             f"{record.cytearc_version}, so it resumes only with that release, not "
-            f"{version}"
+            f"{version}; resume it with CyteArc {record.cytearc_version}, or "
+            "ds.pipeline.rerun(run) runs its settings again with this release"
         )
 
 
 def _check_resumes_plan(record: PipelineRunRecord, plan: RecipePlan) -> None:
-    """Refuse a plan other than the one that the paused run recorded."""
+    """Refuse a plan other than the one that the paused run recorded.
+
+    The plan takes the run's recipe, assay and label from its record, so its
+    stage order and settings are what can differ.
+    """
     recorded = {key: value for key, value in record.config.items() if key != "shutdown"}
-    if (plan.recipe, plan.assay, plan.label, plan.stage_order) != (
-        record.recipe,
-        record.assay,
-        record.requested_label,
-        record.stage_order,
-    ) or dict(plan.config) != recorded:
+    if plan.stage_order != record.stage_order or dict(plan.config) != recorded:
         raise ValueError(
             f"Pipeline run {record.run_id} cannot resume: its recorded settings no "
-            "longer resolve to the stages and settings that it recorded"
+            "longer resolve to the stages and settings that it recorded; "
+            "ds.pipeline.rerun(run) starts a new run with these settings that "
+            "reuses the finished stages that still match"
         )
 
 
@@ -239,10 +267,18 @@ def _finished_stages(
 ) -> tuple[PipelineStageRecord, ...]:
     """Return the stage records of a paused run, which must be the stages its segments name.
 
+    The run record is read again first: one that holds more segments than
+    ``record`` was resumed by another process after this one read it.
+
     Raises:
+        RuntimeError: If another process resumed the run since ``record``
+            was read.
         ValueError: If the records name other stages, or one did not end
             successfully.
     """
+    current = load_pipeline_run_record(store.zw, record.run_id)
+    if len(current.segments) > len(record.segments):
+        raise resumed_since_read(record.run_id)
     finished = load_pipeline_stage_records(store.zw, record.run_id)
     paused_after = [stage for segment in record.segments for stage in segment.stages]
     if [stage.stage for stage in finished] != paused_after or any(
@@ -251,7 +287,7 @@ def _finished_stages(
     ):
         raise ValueError(
             f"Pipeline run {record.run_id} cannot resume: its stage records no "
-            "longer match the stages that it ran before it paused"
+            f"longer match the stages that it ran before it paused; {_RERUN}"
         )
     return finished
 
@@ -289,7 +325,7 @@ def _replay_finished_stages(
             if stage.action is not None:
                 raise ValueError(
                     f"Pipeline run {run_id} cannot resume: it skipped stage "
-                    f"{stage.name!r}, which its settings now run"
+                    f"{stage.name!r}, which its settings now run; {_RERUN}"
                 )
             if stage.on_skip is not None:
                 stage.on_skip(state)
@@ -297,7 +333,7 @@ def _replay_finished_stages(
         if stage.action is None:
             raise ValueError(
                 f"Pipeline run {run_id} cannot resume: it ran stage {stage.name!r}, "
-                "which its settings now skip"
+                f"which its settings now skip; {_RERUN}"
             )
         expected = _recorded_outputs(record)
         try:
@@ -313,7 +349,9 @@ def _replay_finished_stages(
                 f"Pipeline run {run_id} cannot resume: its finished stage "
                 f"{stage.name!r} would compute again instead of reusing the "
                 f"artifacts that its stage record names ({named}). "
-                f"{signal.computation.describe()}"
+                f"{signal.computation.describe()}. ds.pipeline.rerun(run) starts "
+                "a new run that computes it again and reuses the finished stages "
+                "that still match"
             ) from None
         replayed = dict(outputs)
         for key in sorted(set(expected) | set(replayed)):
@@ -321,7 +359,9 @@ def _replay_finished_stages(
                 raise ValueError(
                     f"Pipeline run {run_id} cannot resume: its finished stage "
                     f"{stage.name!r} recorded {key!r} as {expected.get(key)!r}, but "
-                    f"the store now gives {replayed.get(key)!r}"
+                    f"the store now gives {replayed.get(key)!r}; ds.pipeline.rerun"
+                    "(run) starts a new run that reuses the finished stages that "
+                    "still match"
                 )
         state.add(outputs)
 
@@ -345,18 +385,23 @@ def execute_recipe(
     session's again once the run ends, however it ends.
 
     With ``run_until``, the run pauses once that stage has completed, while
-    a stage that runs is left. With ``resumed``, a paused run that ``plan``
-    rebuilds from its record, the call restores the finished stages from
-    their artifacts and runs on under the same run ID.
+    a stage that runs is left. With ``resumed``, a paused run that
+    :func:`check_resumable_record` accepted and that ``plan`` rebuilds from
+    its record, the call restores the finished stages from their artifacts
+    and runs on under the same run ID.
     """
-    from ... import __version__
-
     after = 0
     if resumed is not None:
-        check_resumable_record(resumed, __version__)
         _check_resumes_plan(resumed, plan)
         if resumed.requested_label is not None:
-            ensure_pipeline_label_claimable(store.zw, resumed.requested_label)
+            try:
+                ensure_pipeline_label_claimable(store.zw, resumed.requested_label)
+            except ValueError as error:
+                raise ValueError(
+                    f"Pipeline run {resumed.run_id} cannot resume: {error}; "
+                    "ds.pipeline.rerun(run, label=...) starts a new run under "
+                    "another label that reuses its finished stages"
+                ) from error
         after = sum(len(segment.stages) for segment in resumed.segments)
     stop = check_run_until(
         plan,
@@ -378,7 +423,13 @@ def execute_recipe(
         # only where it can resume.
         raise RuntimeError(
             f"{'Resuming' if resumed is not None else 'Pausing'} a pipeline run "
-            "requires a Zarr store with atomic set_if_not_exists support"
+            "requires a Zarr store with atomic set_if_not_exists support, which "
+            "local, memory and object stores have; "
+            + (
+                "open the store as one of them to resume the run"
+                if resumed is not None
+                else "run without run_until on this store"
+            )
         )
     callbacks = run_callbacks(callback)
     # Callbacks run in the caller's context, outside the run's shutdown and

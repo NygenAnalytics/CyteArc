@@ -25,7 +25,11 @@ from ._pipeline.events import (
     pipeline_listener as pipeline_listener,
 )
 from ._pipeline.executor import RecipePlan, check_resumable_record, execute_recipe
-from ._pipeline.normalizers import add_applied_feat_scaling, recorded_normalizer
+from ._pipeline.normalizers import (
+    CustomNormalizerUnset,
+    add_applied_feat_scaling,
+    recorded_normalizer,
+)
 from ._pipeline.planning import (
     PipelinePlan as PipelinePlan,
     PipelineStageEstimate as PipelineStageEstimate,
@@ -308,11 +312,20 @@ class PipelineAccessor:
                     "not positional arguments"
                 )
             recipe, settings = self._rerun_call(recipe, settings)
-        resolver = _RESOLVERS.get(recipe) if isinstance(recipe, str) else None
-        if resolver is None:
+        if not isinstance(recipe, str) or recipe not in _RESOLVERS:
             raise ValueError(
                 f"recipe must be one of {sorted(_RESOLVERS)!r}, not {recipe!r}"
             )
+        return plan_recipe(self._store, self._resolve(recipe, args, settings))
+
+    def _resolve(
+        self, recipe: str, args: Sequence[object], settings: Mapping[str, object]
+    ) -> RecipePlan:
+        """Resolve a call of ``recipe``'s method, as the method resolves it, writing nothing.
+
+        Every keyword that the call omits takes the method's default; the
+        keywords of the run itself are left out.
+        """
         bound = inspect.signature(getattr(PipelineAccessor, recipe)).bind(
             self, *args, **settings
         )
@@ -322,7 +335,7 @@ class PipelineAccessor:
             for name, value in bound.arguments.items()
             if name != "self" and name not in _RUN_KEYWORDS
         }
-        return plan_recipe(self._store, resolver(self._store, **arguments))
+        return _RESOLVERS[recipe](self._store, **arguments)
 
     @staticmethod
     def describe(recipe: str, /) -> RecipeDescription:
@@ -1126,7 +1139,7 @@ class PipelineAccessor:
     @validation_scoped
     def resume(
         self,
-        run_id: str,
+        run: str | PipelineRun,
         /,
         *,
         run_until: str | None = None,
@@ -1140,13 +1153,18 @@ class PipelineAccessor:
         run recorded, as :meth:`rerun` does, and restores what the finished
         stages left from their saved artifacts, computing and writing nothing
         for them. It then runs the next stages and completes the run, or
-        pauses it again after the stage that ``run_until`` names. A resume
-        reads only the store, and the call file of a ``perturbation`` run
-        that imports its guide calls, at its recorded path, so the process
-        that resumes can run on a larger machine, with the ``nthreads`` and
-        memory budget of the store that it opened. The run record's
-        ``segments`` hold when each process started and stopped, the stages
-        that it ran, and why it stopped.
+        pauses it again after the stage that ``run_until`` names.
+        :meth:`plan` of the paused run previews what the resume would compute.
+
+        A resume reads the store, so the process that resumes can run on a
+        larger machine, with the ``nthreads`` and memory budget of the store
+        that it opened. It needs two things beside the store: the call file
+        of a ``perturbation`` run that imports its guide calls, at its
+        recorded path, and a custom normalizer of the run's assay as the
+        assay's ``normMethod`` in the resuming session, since a run applies a
+        custom normalizer only as the assay's ``normMethod``. The run
+        record's ``segments`` hold when each process started and stopped,
+        the stages that it ran, and why it stopped.
 
         The run keeps its requested label without reserving it: the label is
         checked when the run pauses and resumes, and claimed when the run
@@ -1155,8 +1173,8 @@ class PipelineAccessor:
         raises ``RuntimeError``.
 
         Args:
-            run_id: The ID of a paused run of this datastore, such as
-                ``ds.pipeline.list_runs(status="paused")[0].run_id``.
+            run: A paused run of this datastore, or its run ID, such as
+                ``ds.pipeline.list_runs(status="paused")[0]``.
             run_until: The stage after which the run pauses again, one that
                 the run has not run yet. None runs it to the end.
             callback: Called with each :class:`PipelineEvent` of the run.
@@ -1167,13 +1185,14 @@ class PipelineAccessor:
 
         Raises:
             PermissionError: If the store is read-only.
-            TypeError: If ``run_id`` is not text.
-            KeyError: If the store holds no run ``run_id``.
+            TypeError: If ``run`` is neither a run nor a run ID.
+            KeyError: If the store holds no such run.
             ValueError: If the run cannot resume, and nothing is written: it
                 is not paused, another release recorded it, its settings or
-                finished stages no longer match what it recorded, another run
-                committed its label, or ``run_until`` names no stage that it
-                has left to run.
+                finished stages no longer match what it recorded, the
+                session's ``normMethod`` is not its custom normalizer, another
+                run committed its label, or ``run_until`` names no stage that
+                it has left to run.
             RuntimeError: If the store lacks atomic conditional writes, an
                 unfinished run holds the claim of its label, or another
                 process resumed the run first.
@@ -1186,6 +1205,7 @@ class PipelineAccessor:
 
         Example:
             >>> paused = ds.pipeline.rna(label="rna", run_until="pca")
+            >>> ds.pipeline.plan(paused).computed  # what the resume computes
             >>> # Later, on a larger machine that opens the same store:
             >>> run = ds.pipeline.resume(paused.run_id)
             >>> run.status, run.report()["run"]["segments"][0]["stages"][-1]
@@ -1194,21 +1214,27 @@ class PipelineAccessor:
         from .. import __version__
 
         self._require_runnable(callback)
-        if not isinstance(run_id, str):
-            raise TypeError(f"run_id must be a run's ID, not {type(run_id).__name__}")
-        record = load_pipeline_run_record(self._store.zw, run_id)
+        if isinstance(run, PipelineRun):
+            run = run.run_id
+        if not isinstance(run, str):
+            raise TypeError(
+                f"run must be a PipelineRun or a run's ID, not {type(run).__name__}"
+            )
+        record = load_pipeline_run_record(self._store.zw, run)
         check_resumable_record(record, __version__)
         settings = recorded_settings(self._store, record)
-        bound = inspect.signature(getattr(PipelineAccessor, record.recipe)).bind(
-            self, label=record.requested_label, **settings
-        )
-        bound.apply_defaults()
-        arguments = {
-            name: value
-            for name, value in bound.arguments.items()
-            if name != "self" and name not in _RUN_KEYWORDS
-        }
-        plan = _RESOLVERS[record.recipe](self._store, **arguments)
+        try:
+            plan = self._resolve(
+                record.recipe, (), {**settings, "label": record.requested_label}
+            )
+        except CustomNormalizerUnset as error:
+            raise ValueError(
+                f"Pipeline run {record.run_id} normalizes assay {error.assay!r} "
+                f"with the custom normalizer {error.method!r}, which a run "
+                "applies only as the assay's normMethod; set that assay's "
+                "normMethod to the same function in this session, as the "
+                "session that started the run did, and resume again"
+            ) from error
         return execute_recipe(
             self._store,
             plan,

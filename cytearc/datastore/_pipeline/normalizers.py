@@ -190,6 +190,20 @@ def _required_class(normalizer: NormMethod) -> type | None:
     return None
 
 
+class CustomNormalizerUnset(ValueError):
+    """A call names a custom normalizer that is not its assay's ``normMethod`` in this session.
+
+    Attributes:
+        assay: The assay whose ``normMethod`` the call needs.
+        method: The recorded identity of the custom normalizer.
+    """
+
+    def __init__(self, message: str, *, assay: str, method: object) -> None:
+        super().__init__(message)
+        self.assay = assay
+        self.method = method
+
+
 def resolve_normalizer(
     store: Any, assay_name: str, method: object
 ) -> tuple[NormMethod, MethodSetting]:
@@ -200,20 +214,23 @@ def resolve_normalizer(
     :func:`method_normalizer` takes it.
 
     Raises:
-        ValueError: If the assay's ``normMethod`` lacks the identity that
-            ``method`` names, the normalizer needs another assay class, or
+        CustomNormalizerUnset: If the assay's ``normMethod`` lacks the
+            identity that ``method`` names.
+        ValueError: If the normalizer needs another assay class, or
             provenance cannot identify the assay's ``normMethod``.
     """
     assay = store._get_assay(assay_name)
     names = sorted(BUILTIN_NORMALIZERS)
     normalizer = method_normalizer(assay, method)
     if normalizer is None:
-        raise ValueError(
+        raise CustomNormalizerUnset(
             f"normalization['method'] is the custom normalizer {method!r}, which "
             "a run applies only as the assay's normMethod, but assay "
             f"{assay_name!r} normalizes with {normalizer_label(assay.normMethod)}; "
             "set the assay's normMethod to that normalizer, or pass "
-            f"normalization={{'method': ...}} with one of {names!r}"
+            f"normalization={{'method': ...}} with one of {names!r}",
+            assay=assay_name,
+            method=method,
         )
     try:
         recorded = normalizer_setting(normalizer)

@@ -25,12 +25,14 @@ import pytest
 import zarr
 
 import cytearc.datastore._pipeline.executor as executor_module
+import cytearc.storage.pipeline_runs as pipeline_run_storage
 from cytearc import (
     CancellationToken,
     DataStore,
     PipelineCancelled,
     PipelineExecutionError,
 )
+from cytearc.assay import norm_lib_size
 from cytearc.datastore._pipeline.recipes.rna import resolve_rna
 from cytearc.datastore.pipeline_accessor import PipelineAccessor, recorded_settings
 from cytearc.storage.artifacts import artifact_group
@@ -43,6 +45,7 @@ from cytearc.storage.pipeline_runs import (
     pipeline_run_path,
     pipeline_stage_path,
 )
+from cytearc.tools.repack_zarr import repack_store
 from tests.test_pipeline_plan import _dispositions
 from tests.storage_helpers import by_cell_id
 
@@ -57,6 +60,7 @@ SETTINGS: dict[str, Any] = {
     "doublets": False,
     "markers": True,
 }
+_SHUTDOWN = {"signalGuardAvailable": True, "unavailableReason": None}
 
 
 def _copy(source: Path | str, folder: Path) -> DataStore:
@@ -108,6 +112,20 @@ def _without_ids(value: Any) -> Any:
     if isinstance(value, list):
         return [_without_ids(item) for item in value]
     return value
+
+
+def _files(store: DataStore) -> dict[str, tuple[int, int]]:
+    """Return the size and modification time of each file of the store, by path.
+
+    A write changes a file's modification time even when it writes the same
+    bytes, so equal snapshots show that nothing was written between them.
+    """
+    root = Path(store.zarr_loc)
+    return {
+        str(path.relative_to(root)): (path.stat().st_size, path.stat().st_mtime_ns)
+        for path in root.rglob("*")
+        if path.is_file()
+    }
 
 
 def _attrs(store: DataStore, run_id: str) -> dict[str, Any]:
@@ -264,7 +282,16 @@ def test_a_resumed_run_completes_as_a_single_call_would(paused, tmp_path) -> Non
 
 def test_resume_pauses_again_after_a_later_run_until(paused, tmp_path) -> None:
     store = _paused_copy(paused, tmp_path)
+    running = _running_stages(store)
+    left = running[running.index("pca") + 1 :]
 
+    # The refusals of a resumed run list the stages that it has left to run.
+    for run_until in ("clustering", "doublets", "pca"):
+        with pytest.raises(ValueError) as refused:
+            store.pipeline.resume(paused.run_id, run_until=run_until)
+        assert str(refused.value).endswith(
+            f"the stages that run {paused.run_id} has left to run are {left!r}"
+        )
     again = store.pipeline.resume(paused.run_id, run_until="neighbors")
 
     assert again.status == "paused"
@@ -274,6 +301,48 @@ def test_resume_pauses_again_after_a_later_run_until(paused, tmp_path) -> None:
     with pytest.raises(ValueError, match="names a stage that run .* has already run"):
         store.pipeline.resume(paused.run_id, run_until="pca")
     assert store.pipeline.resume(paused.run_id).status == "completed"
+
+
+def test_a_replay_stopped_before_the_claim_writes_nothing(
+    paused, tmp_path, monkeypatch
+) -> None:
+    store = _paused_copy(paused, tmp_path)
+
+    class Stop(Exception):
+        pass
+
+    def stop(*args: Any, **kwargs: Any) -> Any:
+        raise Stop("stopped after the replay, before the claim")
+
+    monkeypatch.setattr(executor_module, "resume_pipeline_run_record", stop)
+    before = _files(store)
+
+    with pytest.raises(Stop):
+        store.pipeline.resume(paused.run_id)
+
+    # No file of the store was written, not even with the bytes it held.
+    assert _files(store) == before
+
+
+def test_a_plan_of_a_paused_run_previews_what_its_resume_computes(
+    paused, tmp_path
+) -> None:
+    store = _paused_copy(paused, tmp_path)
+    finished = _stage_names(store, paused.run_id)
+
+    plan = store.pipeline.plan(store.pipeline.open(run_id=paused.run_id))
+    run = store.pipeline.resume(paused.run_id)
+
+    # The finished stages reuse their artifacts; the stages that the resume
+    # ran compute exactly where the plan reported it.
+    assert {plan[stage].status for stage in finished} <= {"reused", "skipped"}
+    resumed = {
+        stage: did for stage, did in _dispositions(run).items() if stage not in finished
+    }
+    assert plan.computed == tuple(
+        stage for stage, did in resumed.items() if did == "computed"
+    )
+    assert plan.computed
 
 
 @pytest.mark.slow
@@ -378,6 +447,91 @@ def test_a_new_process_resumes_the_run_from_the_store_alone(paused, tmp_path) ->
     assert dict(single.items()) == dict(run.items())
 
 
+# Other sessions and machines -------------------------------------------------
+
+
+def log_library_size(assay: Any, counts: Any) -> Any:
+    """A custom normalizer: the log of library-size normalized counts."""
+    return np.log1p(norm_lib_size(assay, counts))
+
+
+@pytest.mark.slow
+def test_a_run_of_a_custom_normalizer_resumes_where_the_session_applies_it(
+    datastore_zarr_root, tmp_path
+) -> None:
+    first = _copy(datastore_zarr_root, tmp_path)
+    first.RNA.normMethod = log_library_size
+    paused = first.pipeline.rna(run_until="pca", **SETTINGS)
+    # Another machine opens the store; its session normalizes as by default.
+    second = DataStore(first.zarr_loc, default_assay="RNA")
+    before = _files(second)
+
+    with pytest.raises(ValueError) as refused:
+        second.pipeline.resume(paused.run_id)
+
+    message = str(refused.value)
+    assert message.startswith(
+        f"Pipeline run {paused.run_id} normalizes assay 'RNA' with the custom "
+        "normalizer"
+    )
+    assert "set that assay's normMethod to the same function in this session" in message
+    # A resume takes no normalization setting, so the error suggests none.
+    assert "normalization=" not in message
+    assert _files(second) == before
+    second.RNA.normMethod = log_library_size
+    assert second.pipeline.resume(paused.run_id).status == "completed"
+
+
+@pytest.mark.slow
+def test_a_run_paused_on_a_small_machine_resumes_with_a_larger_ones_resources(
+    datastore_zarr_root, tmp_path
+) -> None:
+    shutil.copytree(datastore_zarr_root, tmp_path / "small.zarr")
+    small = DataStore(
+        str(tmp_path / "small.zarr"), default_assay="RNA", nthreads=1, mem_budget="1GB"
+    )
+    paused = small.pipeline.rna(label="split", run_until="pca", **SETTINGS)
+    # The store moves to a larger machine while the run is paused.
+    shutil.copytree(tmp_path / "small.zarr", tmp_path / "large.zarr")
+    large = DataStore(
+        str(tmp_path / "large.zarr"), default_assay="RNA", nthreads=4, mem_budget="2GB"
+    )
+
+    run = large.pipeline.resume(paused.run_id)
+
+    assert (run.status, run.label) == ("completed", "split")
+    report = run.report()
+    first, second = (set(segment["stages"]) for segment in report["run"]["segments"])
+    # Each stage record holds the workers and budget of the process that ran it.
+    for record in report["stages"]:
+        resources = record["metrics"]["resources"]
+        machine = small if record["stage"] in first else large
+        assert record["stage"] in first | second
+        assert (resources["workers"], resources["memoryBudgetBytes"]) == (
+            machine.nthreads,
+            machine.memoryBytes,
+        ), record["stage"]
+    assert (small.nthreads, small.memoryBytes) != (large.nthreads, large.memoryBytes)
+    single = large.pipeline.rna(**SETTINGS)
+    assert set(_dispositions(single).values()) <= {"reused", "skipped"}
+    assert dict(single.items()) == dict(run.items())
+
+
+@pytest.mark.slow
+def test_a_paused_run_resumes_in_a_repacked_copy_of_its_store(paused, tmp_path) -> None:
+    store = _paused_copy(paused, tmp_path)
+    repack_store(store.zarr_loc, str(tmp_path / "repacked.zarr"))
+    repacked = DataStore(str(tmp_path / "repacked.zarr"), default_assay="RNA")
+    assert repacked.pipeline.open(run_id=paused.run_id).status == "paused"
+
+    run = repacked.pipeline.resume(paused.run_id)
+
+    assert (run.status, run.label) == ("completed", "split")
+    single = repacked.pipeline.rna(**SETTINGS)
+    assert set(_dispositions(single).values()) <= {"reused", "skipped"}
+    assert dict(single.items()) == dict(run.items())
+
+
 # Refusals --------------------------------------------------------------------
 
 
@@ -413,24 +567,36 @@ def _ended(store: DataStore, status: str) -> str:
 def test_resume_refuses_a_run_that_is_not_paused(status, paused, tmp_path) -> None:
     store = _paused_copy(paused, tmp_path)
     run_id = _ended(store, status)
+    before = _files(store)
 
     with pytest.raises(
-        ValueError, match=rf"is '{status}', and only a paused run resumes; .*rerun"
-    ):
+        ValueError, match=rf"is '{status}', and only a paused run resumes"
+    ) as refused:
         store.pipeline.resume(run_id)
-    assert load_pipeline_run_record(store.zw, run_id).status == status
+    # Another process may run a running run, so a rerun would repeat its work.
+    advice = "ds.pipeline.rerun(run) starts a new run that reuses its finished stages"
+    assert (advice in str(refused.value)) == (status != "running")
+    assert _files(store) == before
 
 
-def test_resume_refuses_a_completed_run_and_an_unknown_one(paused, tmp_path) -> None:
+def test_resume_takes_a_run_and_refuses_a_completed_or_unknown_one(
+    paused, tmp_path
+) -> None:
     store = _paused_copy(paused, tmp_path)
-    store.pipeline.resume(paused.run_id)
+    resumed = store.pipeline.resume(store.pipeline.open(run_id=paused.run_id))
+    assert (resumed.run_id, resumed.status) == (paused.run_id, "completed")
+    before = _files(store)
 
-    with pytest.raises(ValueError, match="is 'completed', and only a paused run"):
+    with pytest.raises(
+        ValueError,
+        match=r"is 'completed', and only a paused run resumes; ds\.pipeline\.open",
+    ):
         store.pipeline.resume(paused.run_id)
     with pytest.raises(KeyError, match="Pipeline run does not exist"):
         store.pipeline.resume("0" * 64)
-    with pytest.raises(TypeError, match="run_id must be a run's ID"):
-        store.pipeline.resume(store.pipeline.open(run_id=paused.run_id))
+    with pytest.raises(TypeError, match="run must be a PipelineRun or a run's ID"):
+        store.pipeline.resume(42)  # type: ignore[arg-type]
+    assert _files(store) == before
 
 
 def _edit_run(store: DataStore, run_id: str, **changes: Any) -> None:
@@ -440,52 +606,53 @@ def _edit_run(store: DataStore, run_id: str, **changes: Any) -> None:
 
 def test_resume_refuses_another_release_and_a_torn_pause(paused, tmp_path) -> None:
     store = _paused_copy(paused, tmp_path)
-    before = _attrs(store, paused.run_id)
+    recorded = _attrs(store, paused.run_id)
 
     _edit_run(store, paused.run_id, cytearcVersion="1.4.0")
+    before = _files(store)
     with pytest.raises(
-        ValueError, match="recorded by CyteArc 1.4.0, so it resumes only"
+        ValueError,
+        match="recorded by CyteArc 1.4.0, so it resumes only with that release, "
+        "not .*; resume it with CyteArc 1.4.0",
     ):
         store.pipeline.resume(paused.run_id)
+    assert _files(store) == before
     _edit_run(
-        store, paused.run_id, cytearcVersion=before["cytearcVersion"], complete=False
+        store, paused.run_id, cytearcVersion=recorded["cytearcVersion"], complete=False
     )
+    before = _files(store)
     # Nothing is replayed: the error says how to reuse the finished stages.
     with pytest.raises(
         ValueError,
         match=r"did not finish writing its pause, so it cannot resume; ds\.pipeline\.rerun",
     ):
         store.pipeline.resume(paused.run_id)
-    _edit_run(store, paused.run_id, complete=True)
-    assert _attrs(store, paused.run_id) == before
+    assert _files(store) == before
 
 
 def test_resume_refuses_a_finished_stage_whose_input_changed_and_writes_nothing(
     paused, tmp_path
 ) -> None:
     store = _paused_copy(paused, tmp_path)
-    before = _attrs(store, paused.run_id)
-    stages = _stage_names(store, paused.run_id)
     # The run's cells change, so its input snapshot would select other cells.
     keep = np.ones(store.cells.N, dtype=bool)
     keep[:5] = False
     store.cells.insert("I", by_cell_id(store.cells, keep), overwrite=True, force=True)
+    before = _files(store)
 
     with pytest.raises(
         ValueError,
-        match="its finished stage 'input_snapshot' would compute again instead of reusing",
+        match="its finished stage 'input_snapshot' would compute again instead of "
+        "reusing .* ds\\.pipeline\\.rerun\\(run\\) starts a new run that computes it",
     ):
         store.pipeline.resume(paused.run_id)
-    assert _attrs(store, paused.run_id) == before
-    assert _stage_names(store, paused.run_id) == stages
-    assert not (Path(store.zarr_loc) / "pipeline/runs/.resume-claims").exists()
+    assert _files(store) == before
 
 
 def test_resume_refuses_a_finished_stage_whose_artifact_is_incomplete(
     paused, tmp_path
 ) -> None:
     store = _paused_copy(paused, tmp_path)
-    before = _attrs(store, paused.run_id)
     (pca,) = (
         record
         for record in load_pipeline_stage_records(store.zw, paused.run_id)
@@ -493,16 +660,18 @@ def test_resume_refuses_a_finished_stage_whose_artifact_is_incomplete(
     )
     # As when the store was copied to this machine while a write was unfinished.
     artifact_group(store.zw, pca.outputs[0].artifact).attrs["complete"] = False
+    before = _files(store)
 
     with pytest.raises(ValueError) as refused:
         store.pipeline.resume(paused.run_id)
-    # The error names the stage, its artifact, and why it would be computed.
+    # The error names the stage, its artifact, why it would be computed, and
+    # what to do instead.
     message = str(refused.value)
     reference = pca.outputs[0].artifact
     assert "its finished stage 'pca' would compute again instead of reusing" in message
     assert f"({reference.kind} {reference.artifact_id[:12]})" in message
-    assert message.endswith("artifact is incomplete")
-    assert _attrs(store, paused.run_id) == before
+    assert "artifact is incomplete. ds.pipeline.rerun(run) starts a new run" in message
+    assert _files(store) == before
 
 
 def test_resume_refuses_a_finished_stage_that_reuses_another_artifact(
@@ -520,13 +689,15 @@ def test_resume_refuses_a_finished_stage_that_reuses_another_artifact(
     recorded = attrs["outputs"][0]["artifact"]["artifact_id"]
     attrs["outputs"][0]["artifact"]["artifact_id"] = "f" * len(recorded)
     group.attrs.put(attrs)
+    before = _files(store)
 
     with pytest.raises(
         ValueError,
-        match=r"its finished stage 'pca' recorded 'pca' as .* but the store now gives",
+        match=r"its finished stage 'pca' recorded 'pca' as .* but the store now "
+        r"gives .*; ds\.pipeline\.rerun\(run\) starts a new run",
     ):
         store.pipeline.resume(paused.run_id)
-    assert load_pipeline_run_record(store.zw, paused.run_id).status == "paused"
+    assert _files(store) == before
 
 
 def test_resume_refuses_a_run_whose_stage_records_differ_from_its_pause(
@@ -541,38 +712,43 @@ def test_resume_refuses_a_run_whose_stage_records_differ_from_its_pause(
         paused.run_id,
         segments=[{**segment, "stages": segment["stages"][:-1]}],
     )
+    before = _files(store)
 
     with pytest.raises(
-        ValueError, match="its stage records no longer match the stages that it ran"
+        ValueError,
+        match="its stage records no longer match the stages that it ran before it "
+        "paused; ds\\.pipeline\\.rerun",
     ):
         store.pipeline.resume(paused.run_id)
-    assert load_pipeline_run_record(store.zw, paused.run_id).status == "paused"
+    assert _files(store) == before
 
 
+@pytest.mark.parametrize("changed", ["settings", "stage_order"])
 def test_resume_refuses_a_run_whose_settings_resolve_to_another_plan(
-    paused, tmp_path
+    paused, tmp_path, changed
 ) -> None:
     store = _paused_copy(paused, tmp_path)
-    config = _attrs(store, paused.run_id)["config"]
-    normalization = dict(config["stages"]["normalization"])
-    assert normalization.pop("method") == "lib_size"
-    # The record no longer names its normalizer, so its settings take the one
-    # that its saved normalized values record, and resolve to other settings.
-    _edit_run(
-        store,
-        paused.run_id,
-        config={
-            **config,
-            "stages": {**config["stages"], "normalization": normalization},
-        },
-    )
-    before = _attrs(store, paused.run_id)
+    attrs = _attrs(store, paused.run_id)
+    if changed == "settings":
+        config = attrs["config"]
+        normalization = dict(config["stages"]["normalization"])
+        assert normalization.pop("method") == "lib_size"
+        # The record no longer names its normalizer, so its settings take the
+        # one that its saved normalized values record, and resolve to others.
+        stages = {**config["stages"], "normalization": normalization}
+        _edit_run(store, paused.run_id, config={**config, "stages": stages})
+    else:
+        # The record holds a stage that the recipe does not run.
+        _edit_run(store, paused.run_id, stageOrder=[*attrs["stageOrder"], "extra"])
+    before = _files(store)
 
     with pytest.raises(
-        ValueError, match="no longer resolve to the stages and settings"
+        ValueError,
+        match="no longer resolve to the stages and settings that it recorded; "
+        "ds\\.pipeline\\.rerun",
     ):
         store.pipeline.resume(paused.run_id)
-    assert _attrs(store, paused.run_id) == before
+    assert _files(store) == before
 
 
 @pytest.mark.parametrize(
@@ -619,11 +795,12 @@ def test_the_replay_refuses_a_plan_that_runs_or_skips_a_finished_stage_otherwise
         )
 
 
-def test_a_second_resume_of_one_pause_is_refused(paused, tmp_path) -> None:
+def test_a_resume_of_a_pause_that_another_resume_claimed_is_refused(
+    paused, tmp_path
+) -> None:
     store = _paused_copy(paused, tmp_path)
-    before = _attrs(store, paused.run_id)
-    # Another process claimed this pause first and has not yet started its
-    # first stage.
+    # Another process claimed this pause and has not recorded its resume: it
+    # is about to, or it stopped in between.
     claim = (
         Path(store.zarr_loc) / "pipeline/runs/.resume-claims" / paused.run_id / "1.json"
     )
@@ -634,47 +811,113 @@ def test_a_second_resume_of_one_pause_is_refused(paused, tmp_path) -> None:
     zarr.open_group(store.zarr_loc, mode="r+")["pipeline/runs"].create_array(
         ".resume-claims", shape=(0,), dtype="uint8"
     )
+    before = _files(store)
 
-    with pytest.raises(RuntimeError, match="already being resumed by another process"):
+    with pytest.raises(
+        RuntimeError,
+        match="is claimed by another resume that has not yet recorded itself: .* if "
+        "it stays paused, ds\\.pipeline\\.rerun\\(run\\) starts a new run",
+    ):
         store.pipeline.resume(paused.run_id)
-    assert _attrs(store, paused.run_id) == before
+    assert _files(store) == before
 
 
 def test_of_two_processes_that_resume_one_run_at_once_one_wins(
     paused, tmp_path, monkeypatch
 ) -> None:
     store = _paused_copy(paused, tmp_path)
-    claim = executor_module.resume_pipeline_run_record
-    barrier = threading.Barrier(2, timeout=60)
+    resume_record = executor_module.resume_pipeline_run_record
+    claim = pipeline_run_storage._claim_pipeline_run_resume
+    replayed = threading.Barrier(2, timeout=60)
+    claimed, tried = threading.Event(), threading.Event()
+    seen: dict[str, Any] = {}
 
-    def together(*args: Any, **kwargs: Any) -> Any:
-        # Both have replayed the finished stages before either claims.
-        barrier.wait()
-        return claim(*args, **kwargs)
+    def staged(*args: Any, **kwargs: Any) -> Any:
+        # Both processes have replayed the finished stages and read the pause
+        # before either claims it.
+        replayed.wait()
+        if threading.current_thread().name == "winner":
+            seen["winner"] = resume_record(*args, **kwargs)
+            return seen["winner"]
+        claimed.wait(timeout=60)
+        before = _files(store)
+        try:
+            return resume_record(*args, **kwargs)
+        finally:
+            seen["untouched"] = _files(store) == before
+            tried.set()
 
-    monkeypatch.setattr(executor_module, "resume_pipeline_run_record", together)
-    outcomes: list[object] = []
+    def claim_first(root: Any, run_id: str, segment: int) -> bool:
+        won = claim(root, run_id, segment)
+        if threading.current_thread().name == "winner":
+            # The loser tries between the winner's claim and its record.
+            claimed.set()
+            tried.wait(timeout=60)
+        return won
+
+    monkeypatch.setattr(executor_module, "resume_pipeline_run_record", staged)
+    monkeypatch.setattr(pipeline_run_storage, "_claim_pipeline_run_resume", claim_first)
+    outcomes: dict[str, object] = {}
 
     def resume() -> None:
+        name = threading.current_thread().name
         resumer = DataStore(store.zarr_loc, default_assay="RNA")
         try:
-            outcomes.append(resumer.pipeline.resume(paused.run_id).status)
+            outcomes[name] = resumer.pipeline.resume(paused.run_id).status
         except RuntimeError as error:
-            outcomes.append(error)
+            outcomes[name] = error
 
-    threads = [threading.Thread(target=resume) for _ in range(2)]
+    threads = [
+        threading.Thread(target=resume, name=name) for name in ("winner", "loser")
+    ]
     for thread in threads:
         thread.start()
     for thread in threads:
         thread.join()
 
-    statuses = [outcome for outcome in outcomes if isinstance(outcome, str)]
-    errors = [outcome for outcome in outcomes if isinstance(outcome, RuntimeError)]
-    assert statuses == ["completed"] and len(errors) == 1
-    assert "already being resumed by another process" in str(errors[0])
-    assert (
-        len(store.pipeline.open(run_id=paused.run_id).report()["run"]["segments"]) == 2
+    assert outcomes["winner"] == "completed"
+    assert isinstance(outcomes["loser"], RuntimeError)
+    assert "is claimed by another resume" in str(outcomes["loser"])
+    # The loser wrote nothing, so the run holds the winner's resume.
+    assert seen["untouched"] is True
+    record = load_pipeline_run_record(store.zw, paused.run_id)
+    assert len(record.segments) == 2
+    assert record.segments[1].started_at_ns == seen["winner"].segments[1].started_at_ns
+
+
+@pytest.mark.parametrize("rival_runs", [False, True], ids=["paused_again", "running"])
+def test_a_resume_refuses_a_run_that_another_process_resumed_before_its_replay(
+    paused, tmp_path, monkeypatch, rival_runs
+) -> None:
+    store = _paused_copy(paused, tmp_path)
+    finished_stages = executor_module._finished_stages
+    seen: dict[str, Any] = {}
+
+    def after_a_rival(*args: Any, **kwargs: Any) -> Any:
+        # Another process resumed the run after this one read its record.
+        monkeypatch.setattr(executor_module, "_finished_stages", finished_stages)
+        rival = DataStore(store.zarr_loc, default_assay="RNA")
+        if rival_runs:
+            # It has claimed the pause and runs its first stage.
+            pipeline_run_storage.resume_pipeline_run_record(
+                rival.zw, run_id=paused.run_id, segment=1, shutdown=_SHUTDOWN
+            )
+        else:
+            rival.pipeline.resume(paused.run_id, run_until="ann_index")
+        seen["before"] = _files(store)
+        return finished_stages(*args, **kwargs)
+
+    monkeypatch.setattr(executor_module, "_finished_stages", after_a_rival)
+
+    with pytest.raises(RuntimeError) as refused:
+        store.pipeline.resume(paused.run_id)
+
+    # The error says what happened, without the advice to rerun the run.
+    assert str(refused.value) == (
+        f"Pipeline run {paused.run_id} was resumed by another process after this "
+        "process read it; open the run again to see its status"
     )
+    assert _files(store) == seen["before"]
 
 
 def test_a_resume_refuses_a_pause_that_another_process_resumed_after_it_read_it(
@@ -695,14 +938,17 @@ def test_a_resume_refuses_a_pause_that_another_process_resumed_after_it_read_it(
         worker = threading.Thread(target=other)
         worker.start()
         worker.join()
+        seen["before"] = _files(store)
         return claim(*args, **kwargs)
 
     monkeypatch.setattr(
         executor_module, "resume_pipeline_run_record", after_another_resume
     )
+    seen: dict[str, Any] = {}
 
     with pytest.raises(RuntimeError, match="was resumed by another process after"):
         store.pipeline.resume(paused.run_id)
+    assert _files(store) == seen["before"]
 
     # The other process's pause stands, and this process recorded no stage.
     record = load_pipeline_run_record(store.zw, paused.run_id)
@@ -717,11 +963,15 @@ def test_a_paused_run_does_not_resume_after_another_run_commits_its_label(
     store = _paused_copy(paused, tmp_path)
     # The paused run reserves nothing, so another run takes its label.
     other = store.pipeline.rna(label="split", **SETTINGS)
-    before = _attrs(store, paused.run_id)
+    before = _files(store)
 
-    with pytest.raises(ValueError, match=f"already committed by run {other.run_id}"):
+    with pytest.raises(
+        ValueError,
+        match=f"already committed by run {other.run_id}; "
+        "ds\\.pipeline\\.rerun\\(run, label=\\.\\.\\.\\) starts a new run under another label",
+    ):
         store.pipeline.resume(paused.run_id)
-    assert _attrs(store, paused.run_id) == before
+    assert _files(store) == before
 
 
 @pytest.mark.slow
