@@ -247,6 +247,23 @@ def rechunk_column(group: zarr.Group, name: str, rows: int = 100_000) -> None:
     )
 
 
+def local_read_buffer(path: str | Path, *, sharded: bool) -> int:
+    """The buffer that a read of the local file ``path`` holds, as Python gives it.
+
+    A read of part of a shard fetches a byte range through ``open``, whose
+    buffer the file's size reports beside that of a file opened with a buffer
+    of two bytes. A whole file, as a chunk of an unsharded array, is read
+    through ``Path.read_bytes``, which opens it so before Python 3.14 and
+    unbuffered from 3.14.
+    """
+    import sys
+
+    if not sharded and sys.version_info >= (3, 14):
+        return 0
+    with open(path, "rb") as file, open(path, "rb", 2) as small:
+        return sys.getsizeof(file) - sys.getsizeof(small) + 2
+
+
 def store_as_variable_width_text(group: zarr.Group, name: str) -> None:
     """Store text column ``name`` of ``group`` again as variable-width text, in its chunks and with its attributes.
 

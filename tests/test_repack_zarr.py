@@ -969,10 +969,13 @@ def test_a_repack_reserves_the_shard_read_of_another_two_dimensional_array(
     # A band of all four rows of a shard fills an 80-byte shard-level copy of
     # them, holds the compressed bytes of the shard's two 40-byte chunks, each
     # at most 40 + 40 // 128 + 1,024 bytes, and decodes one chunk at a time
-    # beside the objects of Zarr's read: 32 KiB, 4 KiB for each of the two
-    # chunks and 16 KiB for the decode.
+    # beside the buffer of the shard's file and the objects of Zarr's read:
+    # 32 KiB, 4 KiB for each of the two chunks and 16 KiB for the decode.
+    from tests.storage_helpers import local_read_buffer
+
+    buffer = local_read_buffer(source / "RNA/embedding/zarr.json", sharded=True)
     assert recorded["embedding"] == (
-        80 + 2 * (40 + 1_024) + 40 + 32_768 + 2 * 4_096 + 16_384
+        80 + 2 * (40 + 1_024) + 40 + buffer + 32_768 + 2 * 4_096 + 16_384
     )
     np.testing.assert_array_equal(
         zarr.open_group(str(output), mode="r")["RNA/embedding"][:], embedding

@@ -316,22 +316,30 @@ def test_mount_rejects_a_budget_below_one_metadata_chunk(default_sources, tmp_pa
     source = str(tmp_path / "source.zarr")
     target = tmp_path / "target.zarr"
     _copy_source(default_sources, source)
-    # One chunk of ten 64-character IDs, 2,560 bytes, needs 72,212 to copy:
-    # its read, the chunk decoded and the bound of its compressed bytes,
+    # One chunk of ten 64-character IDs, 2,560 bytes, needs 72,212 to copy,
+    # and the buffer of its file where Python reads it through one: its read,
+    # the chunk decoded and the bound of its compressed bytes,
     # 2,560 + 20 + 1,024, the objects of Zarr's read of one chunk, 32 KiB,
     # 4 KiB for the chunk and 16 KiB for its decode, two staged copies and
     # the copy's two chunks of ten rows, one byte more than the budget.
+    from tests.storage_helpers import local_read_buffer
+
     barcodes = np.array([f"{index:064d}" for index in range(10)])
     zarr.open_group(source, mode="r+")["cellData"].create_array(
         "barcode", data=barcodes, chunks=(len(barcodes),)
     )
+    needed = 72_212 + local_read_buffer(f"{source}/zarr.json", sharded=False)
 
     with pytest.raises(
         MemoryError,
-        match="metadata column 'barcode' needs 72212 bytes.* Increase mem_budget",
+        match=f"metadata column 'barcode' needs {needed} bytes.* Increase mem_budget",
     ):
         mount_datastore(
-            source, str(target), min_features_per_cell=1, nthreads=4, mem_budget=72_211
+            source,
+            str(target),
+            min_features_per_cell=1,
+            nthreads=4,
+            mem_budget=needed - 1,
         )
     assert not target.exists()
 
