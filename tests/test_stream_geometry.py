@@ -591,9 +591,9 @@ def test_row_reads_by_index_arrays_charge_their_indexers_and_copies() -> None:
         12,
     )
     # Both also hold NumPy's buffers of 8,192 elements of the two index
-    # arrays, 8 bytes each, and of the 4-byte values.
+    # arrays, 8 bytes each.
     assert row_read_parts(unsharded, three, rows_contiguous=False) == (
-        stored + objects + 3 * 40 + 8_192 * 20,
+        stored + objects + 3 * 40 + 8_192 * 16,
         40 + 12,
     )
 

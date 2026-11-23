@@ -77,9 +77,10 @@ _INDEX_BYTES = 40
 _SHARD_INDEX_BYTES = 64
 #: NumPy indexes a chunk by two index arrays at once, as Zarr indexes an
 #: unsharded chunk whose rows and columns are both index arrays, through a
-#: buffer of up to 8,192 elements of each array, 8 bytes each, and of the
-#: values: 133 KB to take the values from a chunk and 165 KB to place 4-byte
-#: values, on NumPy 2.1 and 2.5.
+#: buffer of up to 8,192 elements of each array, 8 bytes each. Zarr takes
+#: the values from a contiguous chunk and places a contiguous copy, which
+#: NumPy does not buffer: taking and placing values of 2, 4 and 8 bytes each
+#: held 133 to 135 KB on NumPy 2.1 and 2.5, the rest within a read's objects.
 _INDEX_BUFFER_ELEMENTS = 8192
 
 #: Python's ``open`` buffers a binary file at its file system's block size,
@@ -455,18 +456,17 @@ class ArrayGeometry:
 
         Zarr copies the values that a read takes from a decoded chunk by
         index arrays on ``indexedAxes`` of its axes before it places them,
-        while a read of slices places a view of the chunk. With index arrays
-        on two axes, NumPy also buffers up to 8,192 elements of each array
-        and of the values, charged whole so that the charge of fewer rows is
-        no less than its share of the charge of more.
+        while a read of slices places a view of the chunk. Every row counts,
+        even beyond a chunk's rows, so that the charge of a block shrunk to
+        fewer rows is no less than its share of the charge of more. With
+        index arrays on two axes, NumPy also buffers up to 8,192 elements of
+        each array, charged whole for the same reason.
         """
         if indexedAxes <= 0:
             return 0
         held = max(0, int(rows)) * max(0, int(columns)) * self.itemsize
         if indexedAxes > 1:
-            held += _INDEX_BUFFER_ELEMENTS * (
-                2 * np.dtype(np.intp).itemsize + self.itemsize
-            )
+            held += _INDEX_BUFFER_ELEMENTS * 2 * np.dtype(np.intp).itemsize
         return held
 
     def readBytes(

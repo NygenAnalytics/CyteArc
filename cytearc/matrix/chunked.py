@@ -206,7 +206,7 @@ class ChunkedArray:
     def _geometry(self) -> ArrayGeometry | None:
         return array_geometry(self._backing)
 
-    def _read_bytes(self, input_bytes: int, *, rows_indexed: bool | None = None) -> int:
+    def _read_bytes(self, input_bytes: int, *, rows_indexed: bool = False) -> int:
         """Bytes the Zarr read of a row block with ``input_bytes`` holds.
 
         Row-block streams run Zarr with one decode at a time, and a block's
@@ -218,9 +218,9 @@ class ChunkedArray:
         the block, as a block of one chunk's rows takes them, by the most
         columns it takes from one chunk. ``rows_indexed`` charges a read that
         takes its rows by an index array, as a read of some of this matrix's
-        rows does, or by one run; by default the rows are taken as this
-        matrix selects them. A block whose rows and columns are both index
-        arrays is read in bands instead; see ``_indexed_read_parts``.
+        rows does, whatever rows this matrix selects. A block whose rows and
+        columns are both index arrays is read in bands instead; see
+        ``_indexed_read_parts``.
         """
         if not self._is_numpy:
             reader = virtual_array_reader(cast(zarr.Array, self._backing))
@@ -248,25 +248,26 @@ class ChunkedArray:
             )
             taken_columns = int(in_chunk.max(initial=0))
             columns_indexed = not is_contiguous(self._cols)
-        if rows_indexed is None:
-            rows_indexed = self._rows is not None and not is_contiguous(self._rows)
+        rows_indexed = rows_indexed or (
+            self._rows is not None and not is_contiguous(self._rows)
+        )
         parts = self._indexed_read_parts(geometry) if rows_indexed else None
         # A block read in one Zarr request takes its rows by an index array
         # unless it is read in bands, which leaves that request only blocks
         # whose rows form one run.
-        indexed_rows = rows_indexed and parts is None
+        request_indexes_rows = rows_indexed and parts is None
         rows = -(-input_bytes // max(1, self._n_cols * geometry.itemsize))
         read_bytes = geometry.readBytes(
             input_bytes,
             row_chunks * column_chunks,
             decodes=1,
             gapBytes=gap,
-            indexes=(rows if indexed_rows else 0)
+            indexes=(rows if request_indexes_rows else 0)
             + (self._n_cols if columns_indexed else 0),
             takenBytes=geometry.takenChunkBytes(
                 rows,
                 taken_columns,
-                indexedAxes=int(indexed_rows) + int(columns_indexed),
+                indexedAxes=int(request_indexes_rows) + int(columns_indexed),
             ),
         )
         if parts is None:

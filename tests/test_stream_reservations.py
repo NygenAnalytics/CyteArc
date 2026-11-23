@@ -589,11 +589,15 @@ def test_read_bytes_charge_the_indexers_and_copies_of_reads_by_index_arrays() ->
     # A read of slices places views of its chunks. One index array copies
     # the values it takes from a chunk, here 7 rows of 3 two-byte values;
     # two also hold NumPy's buffers of 8,192 elements of each array, 8 bytes
-    # each, and of the values.
+    # each.
     assert sharded.takenChunkBytes(7, 3, indexedAxes=0) == 0
     assert sharded.takenChunkBytes(7, 3, indexedAxes=1) == 42
-    assert unsharded.takenChunkBytes(7, 3, indexedAxes=2) == 42 + 8_192 * (8 + 8 + 2)
-    assert unsharded.takenChunkBytes(0, 3, indexedAxes=2) == 8_192 * 18
+    assert unsharded.takenChunkBytes(7, 3, indexedAxes=2) == 42 + 8_192 * (8 + 8)
+    assert unsharded.takenChunkBytes(0, 3, indexedAxes=2) == 8_192 * 16
+    # Every row of a block counts, beyond a chunk's 10 rows, so that a stream
+    # that shrinks its blocks to a budget keeps each block's share of the
+    # charge no less than its copy.
+    assert sharded.takenChunkBytes(25, 3, indexedAxes=1) == 25 * 3 * 2
     # The indexers are held once, and so is the copy: CyteArc's pipelines
     # copy each decoded chunk's values on the read's event loop, a chunk at a
     # time, however many chunks they decode at once.
@@ -704,7 +708,7 @@ def test_a_read_of_selected_cells_holds_no_more_than_its_charge(
     # sharded read and 40 in an unsharded one, and its copy of what it takes
     # from each chunk: 2,000 cells of 128 features, or of the 64 selected
     # features of a chunk. Two index arrays on an unsharded read also hold
-    # NumPy's buffers of 8,192 elements of each array and of the values.
+    # NumPy's buffers of 8,192 elements of each array.
     charge = block._read_bytes(read.nbytes)
     assert peak <= charge
     run = matrix[:2_000, :] if selected == "rows" else matrix[:2_000, 64:192]
@@ -715,7 +719,7 @@ def test_a_read_of_selected_cells_holds_no_more_than_its_charge(
         assert charge >= run._read_bytes(read.nbytes) + 128 * 64 + copy
         return
     indexes = {"rows": 2_000, "columns": 128, "both": 2_128}[selected]
-    buffers = 8_192 * (8 + 8 + 4) if selected == "both" else 0
+    buffers = 8_192 * (8 + 8) if selected == "both" else 0
     assert charge - run._read_bytes(read.nbytes) == (
         indexes * (64 if sharded else 40) + copy + buffers
     )

@@ -332,9 +332,8 @@ def row_read_parts(
     # A sharded block whose rows and columns are both index arrays is read in
     # bands, below, which leaves the one Zarr request blocks whose rows form
     # one run.
-    rows_indexed = not rows_contiguous and not (
-        column_gather and geometry.shards is not None
-    )
+    banded = not rows_contiguous and column_gather and geometry.shards is not None
+    rows_indexed = not rows_contiguous and not banded
 
     def read(rows: int) -> int:
         """What a read of ``rows`` rows holds beside the rows it returns."""
@@ -364,9 +363,9 @@ def row_read_parts(
 
     fixed = read(0)
     per_row = read(1) - fixed
-    if not rows_contiguous and column_gather and geometry.shards is not None:
-        # Sharded blocks that index both axes are read in bands. A block whose
-        # rows form one run is read by Zarr in one request, so both are covered.
+    if banded:
+        # A block whose rows form one run is read by Zarr in one request, so
+        # both are covered.
         band_fixed, band_per_row = indexed_read_parts(
             geometry,
             columns,

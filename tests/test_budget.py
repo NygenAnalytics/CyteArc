@@ -464,15 +464,19 @@ def test_plans_read_the_hosts_cgroup_and_memory_files_without_a_buffer(
 
 def test_system_files_are_read_whole_and_decoded_as_file_names(tmp_path):
     import os
+    import sys
 
     quota = tmp_path / "cpu.max"
     quota.write_bytes(b"150000 100000\n")
     assert budget_module._read_text(str(quota)) == "150000 100000\n"
     # A cgroup whose name is not UTF-8 keeps its bytes, so its files open.
+    # Windows decodes file names as UTF-8 that must be valid, and has no
+    # cgroups, so it reads a name in UTF-8 instead.
+    name = "café".encode() if sys.platform == "win32" else b"caf\xe9"
     named = tmp_path / "cgroup"
-    named.write_bytes(b"0::/caf\xe9/job\n")
+    named.write_bytes(b"0::/" + name + b"/job\n")
     entry = budget_module._read_text(str(named))
-    assert os.fsencode(entry) == b"0::/caf\xe9/job\n"
+    assert os.fsencode(entry) == b"0::/" + name + b"/job\n"
     with pytest.raises(OSError):
         budget_module._read_text(str(tmp_path / "missing"))
 
