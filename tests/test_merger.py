@@ -7940,7 +7940,10 @@ def test_merged_counts_match_the_sparse_band_write_byte_for_byte(
     # The RNA counts are written first; antibody bands hold every row. A
     # refused dense write searches its windows before the sparse write does.
     # A batch takes about 37 / 66 of its cells from the larger source.
-    part_rows, rows = held_rows[("dense" in refused) if scenario == "missing" else -1]
+    if scenario != "missing":
+        part_rows, rows = held_rows[-1]
+    else:
+        part_rows, rows = held_rows[1 if "dense" in refused else 0]
     batch_rows = batches[0 if scenario == "missing" else -1]
     assert batch_rows < 8 if shard_rows == "narrow" else batch_rows >= 16
     assert part_rows == -(-batch_rows * 37 // 66)
