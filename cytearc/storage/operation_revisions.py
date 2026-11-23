@@ -270,6 +270,18 @@ _OPERATION_REVISIONS: dict[str, tuple[OperationRevision, ...]] = {
             ),
             applies=None,
         ),
+        OperationRevision(
+            revision=3,
+            release="1.5.0",
+            change=(
+                "A sample of 50,000 points or more is indexed in 4 parts, built "
+                "at once on the workers and searched to a shared depth, and the "
+                "automatic threshold takes Otsu's threshold when fewer than 5% "
+                "of a sample's simulated doublets lie on either side of the "
+                "histogram minimum"
+            ),
+            applies=None,
+        ),
     ),
     "run_harmony": (_HARMONY2,),
     "run_marker_search": (

@@ -1,4 +1,5 @@
 import threading
+import tracemalloc
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,6 +14,7 @@ from cytearc.mapping.features import AlignedFeatureStream, reference_normalizati
 from cytearc.mapping.models import ScaledPCAProjectionModel
 from cytearc.mapping.symphony import project_pca
 from cytearc.matrix import ChunkedArray
+from cytearc.neighbors.index import ann_index_peak_bytes
 from cytearc.quality_control import doublets
 from cytearc.storage.artifacts import artifact_group, callable_identity
 from cytearc.storage.budget import ResourceBudget
@@ -22,7 +24,7 @@ from .doublet_fixtures import write_doublet_target_zarr
 
 # An index this deep finds the exact neighbors of the few points of a test.
 _EXACT_INDEX = doublets.DoubletIndexSettings(
-    metric="l2", m=16, ef_construction=200, ef=200, parallel=False
+    metric="l2", m=16, ef_construction=200, ef=200
 )
 
 
@@ -909,7 +911,13 @@ class _RecordedQueries:
         return self._index.knn_query(values, k=k)
 
 
-def test_a_sample_charge_holds_its_index_and_a_bounded_query_block(monkeypatch):
+@pytest.mark.parametrize("split_points", [10_000, 1_000], ids=["one-part", "parts"])
+def test_a_sample_charge_holds_its_index_and_a_bounded_query_block(
+    monkeypatch, split_points
+):
+    # The 6,000 points form one index, or 4 once samples of 1,000 split.
+    monkeypatch.setattr(doublets, "_INDEX_SPLIT_POINTS", split_points)
+    parts = len(doublets._index_parts(6_000))
     plan = doublets.DoubletSamplePlan(
         cells=2_000, simulated=4_000, neighbors=10, adjusted_neighbors=30
     )
@@ -921,7 +929,7 @@ def test_a_sample_charge_holds_its_index_and_a_bounded_query_block(monkeypatch):
         "instantiate_knn_index",
         lambda *args: _RecordedQueries(instantiate(*args), queried),
     )
-    settings = doublets.DoubletIndexSettings("l2", 16, 50, 50, False)
+    settings = doublets.DoubletIndexSettings("l2", 16, 50, 50)
     charge = doublets._sample_charge(plan, 3, settings, 2)
     # The scoring holds the cells' int64 positions beside the charge's other
     # parts, and the call's own resident bytes beside them.
@@ -940,8 +948,227 @@ def test_a_sample_charge_holds_its_index_and_a_bounded_query_block(monkeypatch):
         )
 
     counts = count(1_000 + charge)
-    assert queried == [4_096, 6_000 - 4_096]
+    # Each block of points queries every part.
+    assert queried == [4_096] * parts + [6_000 - 4_096] * parts
     # A byte less holds a block of one point fewer.
     queried.clear()
     np.testing.assert_array_equal(count(1_000 + charge - 1), counts)
-    assert queried == [4_095, 6_000 - 4_095]
+    assert queried == [4_095] * parts + [6_000 - 4_095] * parts
+
+
+def test_index_parts_follow_the_sample_size_alone():
+    assert doublets._index_parts(49_999) == [(0, 49_999)]
+    assert doublets._index_parts(50_000) == [
+        (0, 12_500),
+        (12_500, 25_000),
+        (25_000, 37_500),
+        (37_500, 50_000),
+    ]
+    # Parts of a size that 4 does not divide differ by at most one point.
+    assert doublets._index_parts(50_003) == [
+        (0, 12_500),
+        (12_500, 25_001),
+        (25_001, 37_502),
+        (37_502, 50_003),
+    ]
+
+
+def test_neighbor_keys_order_candidates_by_distance_and_then_position():
+    rng = np.random.default_rng(8)
+    # Ties, zeros of both signs, the small negative distances that hnswlib's
+    # cosine space gives points of one direction, and large distances.
+    special = np.array([0.0, -0.0, -1e-7, -2.5e-8, 1e-7, 0.5, 2.0, 3e38], np.float32)
+    for _ in range(50):
+        distances = np.where(
+            rng.random(64) < 0.5,
+            rng.choice(special, 64),
+            rng.normal(size=64).astype(np.float32),
+        ).astype(np.float32)
+        positions = rng.permutation(10_000)[:64].astype(np.uint64)
+
+        keys = doublets._neighbor_keys(positions, distances)
+
+        expected = np.lexsort((positions, distances.astype(np.float64)))
+        np.testing.assert_array_equal(
+            positions[np.argsort(keys, kind="stable")], positions[expected]
+        )
+        np.testing.assert_array_equal(keys & np.uint64(0xFFFF_FFFF), positions)
+
+
+def test_count_simulated_neighbors_takes_tied_neighbors_in_position_order(
+    monkeypatch,
+):
+    # Points on a small integer grid, so float32 distances are exact and tie
+    # often, in 4 parts of 12 points, each of which a query returns whole.
+    monkeypatch.setattr(doublets, "_INDEX_SPLIT_POINTS", 10)
+    rng = np.random.default_rng(12)
+    points = rng.integers(0, 3, size=(48, 3)).astype(np.float32)
+    k = 11
+    settings = doublets.DoubletIndexSettings("l2", 16, 100, 50)
+
+    counts = doublets.count_simulated_neighbors(
+        points,
+        20,
+        k,
+        settings,
+        random_seed=0,
+        workers=2,
+        resources=ResourceBudget(64 * 1024**2, 2),
+    )
+
+    distances = ((points[:, None, :] - points[None, :, :]) ** 2).sum(axis=2)
+    np.fill_diagonal(distances, np.inf)
+    positions = np.broadcast_to(np.arange(len(points)), distances.shape)
+    nearest = np.lexsort((positions, distances), axis=-1)[:, :k]
+    # Ties at the k-th distance are many, so the order among them decides.
+    kth = np.take_along_axis(distances, nearest[:, -1:], axis=1)
+    assert np.count_nonzero(np.count_nonzero(distances == kth, axis=1) > 1) > 20
+    np.testing.assert_array_equal(counts, np.count_nonzero(nearest >= 20, axis=1))
+
+
+class _MeetingIndex:
+    """An hnswlib index whose build waits for another part's build to start."""
+
+    def __init__(self, index, meeting: threading.Barrier) -> None:
+        self._index = index
+        self._meeting = meeting
+
+    def add_items(self, *args, **kwargs):
+        self._meeting.wait()
+        return self._index.add_items(*args, **kwargs)
+
+    def set_num_threads(self, threads):
+        return self._index.set_num_threads(threads)
+
+    def knn_query(self, values, k):
+        return self._index.knn_query(values, k=k)
+
+
+def test_the_parts_of_an_index_are_built_at_once_on_one_thread_each(monkeypatch):
+    monkeypatch.setattr(doublets, "_INDEX_SPLIT_POINTS", 100)
+    rng = np.random.default_rng(13)
+    points = rng.normal(size=(1_001, 5)).astype(np.float32)
+    created: list[tuple] = []
+    instantiate = doublets.instantiate_knn_index
+    # Each part's build waits for another's, which only builds at once pass.
+    meeting = threading.Barrier(2, timeout=30)
+
+    def meeting_index(*args):
+        created.append(args)
+        return _MeetingIndex(instantiate(*args), meeting)
+
+    monkeypatch.setattr(doublets, "instantiate_knn_index", meeting_index)
+    settings = doublets.DoubletIndexSettings("l2", 16, 100, 200)
+
+    doublets.count_simulated_neighbors(
+        points,
+        300,
+        30,
+        settings,
+        random_seed=41,
+        workers=2,
+        resources=ResourceBudget(256 * 1024**2, 2),
+    )
+
+    # Four parts of consecutive points, each with its own seed, the depth
+    # that the parts share, ceil(200 / 4) = 50, and one build thread.
+    assert [args[2] for args in created] == [250, 250, 250, 251]
+    assert [args[5] for args in created] == [41, 42, 43, 44]
+    assert {args[6] for args in created} == {50}
+    assert {args[7] for args in created} == {1}
+
+
+def test_the_shared_depth_of_the_parts_returns_at_least_their_neighbors():
+    # ef 200 over 4 parts is 50 each, more than the 31 candidates that 30
+    # neighbors and the point itself need; 90 neighbors need 91, which wins.
+    # One part keeps the graph's ef, at least the candidates it returns.
+    assert doublets._part_depth(200, 30, 4) == 50
+    assert doublets._part_depth(200, 90, 4) == 91
+    assert doublets._part_depth(201, 30, 4) == 51
+    assert doublets._part_depth(200, 90, 1) == 200
+    assert doublets._part_depth(50, 90, 1) == 91
+
+
+@pytest.mark.slow
+def test_parts_find_the_exact_neighbors_of_nearly_every_point(monkeypatch):
+    # 6,000 points of 8 clusters, split into 4 parts of 1,500, each searched
+    # to the depth that the parts share, 50 of the graph's 200.
+    monkeypatch.setattr(doublets, "_INDEX_SPLIT_POINTS", 1_000)
+    rng = np.random.default_rng(14)
+    centres = rng.normal(scale=4.0, size=(8, 6))
+    observed = centres[rng.integers(0, 8, 2_000)] + rng.normal(size=(2_000, 6))
+    simulated = (
+        observed[rng.integers(0, 2_000, 4_000)]
+        + observed[rng.integers(0, 2_000, 4_000)]
+    ) / 2
+    points = np.vstack([observed, simulated]).astype(np.float32)
+    settings = doublets.DoubletIndexSettings("l2", 24, 200, 200)
+
+    counts = [
+        doublets.count_simulated_neighbors(
+            points,
+            2_000,
+            30,
+            settings,
+            random_seed=4444,
+            workers=workers,
+            resources=ResourceBudget(512 * 1024**2, workers),
+        )
+        for workers in (1, 4, 8)
+    ]
+
+    low, high = _exact_simulated_neighbors(points, 2_000, 30)
+    _assert_within(counts[0], (low, high))
+    assert np.mean(low == high) > 0.99
+    for other in counts[1:]:
+        np.testing.assert_array_equal(other, counts[0])
+
+
+@pytest.mark.parametrize("split_points", [10_000, 1_000], ids=["one-part", "parts"])
+def test_a_query_block_charges_at_least_the_arrays_that_its_merge_holds(
+    monkeypatch, split_points
+):
+    # 4,000 points in one index, or in 4 parts once samples of 1,000 split,
+    # queried in one block, whose NumPy arrays tracemalloc counts. hnswlib's
+    # own memory, which the charge also holds, is not counted.
+    monkeypatch.setattr(doublets, "_INDEX_SPLIT_POINTS", split_points)
+    points = np.random.default_rng(15).normal(size=(4_000, 5)).astype(np.float32)
+    settings = doublets.DoubletIndexSettings("l2", 16, 100, 100)
+    _index_bytes, block_bytes = doublets._neighbor_count_bytes(
+        4_000, 5, 30, settings, 2
+    )
+
+    tracemalloc.start()
+    try:
+        before = tracemalloc.get_traced_memory()[0]
+        tracemalloc.reset_peak()
+        doublets.count_simulated_neighbors(
+            points,
+            1_000,
+            30,
+            settings,
+            random_seed=0,
+            workers=2,
+            resources=ResourceBudget(1024**3, 2),
+        )
+        peak = tracemalloc.get_traced_memory()[1] - before
+    finally:
+        tracemalloc.stop()
+
+    # The counts, 8 bytes a point, are charged beside the query block.
+    assert 0 < peak - 8 * 4_000 <= block_bytes(4_000)
+
+
+def test_the_parts_of_an_index_are_charged_at_least_one_index_of_every_point(
+    monkeypatch,
+):
+    # The parts' indexes hold every point between them, each with its own
+    # links, so they hold at least what one index of the sample would.
+    monkeypatch.setattr(doublets, "_INDEX_SPLIT_POINTS", 1_000)
+    settings = doublets.DoubletIndexSettings("l2", 16, 100, 100)
+    for n_points in (999, 6_001):
+        parts, _block_bytes = doublets._neighbor_count_bytes(
+            n_points, 5, 30, settings, 3
+        )
+        whole = ann_index_peak_bytes(n_points, 5, 16, nthreads=3)
+        assert whole <= parts <= whole + len(doublets._index_parts(n_points))

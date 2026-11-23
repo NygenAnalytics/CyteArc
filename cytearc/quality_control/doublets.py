@@ -34,7 +34,6 @@ from ..neighbors.diffusion import transition_matrix
 from ..neighbors.index import (
     ann_index_peak_bytes,
     ann_query_block_bytes,
-    fix_knn_query,
     instantiate_knn_index,
 )
 from ..storage.artifacts import artifact_group
@@ -81,9 +80,23 @@ __all__ = [
 # the minimum method smooths one at most this many times.
 THRESHOLD_BINS = 256
 THRESHOLD_SMOOTHING_STEPS = 10_000
+# The minimum between the two modes of a sample's simulated scores must leave
+# at least this share of them on each side, or Otsu's threshold is taken: a
+# minimum that leaves fewer cuts a few outlying doublets from the rest.
+THRESHOLD_SIDE_SHARE = 0.05
 # A sample scored beside others queries its index for at most this many points
 # at once, so that its query block stays small beside its index.
 _SAMPLE_QUERY_ROWS = 4_096
+# A sample of at least this many points, its cells and simulated doublets, is
+# indexed in _INDEX_PARTS parts of consecutive points, built at once on one
+# thread each. The parts depend on the sample alone, so its neighbors are the
+# same for any number of workers.
+_INDEX_SPLIT_POINTS = 50_000
+_INDEX_PARTS = 4
+# A neighbor candidate's key holds its distance's order-preserving bits above
+# its position's 32 bits; a point's own key sorts after every other.
+_POSITION_BITS = np.uint64(0xFFFF_FFFF)
+_OWN_KEY = np.uint64(np.iinfo(np.uint64).max)
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,16 +217,14 @@ class DoubletIndexSettings:
         m: The HNSW ``M``; at least two.
         ef_construction: The search depth that builds the index.
         ef: The least search depth of a query; a query searches at least as
-            deep as the neighbors it returns.
-        parallel: Whether the index is built on several threads, which is
-            faster but does not give the same index on every run.
+            deep as the neighbors it returns, and the parts of a sample's
+            index share it (:func:`count_simulated_neighbors`).
     """
 
     metric: str
     m: int
     ef_construction: int
     ef: int
-    parallel: bool
 
     def __post_init__(self) -> None:
         if self.metric not in {"l2", "cosine"}:
@@ -221,8 +232,6 @@ class DoubletIndexSettings:
         integer_argument(self.m, "m", minimum=2)
         integer_argument(self.ef_construction, "ef_construction", minimum=1)
         integer_argument(self.ef, "ef", minimum=1)
-        if not isinstance(self.parallel, bool):
-            raise TypeError("parallel must be a boolean")
 
 
 @dataclass(frozen=True, slots=True)
@@ -612,17 +621,25 @@ def doublet_threshold(simulated_scores: NDArray[np.floating]) -> tuple[float, st
 
     Simulated doublets of two cells of one type score low and those of two
     types score high, so their scores are bimodal. The threshold is the
-    minimum between the two modes (:func:`histogram_minimum_threshold`), or
-    Otsu's threshold (:func:`otsu_threshold`) when the histogram does not
-    become bimodal.
+    minimum between the two modes (:func:`histogram_minimum_threshold`) when
+    at least ``THRESHOLD_SIDE_SHARE`` of the simulated doublets lie above it
+    and as many at or below it, and Otsu's threshold (:func:`otsu_threshold`)
+    otherwise, as when the histogram does not become bimodal. One or two
+    doublets that score far above the rest can keep a maximum of their own
+    after the dip between the modes has smoothed away, and the minimum then
+    lies above every other doublet; the share sends such a sample to Otsu's
+    threshold.
 
     Returns:
         The threshold and the method that chose it: ``"minimum"`` or ``"otsu"``.
     """
-    threshold = histogram_minimum_threshold(simulated_scores)
+    scores = _finite_values(simulated_scores)
+    threshold = histogram_minimum_threshold(scores)
     if threshold is not None:
-        return threshold, "minimum"
-    return otsu_threshold(simulated_scores), "otsu"
+        above = np.count_nonzero(scores > threshold) / scores.size
+        if min(above, 1 - above) >= THRESHOLD_SIDE_SHARE:
+            return threshold, "minimum"
+    return otsu_threshold(scores), "otsu"
 
 
 class _ScoringRoom:
@@ -788,6 +805,41 @@ def _pair_row_bytes(pool: csr_matrix) -> int:
     return int(6 * (2 * largest * (max(8, pool.dtype.itemsize) + 8) + 16))
 
 
+def _index_parts(n_points: int) -> list[tuple[int, int]]:
+    """Return the first and last-plus-one positions of each part of a sample's index.
+
+    A sample of ``_INDEX_SPLIT_POINTS`` points or more is split into
+    ``_INDEX_PARTS`` parts of consecutive points, whose sizes differ by at
+    most one; a smaller sample is one part.
+    """
+    parts = _INDEX_PARTS if n_points >= _INDEX_SPLIT_POINTS else 1
+    edges = [part * n_points // parts for part in range(parts + 1)]
+    return list(zip(edges[:-1], edges[1:], strict=True))
+
+
+def _part_depth(ef: int, k: int, parts: int) -> int:
+    """Return the search depth of each part: ``ef`` shared among the parts,
+    and at least the ``k + 1`` neighbors that each returns."""
+    return max(k + 1, -(-ef // parts))
+
+
+def _neighbor_keys(
+    labels: NDArray[np.uint64], distances: NDArray[np.floating]
+) -> NDArray[np.uint64]:
+    """Return keys that order neighbor candidates by distance and then by position.
+
+    A float32 distance's bits order as its value once a negative distance,
+    which hnswlib's cosine space can give points of one direction, has every
+    bit flipped and any other its sign bit set; -0.0 counts as 0.0. The
+    positions fill the low 32 bits.
+    """
+    bits = (np.asarray(distances, dtype=np.float32) + np.float32(0.0)).view(np.uint32)
+    ordered = np.where(bits >> np.uint32(31), ~bits, bits | np.uint32(0x8000_0000))
+    return (ordered.astype(np.uint64) << np.uint64(32)) | np.asarray(
+        labels, dtype=np.uint64
+    )
+
+
 def _neighbor_count_bytes(
     n_points: int,
     dims: int,
@@ -795,16 +847,19 @@ def _neighbor_count_bytes(
     settings: DoubletIndexSettings,
     threads: int,
 ) -> tuple[int, Callable[[int], int]]:
-    """Return the bytes of one sample's index and those of a query block of
+    """Return the bytes of one sample's indexes and those of a query block of
     a given number of points, which ``threads`` threads build and query."""
-    build_threads = threads if settings.parallel else 1
-    ef = max(settings.ef, k + 1)
-    index_bytes = ann_index_peak_bytes(
-        n_points, dims, settings.m, nthreads=max(build_threads, threads)
+    parts = _index_parts(n_points)
+    ef = _part_depth(settings.ef, k, len(parts))
+    index_bytes = sum(
+        ann_index_peak_bytes(stop - start, dims, settings.m, nthreads=threads)
+        for start, stop in parts
     )
-    # Beside hnswlib's own query memory, each query row holds its labels and
-    # distances, their copies without the point itself, and a doublet mask.
-    own_row_bytes = 2 * 12 * (k + 1) + (k + 1)
+    # Beside the memory of one part's query, each query row holds the keys of
+    # every part's candidates and their partition, the keying temporaries of
+    # one part's candidates, and its nearest positions with a doublet mask.
+    width = sum(min(k + 1, stop - start) for start, stop in parts)
+    own_row_bytes = 16 * width + 33 * (k + 1) + 9 * k
 
     def block_bytes(rows: int) -> int:
         return (
@@ -878,19 +933,32 @@ def count_simulated_neighbors(
     """Count the simulated doublets among each point's nearest neighbors.
 
     ``points`` holds one sample's observed cells, its first ``n_observed``
-    rows, and then its simulated doublets. An hnswlib index over all of them
-    is queried for each point's ``adjusted_neighbors`` nearest other points.
-    The index is built on one thread unless ``settings.parallel`` is set, so
-    the counts are the same on every run; queries use ``workers`` threads, in
-    blocks of as many points as the budget holds.
+    rows, and then its simulated doublets. Each point's
+    ``adjusted_neighbors`` nearest other points are found with hnswlib
+    indexes of the points: one index, or for a sample of
+    ``_INDEX_SPLIT_POINTS`` points or more, one index for each of
+    ``_INDEX_PARTS`` parts of consecutive points, built at once on
+    ``workers`` threads. Each index is built on one thread, with seed
+    ``random_seed`` plus its part's number, and searched for every point on
+    ``workers`` threads to the depth that the parts share, ``settings.ef``
+    divided among them, at least the ``adjusted_neighbors + 1`` candidates
+    that each returns. Each point keeps its nearest candidates, by distance
+    and then by position, other than itself. The parts depend on the sample
+    alone, so the counts are the same on every run and for any number of
+    workers. Queries run in blocks of as many points as the budget holds.
 
     Raises:
-        MemoryError: If the index and one query block exceed the memory budget.
+        ValueError: If the points hold fewer than two rows or 2**32 or more,
+            no simulated doublet, or ``adjusted_neighbors`` of them or fewer.
+        MemoryError: If the indexes and one query block exceed the memory
+            budget.
     """
     values = np.ascontiguousarray(points, dtype=np.float32)
     if values.ndim != 2 or values.shape[0] < 2:
         raise ValueError("Doublet neighbor points must hold at least two rows")
     n_points, dims = values.shape
+    if n_points > _POSITION_BITS:
+        raise ValueError("Doublet neighbor points must number fewer than 2**32")
     observed = integer_argument(n_observed, "n_observed", minimum=1)
     if observed >= n_points:
         raise ValueError("Doublet neighbor points must hold a simulated doublet")
@@ -898,8 +966,8 @@ def count_simulated_neighbors(
     if k >= n_points:
         raise ValueError("adjusted_neighbors must be below the number of points")
     threads = integer_argument(workers, "workers", minimum=1)
-    build_threads = threads if settings.parallel else 1
-    ef = max(settings.ef, k + 1)
+    parts = _index_parts(n_points)
+    ef = _part_depth(settings.ef, k, len(parts))
     index_bytes, block_bytes = _neighbor_count_bytes(
         n_points, dims, k, settings, threads
     )
@@ -926,24 +994,47 @@ def count_simulated_neighbors(
         residentBytes=resident,
         requested=1,
     )
-    index = instantiate_knn_index(
-        settings.metric,
-        dims,
-        n_points,
-        settings.ef_construction,
-        settings.m,
-        random_seed,
-        ef,
-        build_threads,
-    )
-    index.add_items(values, np.arange(n_points))
-    index.set_num_threads(threads)
+    indexes = [
+        instantiate_knn_index(
+            settings.metric,
+            dims,
+            stop - start,
+            settings.ef_construction,
+            settings.m,
+            (random_seed + part) % 2**64,
+            ef,
+            1,
+        )
+        for part, (start, stop) in enumerate(parts)
+    ]
+
+    def build(part: int) -> None:
+        start, stop = parts[part]
+        indexes[part].add_items(values[start:stop], np.arange(start, stop))
+
+    with ThreadPoolExecutor(
+        max_workers=min(len(parts), threads), thread_name_prefix="cytearc-doublet-index"
+    ) as pool:
+        for _ in pool.map(build, range(len(parts))):
+            pass
+    for index in indexes:
+        index.set_num_threads(threads)
+    returned = [min(k + 1, stop - start) for start, stop in parts]
+    columns = np.cumsum([0, *returned])
     counts = np.empty(n_points, dtype=np.int64)
     for start in range(0, n_points, batch_rows):
         stop = min(start + batch_rows, n_points)
-        labels, distances = index.knn_query(values[start:stop], k=k + 1)
-        neighbors, _, _ = fix_knn_query(labels, distances, np.arange(start, stop))
-        counts[start:stop] = np.count_nonzero(neighbors >= observed, axis=1)
+        positions = np.arange(start, stop, dtype=np.uint64)[:, np.newaxis]
+        keys = np.empty((stop - start, int(columns[-1])), dtype=np.uint64)
+        for part, index in enumerate(indexes):
+            labels, distances = index.knn_query(values[start:stop], k=returned[part])
+            part_keys = keys[:, columns[part] : columns[part + 1]]
+            part_keys[:] = _neighbor_keys(labels, distances)
+            part_keys[labels == positions] = _OWN_KEY
+            del labels, distances
+        nearest = np.partition(keys, k - 1, axis=1)[:, :k] & _POSITION_BITS
+        counts[start:stop] = np.count_nonzero(nearest >= observed, axis=1)
+        del keys, nearest
     return counts
 
 
@@ -1241,9 +1332,10 @@ def score_synthetic_doublets(
     thread simulates the samples one at a time, in sample code order, plans
     each simulation as it would alone, and waits before each of its steps
     until the step fits beside the samples being scored, so scoring samples
-    at once adds no refusal of its own. Each sample's index is built on one
-    thread unless ``index.parallel`` is set, so its scores, calls and
-    threshold are the same for any number of workers.
+    at once adds no refusal of its own. Each of a sample's indexes is built
+    on one thread, and a large sample's parts depend on its size alone
+    (:func:`count_simulated_neighbors`), so its scores, calls and threshold
+    are the same for any number of workers.
 
     Args:
         assay: The assay whose counts the parents are read from.

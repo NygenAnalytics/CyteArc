@@ -674,7 +674,7 @@ def test_doublet_scores_preserve_artifacts_without_materializing_queries(
         "normalize_scores",
         "random_seed",
     }
-    assert score_status.revision == 2 and score_status.is_current
+    assert score_status.revision == 3 and score_status.is_current
     assert (
         set(
             datastore.artifacts.list(
@@ -948,5 +948,5 @@ def test_doublet_detection_needs_two_clusters_for_heterotypic_doublets(
         smoothing_t=1,
     )
     status = datastore.artifacts.inspect(ref)
-    assert status.complete and status.revision == 2
+    assert status.complete and status.revision == 3
     assert status.parameters["heterotypic_fraction"] == 0.0
