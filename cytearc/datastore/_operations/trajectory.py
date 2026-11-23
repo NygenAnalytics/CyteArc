@@ -3854,16 +3854,6 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         if planned.reused:
             return planned.ref
         self._require_writable("call_lineage_membership")
-        if needed > self.memoryBytes:
-            raise MemoryBudgetError(
-                f"Lineage membership needs about {needed} bytes of memory with "
-                "its inputs, which exceeds the memory budget of "
-                f"{self.memoryBytes} bytes. Increase the memory budget or fit "
-                "curves of fewer lineages or cells.",
-                needed_bytes=needed,
-                budget_bytes=int(self.memoryBytes),
-                item="the lineage membership of every cell",
-            )
         limits = _distance_limits_impl(
             loaded.distance,
             loaded.progress,
