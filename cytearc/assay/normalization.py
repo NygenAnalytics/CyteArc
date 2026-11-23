@@ -27,11 +27,12 @@ knows. Every other flag defaults to False.
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import numpy as np
 import zarr
 from numpy.typing import ArrayLike, DTypeLike, NDArray
+from scipy.sparse import csr_matrix, issparse
 
 from ..matrix import ChunkedArray
 from ..storage.arrays import create_numeric_array
@@ -56,7 +57,12 @@ from ..utils.compute import controlled_compute
 from ..utils.memory_budget import MemoryBudgetError, refusal_words
 from ..utils.moments import ColumnMoments
 from ..utils.numba import njit
-from ..storage.artifacts import ArtifactRef, artifact_group, require_complete_artifact
+from ..storage.artifacts import (
+    ArtifactRef,
+    artifact_group,
+    callable_identity,
+    require_complete_artifact,
+)
 from ..storage.errors import ArtifactResolutionError
 from ..storage.feature_selection import validate_feature_selection
 from ..storage.identity import read_dataset_fingerprint
@@ -220,10 +226,7 @@ def clr_values[T: (np.ndarray, ChunkedArray)](counts: T) -> T:
     Returns:
         Float64 CLR values with the shape of ``counts``.
     """
-    scale = np.exp(np.log1p(counts, dtype=np.float64).sum(axis=0) / len(counts))
-    # A ufunc of a ChunkedArray stays lazy, though NumPy types it as an array.
-    values: Any = np.log1p(counts / scale.reshape(1, -1))
-    return cast(T, values)
+    return cast(T, ClrFit.fit(counts).apply(counts))
 
 
 def term_frequencies[T: (np.ndarray, ChunkedArray)](
@@ -280,6 +283,107 @@ def tfidf_values[T: (np.ndarray, ChunkedArray)](
     weights = np.asarray(idf).reshape(1, -1)
     values: Any = term_frequencies(counts, term_totals) * weights
     return cast(T, values)
+
+
+# Each fit below holds what a built-in normalizer takes from the cells it
+# normalizes, and its ``apply`` normalizes rows of counts with it: lazily for
+# a ChunkedArray, at once for an array. ``normed`` fits and applies them, and
+# doublet scoring and mapping apply them to rows that are not stored cells,
+# through ``normalize_rows``. ``held_values`` counts the float64 arrays of a
+# block's shape that normalizing a block holds at once.
+
+
+@dataclass(frozen=True, slots=True)
+class LibrarySizeFit:
+    """How ``norm_lib_size`` and ``norm_lib_size_log`` normalize rows of counts.
+
+    Nothing is fitted from the cells: each row is scaled to ``size_factor``
+    over its nonzero total, and ``log`` takes ``log1p`` of the result.
+    """
+
+    size_factor: float
+    log: bool
+    held_values: ClassVar[int] = 1
+
+    def apply(self, counts: Any, totals: ArrayLike) -> Any:
+        scale = partial(
+            library_size_values,
+            size_factor=self.size_factor,
+            dtype=np.float64,
+            log_transform=self.log,
+        )
+        if isinstance(counts, ChunkedArray):
+            return counts._binary(scale, np.reshape(totals, (-1, 1)), "left")
+        return scale(counts, totals)
+
+    def denominators(self, totals: NDArray[np.float64], source: str) -> Any:
+        return library_size_divisors(totals, source=source)
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class ClrFit:
+    """The scale that ``norm_clr`` fits for each feature over its cells.
+
+    The scale is the exponential of the feature's mean ``log1p`` count, and a
+    row's values are the ``log1p`` of its counts over the scales.
+    """
+
+    scales: NDArray[np.float64]
+    held_values: ClassVar[int] = 3
+
+    @classmethod
+    def fit(cls, counts: Any) -> "ClrFit":
+        """Return the scales of ``counts``, which hold every normalized cell."""
+        scale = np.exp(np.log1p(counts, dtype=np.float64).sum(axis=0) / len(counts))
+        return cls(np.asarray(scale, dtype=np.float64))
+
+    def apply(self, counts: Any, totals: ArrayLike | None = None) -> Any:
+        # A ufunc of a ChunkedArray stays lazy, though NumPy types it as an array.
+        return np.log1p(counts / self.scales.reshape(1, -1))
+
+    def denominators(self, totals: NDArray[np.float64], source: str) -> Any:
+        return totals
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class TfIdfFit:
+    """The inverse document frequency that ``norm_tf_idf`` fits for each feature.
+
+    A row's values are its counts over its nonzero term total, times the IDF.
+    Sparse rows stay sparse.
+    """
+
+    idf: NDArray[np.float64]
+    held_values: ClassVar[int] = 2
+
+    def apply(self, counts: Any, totals: ArrayLike) -> Any:
+        if issparse(counts):
+            values = csr_matrix(counts, dtype=np.float64, copy=True)
+            values.data /= np.repeat(
+                np.asarray(totals, dtype=np.float64).ravel(), np.diff(values.indptr)
+            )
+            values.data *= self.idf[values.indices]
+            return values
+        return tfidf_values(counts, totals, self.idf)
+
+    def denominators(self, totals: NDArray[np.float64], source: str) -> Any:
+        divisors = np.array(totals, dtype=np.float64)
+        divisors[divisors == 0] = 1
+        return divisors
+
+
+@dataclass(frozen=True, slots=True)
+class PassthroughFit:
+    """How ``norm_dummy`` normalizes rows: their values, with ``log1p`` with ``log``."""
+
+    log: bool
+    held_values: ClassVar[int] = 1
+
+    def apply(self, counts: Any, totals: ArrayLike | None = None) -> Any:
+        return np.log1p(counts, dtype=np.float64) if self.log else counts
+
+    def denominators(self, totals: NDArray[np.float64], source: str) -> Any:
+        return totals
 
 
 def stream_document_frequency(
@@ -400,16 +504,8 @@ def _library_size_scaled(
             f"provide them; normalize it with {default}, its default, or with "
             f"{others}"
         )
-    totals = cell_totals.reshape(-1, 1)
-    scale = partial(
-        library_size_values,
-        size_factor=size_factor,
-        dtype=np.float64,
-        log_transform=log_transform,
-    )
-    if isinstance(counts, ChunkedArray):
-        return counts._binary(scale, totals, "left")
-    return cast(ChunkedArray, scale(counts, totals))
+    fit = LibrarySizeFit(size_factor, log_transform)
+    return cast(ChunkedArray, fit.apply(counts, cell_totals.reshape(-1, 1)))
 
 
 def norm_dummy(_: "Assay", counts: ChunkedArray) -> ChunkedArray:
@@ -521,8 +617,8 @@ def norm_tf_idf(assay: "Assay", counts: ChunkedArray) -> ChunkedArray:
         and assay.n_docs is not None
         and assay.n_docs_per_term is not None
     )
-    idf = inverse_document_frequency(assay.n_docs, assay.n_docs_per_term)
-    return tfidf_values(counts, assay.n_term_per_doc, idf)
+    fit = TfIdfFit(inverse_document_frequency(assay.n_docs, assay.n_docs_per_term))
+    return cast(ChunkedArray, fit.apply(counts, assay.n_term_per_doc))
 
 
 norm_tf_idf.artifact_identity = (  # type: ignore[attr-defined]
@@ -549,6 +645,40 @@ def _pearson_residual_block(
     residuals[~positive] = 0.0
     np.clip(residuals, -clip, clip, out=residuals)
     return residuals
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class PearsonResidualFit:
+    """What a ``PearsonResidualNormalizer`` fits over the cells it normalizes.
+
+    ``fractions`` holds each feature's share of their counts, its sum over
+    the cells divided by the sum of their totals; ``clip`` is the largest
+    absolute residual. A row's residuals take its true total, so a row
+    without counts expects none and its residuals are 0.
+    """
+
+    fractions: NDArray[np.float64]
+    theta: float
+    clip: float
+    # The expected counts and residuals, beside the temporaries of their
+    # square roots over the positive expectations.
+    held_values: ClassVar[int] = 5
+
+    def apply(self, counts: Any, totals: ArrayLike) -> Any:
+        residuals = partial(
+            _pearson_residual_block,
+            fractions=self.fractions.reshape(1, -1),
+            theta=self.theta,
+            clip=self.clip,
+        )
+        if isinstance(counts, ChunkedArray):
+            return counts._binary(residuals, np.reshape(totals, (-1, 1)), "left")
+        return residuals(np.asarray(counts), totals)
+
+    def denominators(self, totals: NDArray[np.float64], source: str) -> Any:
+        # The check refuses negative and non-finite totals; zeros stay.
+        library_size_divisors(totals, source=source)
+        return totals
 
 
 class PearsonResidualNormalizer:
@@ -596,21 +726,38 @@ class PearsonResidualNormalizer:
     def __repr__(self) -> str:
         return f"PearsonResidualNormalizer(theta={self.theta!r}, clip={self.clip!r})"
 
-    def __call__(self, assay: "Assay", counts: ChunkedArray) -> ChunkedArray:
-        totals = getattr(assay, "scalar", None)
-        if totals is None:
-            raise ValueError(
-                "Pearson residuals need each cell's total, which only an RNA "
-                "assay's normed provides"
-            )
+    @classmethod
+    def from_identity(cls, identity: str) -> "PearsonResidualNormalizer | None":
+        """Return the normalizer that provenance records as ``identity``, or None."""
+        prefix = "cytearc.assay.pearson_residuals:theta="
+        theta, found, clip = identity.removeprefix(prefix).partition(":clip=")
+        if not identity.startswith(prefix) or not found:
+            return None
+        try:
+            normalizer = cls(float(theta), None if clip == "sqrt-n" else float(clip))
+        except ValueError:
+            return None
+        return normalizer if normalizer.artifact_identity == identity else None
+
+    def fit(
+        self,
+        counts: Any,
+        totals: ArrayLike,
+        *,
+        nthreads: int | None = None,
+        name: str = "",
+    ) -> PearsonResidualFit:
+        """Fit each feature's share of the counts of ``counts``, every normalized cell.
+
+        ``totals`` holds each cell's total.
+        """
         cell_totals = np.asarray(totals, dtype=np.float64)
         n_cells = len(counts)
         if isinstance(counts, ChunkedArray):
             feature_totals = np.asarray(
                 counts.sum(axis=0, dtype=np.float64).compute(
-                    nthreads=getattr(assay, "nthreads", None),
-                    msg=f"({getattr(assay, 'name', '')}) Summing features for "
-                    "Pearson residuals",
+                    nthreads=nthreads,
+                    msg=f"({name}) Summing features for Pearson residuals",
                 ),
                 dtype=np.float64,
             )
@@ -621,20 +768,119 @@ class PearsonResidualNormalizer:
             feature_totals / grand_total
             if grand_total > 0
             else np.zeros_like(feature_totals)
-        ).reshape(1, -1)
-        residuals = partial(
-            _pearson_residual_block,
-            fractions=fractions,
-            theta=self.theta,
-            clip=float(np.sqrt(n_cells)) if self.clip is None else self.clip,
         )
-        if isinstance(counts, ChunkedArray):
-            return counts._binary(residuals, cell_totals.reshape(-1, 1), "left")
-        return cast(ChunkedArray, residuals(np.asarray(counts), cell_totals))
+        return PearsonResidualFit(
+            fractions,
+            self.theta,
+            float(np.sqrt(n_cells)) if self.clip is None else self.clip,
+        )
+
+    def __call__(self, assay: "Assay", counts: ChunkedArray) -> ChunkedArray:
+        totals = getattr(assay, "scalar", None)
+        if totals is None:
+            raise ValueError(
+                "Pearson residuals need each cell's total, which only an RNA "
+                "assay's normed provides"
+            )
+        cell_totals = np.asarray(totals, dtype=np.float64)
+        fit = self.fit(
+            counts,
+            cell_totals,
+            nthreads=getattr(assay, "nthreads", None),
+            name=getattr(assay, "name", ""),
+        )
+        return cast(ChunkedArray, fit.apply(counts, cell_totals))
 
 
 norm_pearson_residuals = PearsonResidualNormalizer()
 """Analytic Pearson residuals with ``theta=100``, clipped at ``sqrt(n)``."""
+
+
+type NormalizationFit = (
+    LibrarySizeFit | PearsonResidualFit | ClrFit | TfIdfFit | PassthroughFit
+)
+
+
+def recorded_normalizer(identity: Mapping[str, Any]) -> NormMethod | None:
+    """Return the built-in normalizer that provenance records as ``identity``.
+
+    A ``PearsonResidualNormalizer`` with other options is built again from
+    its identity. Custom normalizers give None.
+    """
+    recorded = {key: value for key, value in identity.items() if key != "external_hook"}
+    builtins = (norm_lib_size, norm_lib_size_log, norm_clr, norm_tf_idf, norm_dummy)
+    for normalizer in builtins:
+        if recorded == callable_identity(normalizer):
+            return normalizer
+    text = recorded.get("identity")
+    if set(recorded) == {"identity"} and isinstance(text, str):
+        return PearsonResidualNormalizer.from_identity(text)
+    return None
+
+
+def fit_normalization(
+    normalizer: NormMethod,
+    counts: Any,
+    totals: NDArray[np.float64] | None,
+    *,
+    size_factor: float | None,
+    log_transform: bool,
+    nthreads: int | None = None,
+    name: str = "",
+) -> NormalizationFit | None:
+    """Fit an RNA normalizer over the counts of the cells it normalizes.
+
+    ``totals`` holds each cell's total, as ``normed`` reads it; only Pearson
+    residuals fit numbers from the counts. TF-IDF fits document frequencies
+    that an ATAC assay counts, and a custom normalizer has no fit, so both
+    give None.
+    """
+    if normalizer is norm_lib_size or normalizer is norm_lib_size_log:
+        assert size_factor is not None
+        return LibrarySizeFit(
+            size_factor, log_transform or normalizer is norm_lib_size_log
+        )
+    if normalizer is norm_dummy:
+        return PassthroughFit(log_transform)
+    if normalizer is norm_clr:
+        return ClrFit.fit(counts)
+    if isinstance(normalizer, PearsonResidualNormalizer):
+        assert totals is not None
+        return normalizer.fit(counts, totals, nthreads=nthreads, name=name)
+    return None
+
+
+def normalize_rows(
+    fit: NormalizationFit,
+    counts: Any,
+    totals: ArrayLike | None,
+    *,
+    source: str,
+) -> Any:
+    """Normalize rows of counts that are not stored cells as ``fit``'s cells were.
+
+    Args:
+        fit: The fit of the cells' normalizer.
+        counts: Dense or CSR counts of the selected features, one row each.
+        totals: Each row's total over every feature, or None for its total
+            over the columns of ``counts``, as ``renormalize_subset`` takes.
+        source: Name of the totals, used in errors.
+
+    Returns:
+        The normalized rows: float64, or CSR rows for TF-IDF of CSR counts.
+
+    Raises:
+        ValueError: If ``totals`` does not hold one value per row, or holds a
+            negative or non-finite total that library size or Pearson
+            residuals would read.
+    """
+    if totals is None:
+        totals = np.asarray(counts.sum(axis=1, dtype=np.float64)).ravel()
+    elif np.shape(totals) != (counts.shape[0],):
+        raise ValueError("Normalization totals must hold one value per row of counts")
+    return fit.apply(
+        counts, fit.denominators(np.asarray(totals, dtype=np.float64), source)
+    )
 
 
 _LOG_TRANSFORM = "log_transform"
