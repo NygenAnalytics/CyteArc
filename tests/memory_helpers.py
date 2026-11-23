@@ -1,9 +1,11 @@
-"""Read the budget that a memory refusal names, follow refusals to a budget that runs, give a domain function a ledger of a budget, wait until the arrays handed to writes are freed, and skip tests that need the resident memory of the test process."""
+"""Read the budget that a memory refusal names, follow refusals to a budget that runs, give a domain function a ledger of a budget, wait until the arrays handed to writes are freed, hold a read's decodes together while it is traced, and skip tests that need the resident memory of the test process."""
 
+import asyncio
 import re
 import threading
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -148,3 +150,41 @@ class HandedArrays:
                     self._seconds if all(self.freed) else 0,
                 )
             )
+
+
+@contextmanager
+def decodes_held_together(
+    codec: type, parties: int, timeout: float = 10.0
+) -> Iterator[None]:
+    """Make each decode of Zarr's ``codec`` hold its chunk, as stored and decoded, until ``parties`` decodes hold theirs.
+
+    How many of a read's decodes overlap depends on the threads that decode
+    them and on how the machine schedules them, so a traced read at an I/O
+    concurrency of ``parties`` holds that many decoded chunks at once only
+    where they are made to wait for each other. Each decode that ends waits
+    on the event loop that runs its read, so the read then holds ``parties``
+    decoded chunks at once on any machine. A read that never has that many
+    decodes in flight raises ``TimeoutError`` after ``timeout`` seconds
+    instead of being traced at less.
+    """
+    decode = codec._decode_single
+    barriers: weakref.WeakKeyDictionary[Any, asyncio.Barrier] = (
+        weakref.WeakKeyDictionary()
+    )
+
+    async def held(self: Any, chunk_bytes: Any, chunk_spec: Any) -> Any:
+        decoded = await decode(self, chunk_bytes, chunk_spec)
+        # Each event loop that runs a read has a barrier of its own.
+        loop = asyncio.get_running_loop()
+        barrier = barriers.get(loop)
+        if barrier is None:
+            barrier = barriers[loop] = asyncio.Barrier(parties)
+        async with asyncio.timeout(timeout):
+            await barrier.wait()
+        return decoded
+
+    codec._decode_single = held
+    try:
+        yield
+    finally:
+        codec._decode_single = decode

@@ -12,6 +12,7 @@ from cytearc.storage.ann_index import (
     ANN_INDEX_FORMAT_VERSION,
     _ANN_INDEX_METADATA,
 )
+from tests.memory_helpers import decodes_held_together
 from tests.storage_helpers import finalize_test_counts
 from cytearc.storage.layout import normalize_chunks
 from cytearc.storage.pipeline_runs import (
@@ -809,11 +810,18 @@ def test_a_repack_reserves_what_reading_a_band_of_sharded_counts_holds(
     # chunk, the charge before #353, left out. At ten reads at once, as a
     # dense write of shards of ten chunks runs its producer, it decodes the
     # ten chunks at once too, which the charge at that concurrency covers and
-    # the charge of one decode at a time does not.
+    # the charge of one decode at a time does not. How many of those decodes
+    # overlap depends on the machine's threads, so at ten reads at once each
+    # decode holds its chunk until all ten hold theirs.
+    (shards,) = source.metadata.codecs
+    compressor = type(shards.codecs[-1])
     produce = repack_module._row_block_producer(source)
     held: dict[int, int] = {}
     for concurrency in (1, 10):
-        with zarr_io_concurrency(concurrency):
+        with (
+            zarr_io_concurrency(concurrency),
+            decodes_held_together(compressor, concurrency),
+        ):
             produce(0, band_rows)
             tracemalloc.start()
             try:

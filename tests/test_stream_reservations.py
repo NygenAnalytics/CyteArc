@@ -14,6 +14,7 @@ from cytearc.matrix.chunked import ChunkedArray
 from cytearc.storage.budget import ResourceBudget
 from cytearc.storage.execution import execution_report_scope
 from cytearc.storage.geometry import ArrayGeometry
+from tests.memory_helpers import decodes_held_together
 from tests.thread_helpers import blas_threads, raised_threads
 
 
@@ -348,7 +349,10 @@ def test_a_whole_read_of_an_unsharded_array_holds_no_decoded_chunk_beside_its_de
     )
     geometry = array_geometry(stored)
     assert geometry is not None and not geometry.poolKeepsDecodedChunk
-    with zarr_io_concurrency(2):
+    # How many decodes overlap depends on the machine's threads, so each of
+    # the two decodes under way holds its chunk until the other holds its own.
+    compressor = type(stored.metadata.codecs[-1])
+    with zarr_io_concurrency(2), decodes_held_together(compressor, 2):
         stored[:, :]
         tracemalloc.start()
         try:
