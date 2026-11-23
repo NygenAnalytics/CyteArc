@@ -13,7 +13,7 @@ from zarr.storage import LocalStore
 from cytearc.matrix.chunked import ChunkedArray
 from cytearc.storage.budget import ResourceBudget
 from cytearc.storage.execution import execution_report_scope
-from cytearc.storage.geometry import ArrayGeometry
+from cytearc.storage.geometry import ArrayGeometry, array_geometry
 from cytearc.storage.partition import row_read_parts
 from tests.memory_helpers import decodes_held_together
 from tests.thread_helpers import blas_threads, raised_threads
@@ -218,16 +218,18 @@ def test_a_read_through_zarrs_fused_pipeline_is_charged_at_the_reads_it_runs_at_
         256 * 1_024 * 4 + 4 * small + _read_objects(4, 4)
     )
     # An asynchronous store reads the shards at Zarr's async concurrency,
-    # each decoding as many chunks at once as the pool has threads.
+    # each decoding as many chunks at once as the pool has threads, while
+    # the task that Zarr makes for each shard it does not read yet holds the
+    # objects of a chunk, 4 KiB.
     gathering_shards = replace(fused_shards, fusedReadsAsync=True)
     gathering_shard = 4 * (stored - decoded) + 4 * decoded + _read_objects(4, 4)
     assert gathering_shards.readsAtOnce(4, 1, shards=4) == (4, 1)
     assert gathering_shards.readBytes(shard_result, 4, decodes=1, shards=4) == (
-        2 * shard_result + gathering_shard
+        2 * shard_result + gathering_shard + 3 * 4_096
     )
     assert gathering_shards.readsAtOnce(4, 2, shards=4) == (4, 2)
     assert gathering_shards.readBytes(shard_result, 4, decodes=2, shards=4) == (
-        2 * shard_result + 2 * gathering_shard
+        2 * shard_result + 2 * gathering_shard + 2 * 4_096
     )
     # CyteArc's pipelines read the shards a read touches, and the chunks of
     # each, at Zarr's async concurrency.
@@ -235,6 +237,7 @@ def test_a_read_through_zarrs_fused_pipeline_is_charged_at_the_reads_it_runs_at_
     assert sharded.readBytes(shard_result, 4, decodes=2, shards=4) == (
         2 * shard_result
         + 2 * (4 * (stored - decoded) + 2 * decoded + _read_objects(4, 2))
+        + 2 * 4_096
     )
     assert sharded.readsAtOnce(4, None, shards=3) == (4, 3)
 
@@ -610,10 +613,16 @@ def test_read_bytes_charge_the_indexers_and_copies_of_reads_by_index_arrays() ->
     assert unsharded.readBytes(1_000, 5, decodes=2, indexes=30, takenBytes=42) == (
         1_000 + 2 * stored + _read_objects(5, 2) + 42 + 30 * 40
     )
+    # Two of three shards are read at once, and the task of the third holds
+    # the objects of a chunk, 4 KiB, until it is read.
     assert sharded.readBytes(
         1_000, 5, decodes=2, shards=3, indexes=30, takenBytes=42
     ) == (
-        2 * 1_000 + 2 * (5 * encoded + 2 * nominal + _read_objects(5, 2)) + 42 + 30 * 64
+        2 * 1_000
+        + 2 * (5 * encoded + 2 * nominal + _read_objects(5, 2))
+        + 4_096
+        + 42
+        + 30 * 64
     )
     # Zarr's fused pipeline copies them on its pool's threads: on a store
     # that reads synchronously, a pool of two threads reads two of the three
@@ -625,6 +634,7 @@ def test_read_bytes_charge_the_indexers_and_copies_of_reads_by_index_arrays() ->
     ) == (
         2 * 1_000
         + 2 * (5 * encoded + nominal + nominal + _read_objects(5, 1))
+        + 4_096
         + 2 * 42
         + 30 * 64
     )
@@ -729,6 +739,163 @@ def test_a_read_of_selected_cells_holds_no_more_than_its_charge(
         assert run._read_bytes(read.nbytes, rows_indexed=True) == charge
     # Without the copy, the charge would not cover the read.
     assert peak > charge - copy
+
+
+@pytest.mark.parametrize("features", ["all", "gathered"])
+@pytest.mark.parametrize("touched", [100, 300])
+def test_a_read_of_cells_spread_over_shards_holds_a_task_for_each_shard(
+    tmp_path: Any, touched: int, features: str
+) -> None:
+    # 30,000 cells by 20 features in shards of 100 cells of two 10-feature
+    # chunks; a block of one cell from each of 100 or 300 shards, of every
+    # feature or every other one, which a sharded read of both takes in
+    # bands, and a block of as many shuffled cells of the first one to three
+    # shards.
+    stored, values = _random_bits_store(
+        tmp_path, (30_000, 20), (100, 10), (100, 20), np.float32
+    )
+    columns = None if features == "all" else np.arange(0, 20, 2)
+    spread = np.arange(touched) * 100 + 7
+    block = ChunkedArray(stored, rows=spread, cols=columns, block_size=touched)
+    read, peak = _traced_block_read(block)
+    expected = values[spread] if columns is None else values[np.ix_(spread, columns)]
+    np.testing.assert_array_equal(read.view(np.uint32), expected.view(np.uint32))
+    clustered = np.random.default_rng(7).permutation(touched)
+    fewer = ChunkedArray(stored, rows=clustered, cols=columns, block_size=touched)
+    # The read takes the shards one at a time, and the task that Zarr makes
+    # for each of the others holds the objects of a chunk, 4 KiB, until it is
+    # read; as many cells of fewer shards hold the same indexers and copies.
+    charge = block._read_bytes(read.nbytes)
+    assert charge - fewer._read_bytes(read.nbytes) == (touched - touched // 100) * 4_096
+    assert peak <= charge
+    if features == "all":
+        # Without those tasks the charge would not cover the read, even with
+        # the file buffer that it charges a read of part of a shard, which a
+        # read of whole shards, as here, holds no longer from Python 3.14. A
+        # read in bands is charged the wider of two ways to read it.
+        geometry = array_geometry(stored)
+        assert geometry is not None
+        assert peak > charge - geometry.readScratchBytes - (touched - 1) * 4_096
+
+
+@pytest.mark.parametrize(
+    ("layout", "shape", "chunks", "shards"),
+    [
+        ("unsharded, four column chunks", (2_000, 512), (2_000, 128), None),
+        ("unsharded, four row chunks", (8_000, 128), (2_000, 128), None),
+        ("sharded, four one-chunk shards", (8_000, 128), (2_000, 128), (2_000, 128)),
+    ],
+    ids=lambda value: value if isinstance(value, str) else "",
+)
+def test_a_read_of_cells_on_zarrs_fused_pipeline_is_charged_its_pools_reads(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    layout: str,
+    shape: tuple[int, int],
+    chunks: tuple[int, int],
+    shards: tuple[int, int] | None,
+) -> None:
+    import gc
+    import tracemalloc
+
+    import zarr.core.codec_pipeline as codec_pipeline
+
+    from cytearc.storage.async_execution import zarr_io_concurrency
+    from cytearc.storage.geometry import array_geometry
+    from tests.memory_helpers import decodes_on_threads_held_together
+
+    # Shuffled cells of four chunks, or of four shards, read as one block on
+    # Zarr's fused pipeline with a pool of four threads of the test's own,
+    # each decode holding its chunk until the four hold theirs.
+    monkeypatch.setattr(codec_pipeline, "_pool", None)
+    monkeypatch.setattr(codec_pipeline, "_pool_size", 0)
+    settings = {
+        "codec_pipeline.path": "zarr.core.codec_pipeline.FusedCodecPipeline",
+        "codec_pipeline.max_workers": 4,
+    }
+    cells = np.random.default_rng(8).permutation(shape[0])
+    with zarr.config.set(settings):
+        stored, values = _random_bits_store(tmp_path, shape, chunks, shards, np.float32)
+        geometry = array_geometry(stored)
+        assert geometry is not None and geometry.fusedPoolWorkers == 4
+        (outer, *_) = stored.metadata.codecs
+        codecs = outer.codecs if shards is not None else stored.metadata.codecs
+        block = ChunkedArray(stored, rows=cells, block_size=shape[0])
+        with (
+            zarr_io_concurrency(1),
+            decodes_on_threads_held_together(type(codecs[-1]), 4),
+        ):
+            block._read(0, shape[0])
+            gc.collect()
+            tracemalloc.start()
+            try:
+                base, _ = tracemalloc.get_traced_memory()
+                read = block._read(0, shape[0])
+                _current, peak = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+        np.testing.assert_array_equal(
+            read.view(np.uint32), values[cells].view(np.uint32)
+        )
+        charge = block._read_bytes(read.nbytes)
+        # A charge of one decode at a time, as CyteArc's pipelines read, falls
+        # short of the pool's four.
+        monkeypatch.setattr(
+            block,
+            "_geometry",
+            lambda: replace(geometry, fusedPoolWorkers=0, fusedReadsAsync=False),
+        )
+        one_at_a_time = block._read_bytes(read.nbytes)
+    assert peak - base <= charge
+    assert peak - base > one_at_a_time
+
+
+def test_a_read_of_a_run_of_cells_given_as_an_index_array_holds_its_charge(
+    tmp_path: Any,
+) -> None:
+    from cytearc.storage.async_execution import zarr_io_concurrency
+    from cytearc.storage.geometry import array_geometry
+    from cytearc.storage.partition import band_shards
+    from cytearc.storage.virtual_arrays import read_selection
+
+    # 100,000 cells by 4 uint16 features in a shard of four one-feature
+    # chunks: a run of every cell given as an index array, by one feature,
+    # which the read takes as a slice once it finds the run.
+    stored, values = _random_bits_store(
+        tmp_path, (100_000, 4), (100_000, 1), (100_000, 4), np.uint16
+    )
+    geometry = array_geometry(stored)
+    cells = np.arange(100_000)
+    feature = np.array([2])
+    with zarr_io_concurrency(1):
+        read = read_selection(stored, cells, feature)
+        tracemalloc_peak = _traced(lambda: read_selection(stored, cells, feature))
+    np.testing.assert_array_equal(read, values[:, [2]])
+    fixed, per_row = row_read_parts(
+        geometry,
+        feature,
+        rows_contiguous=True,
+        shards=band_shards(geometry, cells, cells.size),
+    )
+    # Finding the run takes its steps 65,536 at a time; all at once they
+    # would hold 9 bytes a cell, 900 KB, beyond the read's charge.
+    assert tracemalloc_peak <= read.nbytes + fixed + cells.size * per_row
+
+
+def _traced(call: Any) -> int:
+    """Return what ``call`` holds at its peak, traced after a full collection."""
+    import gc
+    import tracemalloc
+
+    gc.collect()
+    tracemalloc.start()
+    try:
+        base, _ = tracemalloc.get_traced_memory()
+        call()
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    return peak - base
 
 
 @pytest.mark.parametrize("sharded", [True, False], ids=["sharded", "unsharded"])
@@ -927,11 +1094,11 @@ def test_document_frequency_fits_mask_and_term_frequency_scratch(budget: int) ->
 def test_document_frequency_reserves_decode_bytes_when_fitting_blocks() -> None:
     from cytearc.assay.normalization import stream_document_frequency
 
-    values = np.arange(48, dtype=np.uint16).reshape(12, 4)
+    values = (np.arange(1_200 * 400) % 7).astype(np.uint16).reshape(1_200, 400)
 
     def frequency(chunks: tuple[int, int], budget: int) -> Any:
         stored = zarr.array(values, chunks=chunks)
-        matrix = ChunkedArray(stored, rows=np.arange(12), block_size=12)
+        matrix = ChunkedArray(stored, rows=np.arange(1_200), block_size=1_200)
         with execution_report_scope() as reports:
             counted, _ = stream_document_frequency(
                 matrix, memory_bytes=budget, nthreads=1, msg="", operation="Frequency"
@@ -940,13 +1107,15 @@ def test_document_frequency_reserves_decode_bytes_when_fitting_blocks() -> None:
         (report,) = reports
         return report
 
-    # Stored in chunks of six rows, a block's read holds a chunk of three
-    # times the values it holds in chunks of two rows, so the budget of one
-    # block of every row in the smaller chunks reads the larger ones in
-    # several blocks, each reserved with its decode within the budget.
-    budget = frequency((2, 4), 1 << 20).plan.reservedBytes
-    assert frequency((2, 4), budget).unitsCompleted == 1
-    larger = frequency((6, 4), budget)
+    # Stored in chunks of 600 rows, a block's read holds a chunk of three
+    # times the values it holds in chunks of 200 rows, 640 KB more as stored
+    # and decoded, beyond the objects of the four more chunks that the
+    # smaller ones take, so the budget of one block of every row in the
+    # smaller chunks reads the larger ones in several blocks, each reserved
+    # with its decode within the budget.
+    budget = frequency((200, 400), 1 << 24).plan.reservedBytes
+    assert frequency((200, 400), budget).unitsCompleted == 1
+    larger = frequency((600, 400), budget)
     assert larger.unitsCompleted > 1
     assert larger.plan.reservedBytes <= budget
 

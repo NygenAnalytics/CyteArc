@@ -37,6 +37,9 @@ SCAN_BAND_BYTES = 64 * 1024**2
 #: and each band's indices within the band: 32 bytes an index of int64. Its
 #: stable sort and masks held less beside them, 26 bytes an index traced.
 _BAND_INDEX_BYTES = 32
+#: Passes over a selection's indices take them this many at a time, so a pass
+#: holds under 1 MB however many indices the selection holds.
+_INDEX_PIECE = 65_536
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,9 +100,15 @@ def is_contiguous(indices: np.ndarray) -> bool:
     # would hold 9 bytes an index.
     if int(indices[-1]) - int(indices[0]) != indices.size - 1:
         return False
-    # Steps are taken in int64: in a narrow integer type a descending step,
-    # such as 255 to 0 in uint8, would wrap around to a step of one.
-    return bool(np.all(np.diff(np.asarray(indices).astype(np.int64, copy=False)) == 1))
+    # The steps of a run are taken a piece at a time, and in int64: in a
+    # narrow integer type a descending step, such as 255 to 0 in uint8, would
+    # wrap around to a step of one.
+    values = np.asarray(indices)
+    for start in range(0, values.size - 1, _INDEX_PIECE):
+        piece = values[start : start + _INDEX_PIECE + 1].astype(np.int64, copy=False)
+        if not np.all(np.diff(piece) == 1):
+            return False
+    return True
 
 
 def widest_chunk_span(indices: np.ndarray, chunk: int) -> int:
@@ -125,9 +134,10 @@ def band_shards(
 
     ``rows`` holds rows of the array, or is a ``range`` of them, as a copy
     reads a run of rows a band at a time; an unsharded array counts its rows
-    of chunks. A band whose rows are not sorted counts a row of shards again
-    wherever it comes back to it, so the count may exceed the rows of shards
-    that the band touches, never fall short of them.
+    of chunks. A band counts each row of shards it touches once, in whatever
+    order its rows come, as Zarr reads each shard of a selection once. The
+    entries are counted a piece of whole bands at a time, so the count holds
+    about 9 bytes for each entry of a piece, not of the selection.
     """
     if geometry is None or len(rows) == 0:
         return 1
@@ -137,11 +147,20 @@ def band_shards(
         starts = np.arange(rows.start, rows.stop, band, dtype=np.int64)
         ends = np.minimum(starts + band, rows.stop) - 1
         return int((ends // extent - starts // extent).max()) + 1
-    shard = np.asarray(rows, dtype=np.int64) // extent
-    entered = np.ones(shard.size, dtype=bool)
-    entered[1:] = shard[1:] != shard[:-1]
-    entered[::band] = True
-    return int(np.add.reduceat(entered, np.arange(0, shard.size, band)).max())
+    piece = max(band, _INDEX_PIECE // band * band)
+    most = 0
+    for start in range(0, len(rows), piece):
+        shard = np.asarray(rows[start : start + piece]) // extent
+        whole = shard.size - shard.size % band
+        for bands in (shard[:whole].reshape(-1, band), shard[whole:].reshape(1, -1)):
+            if bands.size == 0:
+                continue
+            # Sorted, each band's rows of shards change once for each one
+            # after the first.
+            bands.sort(axis=1)
+            touched = 1 + np.count_nonzero(bands[:, 1:] != bands[:, :-1], axis=1)
+            most = max(most, int(touched.max()))
+    return most
 
 
 def _column_shards(geometry: ArrayGeometry, columns: np.ndarray) -> int:

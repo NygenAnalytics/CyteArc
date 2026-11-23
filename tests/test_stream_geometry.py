@@ -472,12 +472,74 @@ def test_band_shards_count_the_rows_of_shards_that_a_band_touches() -> None:
     # before it ends counts that shard too: rows 600 to 1,199 touch two.
     assert band_shards(geometry, np.arange(3_000), 600) == 2
     assert band_shards(geometry, range(0, 8_000, 4), 1_000) == 4
-    # Rows that come back to a shard count it again, never fewer than it has.
-    assert band_shards(geometry, np.array([0, 5_000, 1, 5_001]), 4) == 4
+    # Rows that come back to a shard count it once, as Zarr reads it once.
+    assert band_shards(geometry, np.array([0, 5_000, 1, 5_001]), 4) == 2
     assert band_shards(geometry, np.array([0, 1, 5_000, 5_001]), 4) == 2
+    assert band_shards(geometry, np.array([0, 5_000, 1, 5_001]), 2) == 2
     # No rows, or no geometry, touch one row of shards at most.
     assert band_shards(geometry, np.array([], dtype=np.int64), 4) == 1
     assert band_shards(None, range(10), 4) == 1
+
+
+def test_band_shards_count_the_distinct_shards_of_a_selection_a_piece_at_a_time() -> (
+    None
+):
+    import tracemalloc
+
+    from cytearc.storage.partition import band_shards
+
+    # 1,000 shards of 100 rows, and bands of a selection longer than the
+    # 65,536 indices that each piece takes, so bands lie in several pieces.
+    geometry = ArrayGeometry((100_000, 4), (100, 4), (100, 4), 2)
+    rng = np.random.default_rng(6)
+    spread = np.sort(rng.choice(100_000, size=60_000, replace=False))
+    shuffled = rng.permutation(100_000)
+
+    def touched(rows: np.ndarray, band: int) -> int:
+        """Count the distinct shards of each band, band by band."""
+        return max(
+            len(set((rows[start : start + band] // 100).tolist()))
+            for start in range(0, rows.size, band)
+        )
+
+    for band in (7, 1_000, 40_000, 70_000):
+        assert band_shards(geometry, spread, band) == touched(spread, band)
+        assert band_shards(geometry, shuffled, band) == touched(shuffled, band)
+    # Shuffled rows of a few shards count those shards, however often they
+    # come back to them.
+    few = rng.permutation(300)
+    assert band_shards(geometry, few, 300) == 3
+    assert band_shards(geometry, few, 150) == 3
+    # The count holds a piece of the selection, not the whole of it.
+    tracemalloc.start()
+    try:
+        band_shards(geometry, shuffled, 1_000)
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 1 << 20
+
+
+def test_is_contiguous_checks_a_run_a_piece_at_a_time() -> None:
+    import tracemalloc
+
+    # A run of a million rows, whose steps are checked 65,536 at a time.
+    run = np.arange(5, 1_000_005)
+    tracemalloc.start()
+    try:
+        assert is_contiguous(run)
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    # The steps of the whole run would hold 9 bytes a row.
+    assert peak < 1 << 20
+    # Two rows swapped where a piece ends, or inside a piece, leave the ends
+    # of a run in place but break it.
+    for index in (65_535, 65_536, 131_071, 100_000):
+        swapped = np.arange(200_000)
+        swapped[[index, index + 1]] = swapped[[index + 1, index]]
+        assert not is_contiguous(swapped)
+    assert is_contiguous(np.arange(65_537).astype(np.uint32))
 
 
 def test_row_reads_at_a_concurrency_hold_the_shards_and_decodes_they_run_at_once() -> (
@@ -503,17 +565,19 @@ def test_row_reads_at_a_concurrency_hold_the_shards_and_decodes_they_run_at_once
     shard = 10 * encoded + 10 * decoded + 32_768 + 10 * 4_096 + 10 * 16_384
     assert (ten, ten_per_row) == (shard, per_row)
     # Over a band of four shards, ten at once read all four together; two at
-    # once read two shards, each decoding two chunks at once.
+    # once read two shards, each decoding two chunks at once, while the task
+    # that Zarr makes for each of the other two holds the objects of a chunk,
+    # 4 KiB.
     assert row_read_parts(
         geometry, every_gene, rows_contiguous=True, concurrency=10, shards=4
     ) == (4 * shard, per_row)
     two = 10 * encoded + 2 * decoded + 32_768 + 10 * 4_096 + 2 * 16_384
     assert row_read_parts(
         geometry, every_gene, rows_contiguous=True, concurrency=2, shards=4
-    ) == (2 * two, per_row)
+    ) == (2 * two + 2 * 4_096, per_row)
     # At one read at a time the shards that a band touches are read in turn.
     assert row_read_parts(geometry, every_gene, rows_contiguous=True, shards=4) == (
-        one,
+        one + 3 * 4_096,
         per_row,
     )
     # Shards of half the genes are read side by side, ten at once.
@@ -617,8 +681,11 @@ def test_selected_row_cost_admits_only_touched_chunks_within_each_shard() -> Non
     # them in one shard alongside its two row chunks: four more compressed
     # chunks, each at the bound of its encoded size, 1,024 bytes beyond the
     # 16 it decodes to, and the 4 KiB of objects that Zarr's read makes for
-    # each.
-    assert wide - narrow == 4 * (geometry.nominalChunkBytes() + 1_024 + 4_096)
+    # each. The first spreads them over three shards, read one at a time, and
+    # the task of each of the two waiting holds the objects of a chunk.
+    assert wide - narrow == (
+        4 * (geometry.nominalChunkBytes() + 1_024 + 4_096) - 2 * 4_096
+    )
     minimum = narrow + 1
     admitted = admit_stream(
         ResourceBudget(minimum, 1), nBlocks=1, blockBytes=1, decodeBytes=narrow
@@ -1012,8 +1079,8 @@ def test_streamed_row_blocks_decode_only_as_many_chunks_as_budgeted() -> None:
     # unbounded read can hold all four decodes at once. The budget affords one
     # 2048 byte block beside a single chunk of 512 bytes, held as stored and
     # decoded, 512 + 4 + 1,024 bytes beside it, and the objects of Zarr's read
-    # of one chunk, and no more.
-    objects = 32_768 + 4_096 + 16_384
+    # of the four chunks, one decoded at a time, and no more.
+    objects = 32_768 + 4 * 4_096 + 16_384
     budgeted = ChunkedArray(
         array,
         resources=ResourceBudget(2_048 + 512 + 512 + 4 + 1_024 + objects + 440, 4),

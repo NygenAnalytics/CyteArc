@@ -212,7 +212,11 @@ class ChunkedArray:
         Row-block streams run Zarr with one decode at a time, and a block's
         read touches, in each shard, the inner chunks of every row chunk and
         of the selected columns, beside the stored bytes between them that a
-        merged fetch takes. A block whose rows or columns are an index array
+        merged fetch takes. It touches the rows of shards that a block of
+        this matrix's rows touches, as ``band_shards`` counts them, and an
+        unsharded read the chunks of the block's rows of chunks and of its
+        columns, each of which Zarr's fused pipeline reads at once up to its
+        pool's threads. A block whose rows or columns are an index array
         rather than one run also holds Zarr's indexers of them and its copy
         of the values that it takes from each chunk it decodes: every row of
         the block, as a block of one chunk's rows takes them, by the most
@@ -231,27 +235,42 @@ class ChunkedArray:
         geometry = self._geometry()
         if geometry is None:
             return input_bytes
-        from ..storage.partition import coalesced_gap_bytes, is_contiguous
+        from ..storage.partition import band_shards, coalesced_gap_bytes, is_contiguous
 
-        row_chunks = -(-geometry.axisShard(0) // geometry.axisChunk(0))
-        column_chunks = -(-geometry.axisShard(1) // geometry.axisChunk(1))
-        gap = 0
+        block_rows = min(self._block_size, max(1, self._n_rows))
+        # A read of some of a block's rows touches no more of them.
+        bands = band_shards(
+            geometry,
+            range(self._n_rows) if self._rows is None else self._rows,
+            block_rows,
+        )
+        column_bins = np.arange(
+            -(-int(self._backing.shape[1]) // geometry.axisChunk(1))
+        )
         taken_columns = min(self._n_cols, geometry.axisChunk(1))
         columns_indexed = False
         if self._cols is not None:
             column_bins, in_chunk = np.unique(
                 geometry.binOf(1, self._cols), return_counts=True
             )
-            column_chunks = min(column_chunks, int(column_bins.size))
-            gap = coalesced_gap_bytes(
-                geometry, self._cols, chunks=row_chunks * column_chunks
-            )
             taken_columns = int(in_chunk.max(initial=0))
             columns_indexed = not is_contiguous(self._cols)
+        if geometry.shards is None:
+            chunks, shards, gap = bands * int(column_bins.size), 1, 0
+        else:
+            per_shard = -(-geometry.axisShard(1) // geometry.axisChunk(1))
+            row_chunks = -(-geometry.axisShard(0) // geometry.axisChunk(0))
+            chunks = row_chunks * min(per_shard, int(column_bins.size))
+            shards = bands * int(np.unique(column_bins // per_shard).size)
+            gap = (
+                0
+                if self._cols is None
+                else coalesced_gap_bytes(geometry, self._cols, chunks=chunks)
+            )
         rows_indexed = rows_indexed or (
             self._rows is not None and not is_contiguous(self._rows)
         )
-        parts = self._indexed_read_parts(geometry) if rows_indexed else None
+        parts = self._indexed_read_parts(geometry, bands) if rows_indexed else None
         # A block read in one Zarr request takes its rows by an index array
         # unless it is read in bands, which leaves that request only blocks
         # whose rows form one run.
@@ -259,8 +278,9 @@ class ChunkedArray:
         rows = -(-input_bytes // max(1, self._n_cols * geometry.itemsize))
         read_bytes = geometry.readBytes(
             input_bytes,
-            row_chunks * column_chunks,
+            chunks,
             decodes=1,
+            shards=shards,
             gapBytes=gap,
             indexes=(rows if request_indexes_rows else 0)
             + (self._n_cols if columns_indexed else 0),
@@ -276,14 +296,17 @@ class ChunkedArray:
         # A block whose selected rows form one run is read in one Zarr request.
         return max(read_bytes, input_bytes + fixed + rows * per_row)
 
-    def _indexed_read_parts(self, geometry: ArrayGeometry) -> tuple[int, int] | None:
+    def _indexed_read_parts(
+        self, geometry: ArrayGeometry, bands: int
+    ) -> tuple[int, int] | None:
         """Bytes beside a row block's result when its read indexes both axes.
 
         ``read_selection`` reads such a block of a sharded backing in bands;
-        ``indexed_read_parts`` gives the bytes. The caller charges blocks
-        whose rows are an index array; they index both axes when the matrix
-        selects columns that are not one run. Otherwise, or for an unsharded
-        backing, this returns None.
+        ``indexed_read_parts`` gives the bytes, for the ``bands`` rows of
+        shards that a block touches. The caller charges blocks whose rows are
+        an index array; they index both axes when the matrix selects columns
+        that are not one run. Otherwise, or for an unsharded backing, this
+        returns None.
         """
         from ..storage.partition import indexed_read_parts, is_contiguous
 
@@ -295,6 +318,7 @@ class ChunkedArray:
             geometry,
             self._cols,
             block_rows=min(self._block_size, max(1, self._n_rows)),
+            shards=bands,
         )
 
     def _max_decode_bytes(self) -> int:
