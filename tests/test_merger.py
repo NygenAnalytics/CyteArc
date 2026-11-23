@@ -9249,6 +9249,21 @@ def test_a_held_read_holds_no_more_than_its_charge(tmp_path, column):
         assert geometry is not None and geometry.shards is not None
         assert geometry.indexBytes(n_cells) == 64 * n_cells
         assert peak > charge - 64 * n_cells
+    # A window reads a run of cells as a slice, whose positions the chunked
+    # array keeps in an index array, and the same charge holds it: the
+    # narrow read holds three arrays of every cell's position, 2.4 MB, where
+    # a charge of a read of slices would give 0.9 MB.
+    controlled_compute(run[0:n_cells, :], 1)
+    tracemalloc.start()
+    try:
+        held = controlled_compute(run[0:n_cells, :], 1)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    np.testing.assert_array_equal(held, values[:, :width])
+    assert peak <= charge
+    if column == "narrow":
+        assert peak > run._read_bytes(n_cells * width * itemsize)
 
 
 @pytest.mark.parametrize(

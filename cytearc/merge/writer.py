@@ -1008,9 +1008,10 @@ def _chunk_column_runs(counts: ChunkedArray) -> list[ChunkedArray]:
 def _held_read_bytes(run: ChunkedArray, rows: int) -> int:
     """Return what a read of ``rows`` rows of ``run``, one chunk column, holds beside the rows held.
 
-    The read takes the rows by an index array, so its charge counts Zarr's
-    indexers of them and its copy of the rows that it takes from each chunk,
-    which within one chunk column can be as large as the rows read.
+    A window reads its rows as a slice of ``run``, which keeps their
+    positions in an index array. The charge is that of a read of the rows
+    by an index array, which counts Zarr's indexers of them and its copy of
+    the rows that it takes from each chunk, and so holds the positions too.
     """
     selected = int(rows) * int(run.shape[1]) * run.dtype.itemsize
     return run._read_bytes(selected, rows_indexed=True)
