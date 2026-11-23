@@ -536,7 +536,7 @@ def test_a_size_search_whose_gradient_never_settles_ends_at_its_maximum_steps(
     found = -math.log(glm.size_dispersion.py_func(y, mu, 199.0))
 
     assert len(sizes) == 100
-    # The steps swing around the maximum by the error over the curvature.
+    # The steps follow the error around the maximum, within 0.8 of it.
     assert abs(found - _exact_log_size(y, mu, 1e4, 1e6)) < 1.0
 
 
