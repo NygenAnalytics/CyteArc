@@ -16,6 +16,7 @@ import pickle
 import shutil
 import stat
 import time
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -58,7 +59,9 @@ from cytearc.metadata.selection import CellField, FeatureRef, NormalizationSpec
 from cytearc.storage.artifacts import ArtifactRef, fingerprint_array, list_artifacts
 from cytearc.storage.arrays import create_metadata_column
 from cytearc.storage.categorical import CategoricalColumn
+from cytearc.features.variability import fit_lowess
 from cytearc.storage.feature_selection import read_feature_selection_indices
+from cytearc.storage.selections import read_stored_selection_indices
 from cytearc.writers._store import write_membership_column
 from tests.fixtures_datastore import build_neighborhood_graph
 from tests.storage_helpers import by_cell_id, write_count_store
@@ -2099,12 +2102,24 @@ def panels(tmp_path_factory) -> _PanelStores:
             feature_ids={"ADT": panel},
         )
     stores = _PanelStores(base)
-    DataStoreMerge(
-        [stores.open(name) for name in _PANELS],
-        str(base / "merged.zarr"),
-        list(_PANELS),
-        nthreads=1,
-    ).dump()
+    # The intersection merge holds the antibodies that both studies stained,
+    # for the cells of both, as an oracle of what a merge of different panels
+    # gives them.
+    for name, features in (("merged", "union"), ("intersection", "intersection")):
+        DataStoreMerge(
+            [stores.open(study) for study in _PANELS],
+            str(base / f"{name}.zarr"),
+            list(_PANELS),
+            nthreads=1,
+            features=features,
+        ).dump()
+    for name in ("intersection", "left"):
+        own = stores.open(name)
+        cd3 = own.ADT.rawData[:, [_SHARED_ANTIBODIES.index("CD3")]].compute()
+        own.cells.insert(
+            "cell_type",
+            by_cell_id(own.cells, np.where(np.ravel(cd3) > 100, "T", "B")),
+        )
     merged = stores.open()
     ids = merged.cells.fetch_all("ids").astype(str)
     left = np.char.startswith(ids, "left__")
@@ -2286,9 +2301,10 @@ def test_marker_search_ranks_the_features_that_every_selected_cells_source_measu
     with pytest.warns(UserWarning) as caught:
         ref = store.markers.search(labels, features=universe)
     assert [str(warning.message) for warning in caught] == [
-        "The marker search leaves out the features that some source of the "
+        "The marker search leaves out 3 features that some source of the "
         "selected cells did not measure, since their zero counts in its cells "
-        "are not measurements: 'CD45RA', 'CD27', 'CD20'."
+        "are not measurements. Source 'left' lacks 1: 'CD20'. Source 'right' "
+        "lacks 2: 'CD45RA', 'CD27'."
     ]
     # The search ranks the shared antibodies, as a search of them alone does.
     ranked = store.artifacts.inspect(ref).input_ref("feature_selection")
@@ -2311,7 +2327,9 @@ def test_marker_search_ranks_the_features_that_every_selected_cells_source_measu
     left_labels = store.snapshot_cluster_labels(
         "cell_type", cell_selection=store.snapshot_cell_selection("left_cells")
     )
-    with pytest.warns(UserWarning, match="its cells are not measurements: 'CD20'.$"):
+    with pytest.warns(
+        UserWarning, match=r"measurements\. Source 'left' lacks 1: 'CD20'\.$"
+    ):
         left_ref = store.markers.search(left_labels, features=universe)
     left_ranked = store.artifacts.inspect(left_ref).input_ref("feature_selection")
     assert (
@@ -2347,10 +2365,11 @@ def test_marker_search_ranks_the_features_that_every_selected_cells_source_measu
     with pytest.raises(ValueError) as refused:
         store.markers.search(labels, features=only_own)
     assert str(refused.value) == (
-        "No selected feature was measured by the source of every selected cell; "
-        "some source of the cells did not measure 'CD45RA', 'CD20'. Search the "
-        "markers of the cells of the sources that measured them, or of features "
-        "that every source measured."
+        "The marker search would leave out every selected feature, since none was "
+        "measured by every source of the selected cells. Source 'left' lacks 1: "
+        "'CD20'. Source 'right' lacks 1: 'CD45RA'. Search the markers of the cells "
+        "of the sources that measured them, or of features that every source "
+        "measured."
     )
 
 
@@ -2386,7 +2405,15 @@ def test_analyses_refuse_a_feature_that_a_source_of_their_cells_did_not_measure(
             ["CD45RA"], CellField("cell_type"), subset_by="left_cells", skip_save=True
         )
 
-    graph = _graph(store, "ADT", every, store.features.universe(from_assay="ADT"))
+    # A graph needs the normalized values of antibodies that both studies
+    # measured, which normalization refuses otherwise.
+    shared = store.features.snapshot(
+        from_assay="ADT",
+        feature_indexes=np.flatnonzero(
+            np.isin(store.ADT.feats.fetch_all("names"), _SHARED_ANTIBODIES)
+        ).tolist(),
+    )
+    graph = _graph(store, "ADT", every, shared)
     diffusion = store.imputation.diffusion(graph)
     with pytest.raises(ValueError) as refused:
         store.imputation.compute_imputed(["CD3", "CD45RA"], diffusion)
@@ -3005,3 +3032,760 @@ def test_a_feature_of_an_assay_that_some_sources_lack_is_missing_where_either_sa
     )
     # get_cell_vals reads the same values, membership and record together.
     np.testing.assert_array_equal(store.get_cell_vals("ADT", "I", "CD45RA"), values)
+
+
+# Analyses and exports of features that some source of a merge did not
+# measure (#552). Each oracle is a store that a different path writes: a
+# source's own store, the intersection merge of the sources, which holds only
+# the features that both measured, or the formula computed with NumPy from
+# the merged counts.
+
+_NORMALIZE_REMEDY = (
+    "Normalize the cells of the sources that measured them, or a feature "
+    "selection of only the features that every source of the selected cells "
+    "measured."
+)
+_EXPORT_REMEDY = (
+    "Export the cells of the sources that measured them, with cell_key or "
+    "cell_selection, or only the features that every source of the exported "
+    "cells measured, with feature_names or feature_indexes."
+)
+_PANEL_RECORD = (
+    "The feature columns 'measured_in_left', 'measured_in_right' record which "
+    "features each source measured."
+)
+_PANELS_LACK = (
+    "Source 'left' lacks 1: 'CD20'. Source 'right' lacks 2: 'CD45RA', 'CD27'."
+)
+
+
+def _left_out(caught: Any) -> list[str]:
+    """Return the warnings of analyses that leave out unmeasured features."""
+    return [
+        str(warning.message)
+        for warning in caught
+        if "leaves out" in str(warning.message)
+    ]
+
+
+def _feature_indexes(store: DataStore, assay: str, names: list[str]) -> list[int]:
+    """Return the positions of ``names`` among the features of ``assay``, in the assay's order."""
+    stored = store._get_assay(assay).feats.fetch_all("names").astype(str)
+    return np.flatnonzero(np.isin(stored, names)).tolist()
+
+
+def _normalized_frame(
+    store: DataStore, ref: ArtifactRef, prefix: str = ""
+) -> pd.DataFrame:
+    """Return a normalized artifact by cell ID, ``prefix`` before each, and feature name."""
+    status = store.artifacts.inspect(ref)
+    rows = read_stored_selection_indices(
+        store.zw,
+        status.input_ref("cell_selection"),
+        kind="cell_selection",
+        scope="datastore",
+        assay=None,
+        table_path="cellData",
+    )
+    columns = read_feature_selection_indices(
+        store.zw, str(ref.assay), status.input_ref("feature_selection")
+    )
+    names = store._get_assay(str(ref.assay)).feats.fetch_all("names").astype(str)
+    ids = store.cells.fetch_all("ids").astype(str)[rows]
+    return pd.DataFrame(
+        np.asarray(store.artifacts.load(ref)["data"][:]),
+        index=[f"{prefix}{cell}" for cell in ids],
+        columns=names[columns],
+    )
+
+
+def _exported_frame(adata: Any, prefix: str = "") -> pd.DataFrame:
+    """Return an exported AnnData's X by cell ID, ``prefix`` before each, and feature name."""
+    return pd.DataFrame(
+        np.asarray(adata.X.toarray()),
+        index=[f"{prefix}{cell}" for cell in adata.obs_names],
+        columns=list(adata.var["names"]),
+    )
+
+
+def test_normalization_refuses_a_feature_that_a_source_of_its_cells_did_not_measure(
+    panels,
+) -> None:
+    store = panels.open()
+    every = store.snapshot_cell_selection("I")
+    universe = store.features.universe(from_assay="ADT")
+
+    def normalized() -> int:
+        return len(
+            list_artifacts(store.zw, scope="assay", assay="ADT", kind="normalized")
+        )
+
+    before = normalized()
+    with pytest.raises(ValueError) as refused:
+        store.features.normalize(every, universe)
+    assert str(refused.value) == (
+        "Assay 'ADT' records that some source of the selected cells did not "
+        "measure 3 of the 9 selected features, so their zero counts in its cells "
+        f"are not measurements. {_PANELS_LACK} {_PANEL_RECORD} {_NORMALIZE_REMEDY}"
+    )
+    assert normalized() == before
+    # A read-only store refuses the same way, before it would refuse to write.
+    read_only = DataStore(
+        str(panels.base / "merged.zarr"),
+        default_assay="ADT",
+        min_features_per_cell=0,
+        nthreads=1,
+        zarr_mode="r",
+    )
+    with pytest.raises(ValueError, match="^Assay 'ADT' records that some source"):
+        read_only.features.normalize(every, universe)
+
+    # The left study did not measure CD20, which every other antibody of the
+    # universe lacks in its cells alone.
+    left_cells = store.snapshot_cell_selection("left_cells")
+    with pytest.raises(ValueError) as refused:
+        store.features.normalize(left_cells, universe)
+    assert str(refused.value) == (
+        "Assay 'ADT' records that some source of the selected cells did not "
+        "measure 1 of the 9 selected features, so their zero counts in its cells "
+        f"are not measurements. Source 'left' lacks 1: 'CD20'. {_PANEL_RECORD} "
+        f"{_NORMALIZE_REMEDY}"
+    )
+
+    # The left study's panel over its cells normalizes as the left store does.
+    left_panel = store.features.snapshot(
+        from_assay="ADT",
+        feature_indexes=_feature_indexes(store, "ADT", _PANELS["left"]),
+    )
+    own = panels.open("left")
+    expected = _normalized_frame(
+        own,
+        own.features.normalize(
+            own.snapshot_cell_selection("I"), own.features.universe(from_assay="ADT")
+        ),
+        prefix="left__",
+    )
+    found = _normalized_frame(store, store.features.normalize(left_cells, left_panel))
+    pd.testing.assert_frame_equal(found.loc[expected.index, expected.columns], expected)
+    np.testing.assert_allclose(found["CD45RA"].mean(), expected["CD45RA"].mean())
+
+    # The antibodies that both studies stained, over every cell, normalize as
+    # the intersection merge normalizes them.
+    shared = store.features.snapshot(
+        from_assay="ADT",
+        feature_indexes=_feature_indexes(store, "ADT", _SHARED_ANTIBODIES),
+    )
+    intersection = panels.open("intersection")
+    expected = _normalized_frame(
+        intersection,
+        intersection.features.normalize(
+            intersection.snapshot_cell_selection("I"),
+            intersection.features.universe(from_assay="ADT"),
+        ),
+    )
+    found = _normalized_frame(store, store.features.normalize(every, shared))
+    pd.testing.assert_frame_equal(found.loc[expected.index, expected.columns], expected)
+
+
+def test_normed_exports_refuse_a_feature_that_a_source_of_their_cells_did_not_measure(
+    panels,
+) -> None:
+    pytest.importorskip("anndata")
+    store = panels.open()
+    with pytest.raises(ValueError) as refused:
+        store.to_anndata(from_assay="ADT", matrix="normed")
+    assert str(refused.value) == (
+        "Assay 'ADT' records that some source of the exported cells did not "
+        "measure 3 of the 9 exported features, so their zero counts in its cells "
+        f"are not measurements. {_PANELS_LACK} {_PANEL_RECORD} {_EXPORT_REMEDY}"
+    )
+    with pytest.raises(ValueError, match="Source 'left' lacks 1: 'CD20'"):
+        store.to_anndata(from_assay="ADT", matrix="normed", cell_key="left_cells")
+
+    # The left study's panel of its cells exports as the left store's own.
+    found = _exported_frame(
+        store.to_anndata(
+            from_assay="ADT",
+            matrix="normed",
+            cell_key="left_cells",
+            feature_names=_PANELS["left"],
+        )
+    )
+    expected = _exported_frame(
+        panels.open("left").to_anndata(from_assay="ADT", matrix="normed"),
+        prefix="left__",
+    )
+    pd.testing.assert_frame_equal(found.loc[expected.index, expected.columns], expected)
+    # The shared antibodies of every cell export as the intersection merge's.
+    found = _exported_frame(
+        store.to_anndata(
+            from_assay="ADT", matrix="normed", feature_names=_SHARED_ANTIBODIES
+        )
+    )
+    expected = _exported_frame(
+        panels.open("intersection").to_anndata(
+            from_assay="ADT", matrix="normed", feature_names=_SHARED_ANTIBODIES
+        )
+    )
+    pd.testing.assert_frame_equal(found.loc[expected.index], expected)
+    # Raw counts export every antibody and declare what each study measured.
+    raw = store.to_anndata(from_assay="ADT")
+    assert raw.shape == (2 * _N_STUDY, 9)
+    assert raw.uns["cytearc"]["measuredFeatures"] == {
+        "ADT": {"measured_in_left": "left", "measured_in_right": "right"}
+    }
+
+
+@pytest.mark.parametrize("aggregation", ["sum", "mean"])
+def test_bulk_profiles_leave_out_features_that_a_source_of_their_cells_did_not_measure(
+    panels, aggregation
+) -> None:
+    store = panels.open()
+    options: dict[str, Any] = {
+        "from_assay": "ADT",
+        "aggr_type": aggregation,
+        "count_detected": True,
+        "feature_label": "name",
+    }
+    with pytest.warns(UserWarning) as caught:
+        bulk = store.compare.compute_bulk("cell_type", **options)
+    assert _left_out(caught) == [
+        "compare.compute_bulk leaves out 3 features that some source of the cells "
+        "that it reads did not measure, since their zero counts in its cells are "
+        f"not measurements. {_PANELS_LACK}"
+    ]
+    # The shared antibodies' profiles are those of the intersection merge.
+    expected = panels.open("intersection").compare.compute_bulk("cell_type", **options)
+    pd.testing.assert_frame_equal(bulk.profiles, expected.profiles)
+    assert expected.detected is not None
+    pd.testing.assert_frame_equal(bulk.detected, expected.detected)
+    pd.testing.assert_frame_equal(bulk.columns, expected.columns)
+    # The profiles leave the unmeasured antibodies out with empty rows kept too.
+    kept = store.compare.compute_bulk(
+        "cell_type", remove_empty_features=False, **options
+    )
+    assert kept.profiles.index.tolist() == _SHARED_ANTIBODIES
+
+    # The left study's cells keep its own antibodies, as its own store's
+    # profiles do, and leave out CD20, which the left study did not stain.
+    with pytest.warns(UserWarning) as caught:
+        left = store.compare.compute_bulk(
+            "cell_type",
+            cell_selection=store.snapshot_cell_selection("left_cells"),
+            **options,
+        )
+    assert _left_out(caught) == [
+        "compare.compute_bulk leaves out 1 feature that some source of the cells "
+        "that it reads did not measure, since their zero counts in its cells are "
+        "not measurements. Source 'left' lacks 1: 'CD20'."
+    ]
+    own = panels.open("left").compare.compute_bulk("cell_type", **options)
+    pd.testing.assert_frame_equal(left.profiles, own.profiles)
+    assert own.detected is not None
+    pd.testing.assert_frame_equal(left.detected, own.detected)
+
+
+_RNA_SHARED = [f"G{index}" for index in range(120)]
+_RNA_LEFT_ONLY = [f"L{index}" for index in range(40)]
+_PEAKS_SHARED = [f"chr1:{1000 * index}-{1000 * index + 500}" for index in range(60)]
+_PEAKS_LEFT_ONLY = [f"chr2:{1000 * index}-{1000 * index + 500}" for index in range(20)]
+
+
+@dataclass(frozen=True)
+class _MergedSources:
+    """A merge of a left source that measured features of its own and a right source, beside their own stores and their intersection merge."""
+
+    base: Path
+    assay: str
+
+    def open(self, name: str = "merged") -> DataStore:
+        return DataStore(
+            str(self.base / f"{name}.zarr"),
+            default_assay=self.assay,
+            min_features_per_cell=0,
+            nthreads=1,
+        )
+
+    def copy(self, tmp_path: Path) -> DataStore:
+        """Return a copy of the merge, which a test may change."""
+        shutil.copytree(self.base / "merged.zarr", tmp_path / "merged.zarr")
+        return _MergedSources(tmp_path, self.assay).open()
+
+
+def _merge_sources(
+    base: Path,
+    assay: str,
+    counts: dict[str, np.ndarray],
+    features: dict[str, list[str]],
+) -> _MergedSources:
+    """Write a store of ``counts`` for each source, then their union and intersection merges."""
+    for name, values in counts.items():
+        write_count_store(
+            str(base / f"{name}.zarr"),
+            {assay: values},
+            "uint32",
+            feature_ids={assay: features[name]},
+        )
+    stores = _MergedSources(base, assay)
+    for name, kind in (("merged", "union"), ("intersection", "intersection")):
+        DataStoreMerge(
+            [stores.open(source) for source in counts],
+            str(base / f"{name}.zarr"),
+            list(counts),
+            nthreads=1,
+            features=kind,
+        ).dump()
+    for name in ("merged", "intersection"):
+        store = stores.open(name)
+        ids = store.cells.fetch_all("ids").astype(str)
+        store.cells.insert(
+            "study", by_cell_id(store.cells, np.char.partition(ids, "__")[:, 0])
+        )
+        for source in counts:
+            store.cells.insert(
+                f"{source}_cells",
+                by_cell_id(store.cells, np.char.startswith(ids, f"{source}__")),
+            )
+    return stores
+
+
+@pytest.fixture(scope="module")
+def rna_sources(tmp_path_factory) -> _MergedSources:
+    """Merge 200 cells of an RNA source with 40 genes of its own and 200 of a source of only the 120 shared genes.
+
+    Ten shared genes mark each of two cell types, at eight times their base
+    rate. The left source's own genes follow Poisson(2) in each of its cells,
+    so in a merge of both sources only the right source's zeros spread them.
+    """
+    rng = np.random.default_rng(11)
+    base_rates = rng.gamma(1.0, 2.0, size=len(_RNA_SHARED))
+    counts: dict[str, np.ndarray] = {}
+    for name in ("left", "right"):
+        cell_type = rng.random(200) < 0.5
+        rates = np.tile(base_rates, (200, 1))
+        rates[cell_type, :10] *= 8
+        rates[~cell_type, 10:20] *= 8
+        counts[name] = rng.poisson(rates)
+    counts["left"] = np.hstack(
+        [counts["left"], rng.poisson(2.0, size=(200, len(_RNA_LEFT_ONLY)))]
+    )
+    return _merge_sources(
+        tmp_path_factory.mktemp("rna_sources"),
+        "RNA",
+        counts,
+        {"left": _RNA_SHARED + _RNA_LEFT_ONLY, "right": _RNA_SHARED},
+    )
+
+
+@pytest.fixture(scope="module")
+def atac_sources(tmp_path_factory) -> _MergedSources:
+    """Merge 150 cells of an ATAC source that called 20 peaks of its own, open in 60% of its cells, and 150 of a source of the 60 shared peaks."""
+    rng = np.random.default_rng(12)
+    counts = {
+        name: rng.binomial(1, 0.15 + 0.1 * (np.arange(60) % 3 == 0), size=(150, 60))
+        for name in ("left", "right")
+    }
+    counts["left"] = np.hstack(
+        [counts["left"], rng.binomial(1, 0.6, size=(150, len(_PEAKS_LEFT_ONLY)))]
+    )
+    return _merge_sources(
+        tmp_path_factory.mktemp("atac_sources"),
+        "ATAC",
+        counts,
+        {"left": _PEAKS_SHARED + _PEAKS_LEFT_ONLY, "right": _PEAKS_SHARED},
+    )
+
+
+def _dense_counts(store: DataStore, assay: str) -> np.ndarray:
+    return np.asarray(store._get_assay(assay).rawData[:, :].compute(), dtype=np.float64)
+
+
+def _measured_gene_scores(
+    flavor: str, counts: np.ndarray, genes: np.ndarray
+) -> np.ndarray:
+    """Score the columns ``genes`` of ``counts`` over every row, each cell's total taken over all of its genes.
+
+    cytearc divides the variance of counts scaled to 1,000 by the trend of
+    genes with a similar mean; Pearson residuals follow Lause, Berens and
+    Kobak (2021): ``mu = n_c p_g``, each gene's share of every count, with
+    theta 100, clipped at the square root of the cells.
+    """
+    totals = counts.sum(axis=1)
+    kept = counts[:, genes]
+    if flavor == "cytearc":
+        values = 1000 * kept / np.where(totals == 0, 1, totals)[:, None]
+        average = values.mean(axis=0)
+        positive = average > 0
+        scores = np.zeros(kept.shape[1])
+        scores[positive] = fit_lowess(
+            average[positive], values.var(axis=0)[positive], 200, 0.1
+        )
+        return scores
+    expected = totals[:, None] * (kept.sum(axis=0) / totals.sum())[None, :]
+    residuals = np.zeros_like(kept)
+    positive = expected > 0
+    residuals[positive] = (kept - expected)[positive] / np.sqrt(
+        expected + expected**2 / 100.0
+    )[positive]
+    clip = np.sqrt(len(counts))
+    return np.clip(residuals, -clip, clip).var(axis=0)
+
+
+def _top(scores: np.ndarray, candidates: np.ndarray, top_n: int) -> np.ndarray:
+    """Return the mask of the ``top_n`` candidates by score, ties to the lower index."""
+    index = np.flatnonzero(candidates)
+    selected = np.zeros(len(scores), dtype=bool)
+    selected[index[np.lexsort((index, -scores[index]))][:top_n]] = True
+    return selected
+
+
+def _selected_names(store: DataStore, ref: ArtifactRef) -> list[str]:
+    names = store._get_assay(str(ref.assay)).feats.fetch_all("names").astype(str)
+    return names[read_feature_selection_indices(store.zw, str(ref.assay), ref)].tolist()
+
+
+_HVG_OPTIONS: dict[str, Any] = {
+    "top_n": 30,
+    "blacklist": "",
+    "min_cells": 0,
+    "max_cells": np.inf,
+    "show_plot": False,
+}
+_RNA_LACK = "Source 'right' lacks 40: 'L0', 'L1', 'L2', 'L3', 'L4' and 35 more."
+
+
+@pytest.mark.parametrize("flavor", ["cytearc", "seurat_v3", "pearson_residuals"])
+def test_hvgs_leave_out_genes_that_a_source_of_their_cells_did_not_measure(
+    rna_sources, flavor
+) -> None:
+    store = rna_sources.open()
+    names = store.RNA.feats.fetch_all("names").astype(str)
+    shared = np.isin(names, _RNA_SHARED)
+    options = {**_HVG_OPTIONS, "flavor": flavor}
+    if flavor == "seurat_v3":
+        # seurat_v3 takes no variance bounds and no max_cells of np.inf.
+        options.pop("max_cells")
+
+    with pytest.warns(UserWarning) as caught:
+        ref = store.features.hvgs(store.snapshot_cell_selection("I"), **options)
+    assert _left_out(caught) == [
+        "features.hvgs leaves out 40 genes that some source of the selected cells "
+        "did not measure, since their zero counts in its cells are not "
+        f"measurements. {_RNA_LACK}"
+    ]
+    group = store.artifacts.load(ref)
+    selected = np.asarray(group["values"][:], dtype=bool)
+    scores = np.asarray(group["corrected_variance"][:])
+    # The left source's own genes take no part and score 0, as genes without
+    # counts do; the selection records which genes both sources measured.
+    assert not selected[~shared].any() and (scores[~shared] == 0).all()
+    assert store.artifacts.inspect(ref).parameters[
+        "measured_features_fingerprint"
+    ] == fingerprint_array(shared)
+    if flavor == "seurat_v3":
+        # Raw counts alone set seurat_v3's scores, so the shared genes score
+        # as in the intersection merge, whose trend holds them alone.
+        intersection = rna_sources.open("intersection")
+        expected = intersection.features.hvgs(
+            intersection.snapshot_cell_selection("I"), **options
+        )
+        np.testing.assert_allclose(
+            scores[shared],
+            intersection.artifacts.load(expected)["corrected_variance"][:],
+            rtol=1e-10,
+        )
+        assert _selected_names(store, ref) == _selected_names(intersection, expected)
+    else:
+        expected_scores = _measured_gene_scores(
+            flavor, _dense_counts(store, "RNA"), np.flatnonzero(shared)
+        )
+        np.testing.assert_allclose(scores[shared], expected_scores, rtol=1e-8)
+        np.testing.assert_array_equal(
+            selected[shared], _top(expected_scores, np.ones(shared.sum(), bool), 30)
+        )
+
+    # Each source's cells select what the source's own store selects: the
+    # right source lacks the left genes, which the left source measured.
+    for source, warned in (("right", [_RNA_LACK]), ("left", [])):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            found = store.features.hvgs(
+                store.snapshot_cell_selection(f"{source}_cells"), **options
+            )
+        assert [message.rsplit(". ", 1)[-1] for message in _left_out(caught)] == [
+            line.rsplit(". ", 1)[-1] for line in warned
+        ]
+        own = rna_sources.open(source)
+        expected = own.features.hvgs(own.snapshot_cell_selection("I"), **options)
+        assert _selected_names(store, found) == _selected_names(own, expected)
+        own_scores = np.asarray(own.artifacts.load(expected)["corrected_variance"][:])
+        positions = _feature_indexes(
+            store, "RNA", own.RNA.feats.fetch_all("names").astype(str).tolist()
+        )
+        np.testing.assert_allclose(
+            np.asarray(store.artifacts.load(found)["corrected_variance"][:])[positions],
+            own_scores,
+            rtol=1e-6,
+        )
+
+
+def test_batch_hvgs_leave_out_genes_that_a_source_of_their_cells_did_not_measure(
+    rna_sources,
+) -> None:
+    store = rna_sources.open()
+    intersection = rna_sources.open("intersection")
+    options = {**_HVG_OPTIONS, "flavor": "seurat_v3", "batch": "study"}
+    options.pop("max_cells")
+    with pytest.warns(UserWarning, match="features.hvgs leaves out 40 genes"):
+        ref = store.features.hvgs(store.snapshot_cell_selection("I"), **options)
+    expected = intersection.features.hvgs(
+        intersection.snapshot_cell_selection("I"), **options
+    )
+    # Each batch is a source, and each scores the shared genes as the
+    # intersection merge's batch does; the left batch's own genes are no
+    # candidate, though that batch measured them.
+    assert _selected_names(store, ref) == _selected_names(intersection, expected)
+    shared = np.isin(store.RNA.feats.fetch_all("names").astype(str), _RNA_SHARED)
+    for name in ("corrected_variance", "batch_count"):
+        np.testing.assert_allclose(
+            np.asarray(store.artifacts.load(ref)[name][:])[shared],
+            intersection.artifacts.load(expected)[name][:],
+            rtol=1e-10,
+        )
+
+
+def test_prevalent_peaks_leave_out_peaks_that_a_source_of_their_cells_did_not_measure(
+    atac_sources,
+) -> None:
+    store = atac_sources.open()
+    names = store.ATAC.feats.fetch_all("names").astype(str)
+    shared = np.isin(names, _PEAKS_SHARED)
+    with pytest.warns(UserWarning) as caught:
+        ref = store.features.prevalent_peaks(
+            store.snapshot_cell_selection("I"), from_assay="ATAC", top_n=30
+        )
+    assert _left_out(caught) == [
+        "features.prevalent_peaks leaves out 20 peaks that some source of the "
+        "selected cells did not measure, since their zero counts in its cells are "
+        "not measurements. Source 'right' lacks 20: 'chr2:0-500', 'chr2:1000-1500', "
+        "'chr2:2000-2500', 'chr2:3000-3500', 'chr2:4000-4500' and 15 more."
+    ]
+    assert store.artifacts.inspect(ref).parameters == {
+        "top_n": 30,
+        "measured_features_fingerprint": fingerprint_array(shared),
+    }
+    # TF-IDF prevalence: each cell's counts over its total, summed over the
+    # cells and weighted by log2(1 + n / (df + 1)).
+    counts = _dense_counts(store, "ATAC")
+    totals = counts.sum(axis=1)
+    frequency = (counts > 0).sum(axis=0)
+    prevalence = (counts / np.where(totals == 0, 1, totals)[:, None]).sum(
+        axis=0
+    ) * np.log2(1 + len(counts) / (frequency + 1))
+    ranked = np.flatnonzero(shared)[np.argsort(-prevalence[shared], kind="stable")]
+    assert _selected_names(store, ref) == names[np.sort(ranked[:30])].tolist()
+
+    # Each source's cells select what its own store selects.
+    for source in ("right", "left"):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            found = store.features.prevalent_peaks(
+                store.snapshot_cell_selection(f"{source}_cells"),
+                from_assay="ATAC",
+                top_n=30,
+            )
+        assert len(_left_out(caught)) == (source == "right")
+        own = atac_sources.open(source)
+        expected = own.features.prevalent_peaks(
+            own.snapshot_cell_selection("I"), from_assay="ATAC", top_n=30
+        )
+        assert _selected_names(store, found) == _selected_names(own, expected)
+
+
+def _network() -> pd.DataFrame:
+    """Return a network of a set of the left source's own genes and a set of marker genes."""
+    return pd.DataFrame(
+        {
+            "source": ["left_genes"] * 10 + ["type_a"] * 10,
+            "target": _RNA_LEFT_ONLY[:10] + _RNA_SHARED[:10],
+            "weight": 1.0,
+        }
+    )
+
+
+def _scores_frame(store: DataStore, ref: ArtifactRef, prefix: str = "") -> pd.DataFrame:
+    result = store.scores.load(ref)
+    ids = store.cells.fetch_all("ids").astype(str)[np.asarray(result.cell_index)]
+    return pd.DataFrame(
+        np.asarray(result.data.compute()),
+        index=[f"{prefix}{cell}" for cell in ids],
+        columns=[str(name) for name in result.source_names],
+    )
+
+
+@pytest.mark.parametrize("method", ["waggr", "aucell"])
+def test_scores_leave_out_genes_that_a_source_of_their_cells_did_not_measure(
+    rna_sources, method
+) -> None:
+    store = rna_sources.open()
+    score = getattr(store.scores, method)
+    every = store.snapshot_cell_selection("I")
+    universe = store.features.universe(from_assay="RNA")
+    label = {"waggr": "WAGGR", "aucell": "AUCell"}[method]
+    with pytest.warns(UserWarning) as caught:
+        ref = score(_network(), every, features=universe, from_assay="RNA")
+    assert _left_out(caught) == [
+        f"{label} leaves out 40 features that some source of the selected cells "
+        "did not measure, since their zero counts in its cells are not "
+        f"measurements. {_RNA_LACK}"
+    ]
+    # The left genes' set keeps none of its targets, and the scores read the
+    # selection of the shared genes, which their lineage records.
+    found = _scores_frame(store, ref)
+    assert found.columns.tolist() == ["type_a"]
+    assert _selected_names(store, store.scores.load(ref).feature_selection) == (
+        _RNA_SHARED
+    )
+    if method == "aucell":
+        # Ranks of raw counts over the same genes, in the same order, are
+        # those of the intersection merge.
+        intersection = rna_sources.open("intersection")
+        expected = _scores_frame(
+            intersection,
+            intersection.scores.aucell(
+                _network(),
+                intersection.snapshot_cell_selection("I"),
+                features=intersection.features.universe(from_assay="RNA"),
+                from_assay="RNA",
+            ),
+        )
+        pd.testing.assert_frame_equal(found.loc[expected.index], expected)
+    else:
+        # The weighted mean of counts scaled to 1,000 over each cell's total.
+        counts = _dense_counts(store, "RNA")
+        targets = _feature_indexes(store, "RNA", _RNA_SHARED[:10])
+        totals = counts.sum(axis=1)
+        values = 1000 * counts[:, targets] / np.where(totals == 0, 1, totals)[:, None]
+        np.testing.assert_allclose(
+            found["type_a"].to_numpy(), values.mean(axis=1), rtol=1e-6
+        )
+
+    # Each source's cells score as its own store scores them.
+    for source in ("right", "left"):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            found = _scores_frame(
+                store,
+                score(
+                    _network(),
+                    store.snapshot_cell_selection(f"{source}_cells"),
+                    features=universe,
+                    from_assay="RNA",
+                ),
+            )
+        assert len(_left_out(caught)) == (source == "right")
+        own = rna_sources.open(source)
+        expected = _scores_frame(
+            own,
+            getattr(own.scores, method)(
+                _network(),
+                own.snapshot_cell_selection("I"),
+                features=own.features.universe(from_assay="RNA"),
+                from_assay="RNA",
+            ),
+            prefix=f"{source}__",
+        )
+        pd.testing.assert_frame_equal(found.loc[expected.index], expected)
+
+    # A selection of only the left source's own genes leaves no gene to score.
+    left_genes = store.features.snapshot(
+        from_assay="RNA", feature_indexes=_feature_indexes(store, "RNA", _RNA_LEFT_ONLY)
+    )
+    with pytest.raises(ValueError) as refused:
+        score(_network(), every, features=left_genes, from_assay="RNA")
+    assert str(refused.value) == (
+        f"{label} would leave out every selected feature, since none was measured "
+        f"by every source of the selected cells. {_RNA_LACK} Score the cells of "
+        "the sources that measured them, or features that every source measured."
+    )
+
+
+def test_selections_record_the_measured_features_only_when_the_record_changes_them(
+    rna_sources, atac_sources, tmp_path
+) -> None:
+    def hvgs(store: DataStore, cells: ArtifactRef) -> ArtifactRef:
+        return store.features.hvgs(cells, top_n=30, show_plot=False)
+
+    def peaks(store: DataStore, cells: ArtifactRef) -> ArtifactRef:
+        return store.features.prevalent_peaks(cells, from_assay="ATAC", top_n=30)
+
+    for sources, select, folder in (
+        (rna_sources, hvgs, "rna"),
+        (atac_sources, peaks, "atac"),
+    ):
+        store = sources.copy(tmp_path / folder)
+        assay = store._get_assay(sources.assay)
+        every = store.snapshot_cell_selection("I")
+        left = store.snapshot_cell_selection("left_cells")
+        # The left source measured every feature, so the record leaves none
+        # of them out of a selection of its cells, which records nothing.
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            measured_by_left = select(store, left)
+        assert _left_out(caught) == []
+        parameters = store.artifacts.inspect(measured_by_left).parameters
+        assert "measured_features_fingerprint" not in parameters
+        with pytest.warns(UserWarning, match="leaves out"):
+            measured_by_both = select(store, every)
+        assert (
+            "measured_features_fingerprint"
+            in store.artifacts.inspect(measured_by_both).parameters
+        )
+        assay.feats.drop("measured_in_left")
+        assay.feats.drop("measured_in_right")
+        # Without the record, the left cells' selection is the same artifact,
+        # and the selection of every cell is computed again over every
+        # feature, which it records no measured features of.
+        assert select(store, left) == measured_by_left
+        again = select(store, every)
+        assert again != measured_by_both
+        assert (
+            "measured_features_fingerprint"
+            not in store.artifacts.inspect(again).parameters
+        )
+
+    # A score of cells whose sources measured every feature records the
+    # selection that it was given.
+    store = rna_sources.open()
+    universe = store.features.universe(from_assay="RNA")
+    ref = store.scores.waggr(
+        _network(),
+        store.snapshot_cell_selection("left_cells"),
+        features=universe,
+        from_assay="RNA",
+    )
+    assert store.scores.load(ref).feature_selection == universe
+
+
+@pytest.mark.slow
+def test_rna_and_atac_runs_select_only_features_that_every_source_measured(
+    rna_sources, atac_sources, tmp_path
+) -> None:
+    store = rna_sources.copy(tmp_path / "rna")
+    hvg = {"top_n": 30, "min_cells": 1, "max_cells": 401}
+    with pytest.warns(UserWarning, match="features.hvgs leaves out 40 genes"):
+        run = store.pipeline.rna(**{**_PIPELINE, "hvg": hvg, "leiden": False})
+    genes = _selected_names(store, run["highly_variable_features"])
+    assert genes and set(genes) <= set(_RNA_SHARED)
+    assert genes == _selected_names(
+        store,
+        store.features.hvgs(store.snapshot_cell_selection("I"), show_plot=False, **hvg),
+    )
+    assert _normalized_frame(store, run["normalized"]).columns.tolist() == genes
+
+    store = atac_sources.copy(tmp_path / "atac")
+    with pytest.warns(UserWarning, match="features.prevalent_peaks leaves out 20"):
+        run = store.pipeline.atac(**{**_ATAC, "prevalent_peaks": {"top_n": 30}})
+    peaks = _selected_names(store, run["prevalent_peaks"])
+    assert len(peaks) == 30 and set(peaks) <= set(_PEAKS_SHARED)
+    assert _normalized_frame(store, run["normalized"]).columns.tolist() == peaks

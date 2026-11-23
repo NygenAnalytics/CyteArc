@@ -1367,12 +1367,16 @@ def _zeros_read_as_counts(first: str, *, adt: bool = False, shared: bool = True)
         " The composite reads zero counts for the features a source lacks; columns "
         f"such as 'measured_in_{first}' record what each source measured, so "
         + (
-            "plots, marker search, compare.test and the ADT recipe leave those "
-            "zeros out, while normalization and scores still read them as counts."
+            "plots, marker search, bulk profiles and the ADT recipe leave those "
+            "zeros out, normalization, normalized exports, compare.test and "
+            "imputation refuse them, and features.detected and add_grouped_assay "
+            "still read them as counts."
             if adt
-            else "plots, marker search and compare.test leave those zeros out, "
-            "while normalization, feature selection and scores still read them "
-            "as counts."
+            else "plots, marker search, feature selection, WAGGR, AUCell and bulk "
+            "profiles leave those zeros out, normalization, normalized exports, "
+            "compare.test and imputation refuse them, and cell-cycle and "
+            "chromVAR scores, features.detected, add_grouped_assay and mapping "
+            "still read them as counts."
         )
     )
     return zeros + (
@@ -1947,8 +1951,11 @@ def test_unshared_features_warning_names_its_combinations():
     ) == shared.format("merged") + (
         " The merge writes zero counts for the features a source lacks; columns "
         "such as 'measured_in_a' record what each source measured, so plots, "
-        "marker search and compare.test leave those zeros out, while "
-        "normalization, feature selection and scores still read them as counts."
+        "marker search, feature selection, WAGGR, AUCell and bulk profiles "
+        "leave those zeros out, normalization, normalized exports, compare.test "
+        "and imputation refuse them, and cell-cycle and chromVAR scores, "
+        "features.detected, add_grouped_assay and mapping still read them as "
+        "counts."
     )
     assert unshared_features_warning(
         "RNA", alignment, ["a", "b"], combination="composite", assay_type="RNA"

@@ -701,6 +701,7 @@ _CONTRACTS = (
                 "resolved_input",
                 "feature_summary",
             ),
+            **_classified("derived", "measured_features_fingerprint"),
         },
     ),
     OperationContract(

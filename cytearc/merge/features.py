@@ -419,11 +419,12 @@ def unshared_features_warning(
     """Return the warning about the merged features that a source lacks.
 
     A merge writes zero counts for a feature in the cells of a source that
-    lacks it, and a union composite reads them; analyses take the zeros as
-    measured counts. Both record which features each source measured in a
-    feature column of its own
-    (:func:`~cytearc.storage.metadata_keys.measured_features_column`), which
-    the ADT recipe reads for an assay of type ``"ADT"``. The warning counts
+    lacks it, and a union composite reads them. Both record which features
+    each source measured in a feature column of its own
+    (:func:`~cytearc.storage.metadata_keys.measured_features_column`), from
+    which analyses leave the zeros out or refuse them, and the warning ends
+    with those that do and those that still read them as counts, the ADT
+    recipe for an assay of type ``"ADT"`` among them. The warning counts
     the merged features of ``assay_name`` that not every source holding the
     assay measured, then gives each such source's number of missing features
     and names the first ``UNSHARED_FEATURE_EXAMPLES`` of them in merged
@@ -500,12 +501,16 @@ def unshared_features_warning(
         + " ".join(lacking)
         + f"{zeros}; {record}, so "
         + (
-            "plots, marker search, compare.test and the ADT recipe leave those "
-            "zeros out, while normalization and scores still read them as counts."
+            "plots, marker search, bulk profiles and the ADT recipe leave those "
+            "zeros out, normalization, normalized exports, compare.test and "
+            "imputation refuse them, and features.detected and add_grouped_assay "
+            "still read them as counts."
             if assay_type == "ADT"
-            else "plots, marker search and compare.test leave those zeros out, "
-            "while normalization, feature selection and scores still read them "
-            "as counts."
+            else "plots, marker search, feature selection, WAGGR, AUCell and bulk "
+            "profiles leave those zeros out, normalization, normalized exports, "
+            "compare.test and imputation refuse them, and cell-cycle and "
+            "chromVAR scores, features.detected, add_grouped_assay and mapping "
+            "still read them as counts."
         )
     )
     if combination == "merge":

@@ -51,7 +51,7 @@ from ...metadata.arguments import (
     HtoIdentityArguments,
     PrevalentPeakArguments,
 )
-from ...metadata.membership import measured_selection
+from ...metadata.membership import leave_out_unmeasured_features, measured_selection
 from ...metadata.rows import (
     apply_missing_mask,
     metadata_missing_mask,
@@ -2645,7 +2645,10 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
 
         This method first calculates prevalence of each peak by computing sum of TF-IDF normalized values for each peak
         and then marks `top_n` peaks with the highest prevalence as prevalent peaks. Peaks whose prevalence ties at the
-        cutoff are kept in feature order, on every platform.
+        cutoff are kept in feature order, on every platform. On a store merged from sources that called different peaks,
+        as its feature columns ``measured_in_<source>`` record, the peaks that some source of the selected cells did not
+        measure are left out, with a warning that names them, and every remaining peak is marked when fewer than `top_n`
+        remain.
 
         Args:
             from_assay: Assay to use for peak selection. If no value is provided
@@ -2679,6 +2682,23 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         self._require_measured_cells(
             assay.name, cell_selection, operation="select_prevalent_peaks"
         )
+        measured = leave_out_unmeasured_features(
+            assay.cells,
+            assay.feats,
+            read_stored_selection_indices(
+                self.zw,
+                cell_selection,
+                kind="cell_selection",
+                scope="datastore",
+                assay=None,
+                table_path="cellData",
+            ),
+            assay=assay.name,
+            analysis="features.prevalent_peaks",
+            kind="peak",
+            of_cells="the selected cells",
+            remedy="Select the prevalent peaks of the cells of one source.",
+        )
         summary_ref = ensure_feature_summary(
             self.zw,
             assay,
@@ -2689,6 +2709,9 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             feature_summary=summary_ref,
             top_n=top_n,
             invalidate_cache=invalidate_cache,
+            measured_features_fingerprint=(
+                None if measured is None else fingerprint_array(measured)
+            ),
         )
         record = arguments.to_record()
         feature_ids_fingerprint = _ordered_feature_ids_fingerprint(assay.z)
@@ -2711,7 +2734,9 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
                 summary_ref,
                 n_selected=n_selected,
             )
-            values = assay._prevalent_peak_mask(summary["prevalence"], top_n)
+            values = assay._prevalent_peak_mask(
+                summary["prevalence"], top_n, candidates=measured
+            )
             _write_feature_selection(
                 self.zw,
                 planned,

@@ -484,6 +484,9 @@ class PrevalentPeakArguments(OperationArguments):
     feature_summary: ArtifactRef = artifact_input()
     top_n: int = parameter()
     invalidate_cache: bool = execution()
+    # The fingerprint of the peaks that every source of the selected cells
+    # measured, recorded only when some source did not measure some peak.
+    measured_features_fingerprint: str | None = parameter(None, omit_if_none=True)
 
 
 @dataclass(frozen=True, slots=True)

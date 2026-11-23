@@ -51,6 +51,12 @@ writes it, counts every feature as measured by every source (see
 the exported assay in ``uns["cytearc"]["measuredFeatures"]``, which maps the
 assay to each column and its source, and the cell column of sources in
 ``uns["cytearc"]["cellSources"]``, so an import restores both.
+
+An analysis that selects, ranks or summarizes features leaves out those that
+the source of some of its cells did not measure, with a warning
+(:func:`leave_out_unmeasured_features`); an analysis or an export whose
+result holds a value for each feature that its caller names refuses them
+(:func:`require_features_measured_by_cells`, :func:`require_measured_features`).
 """
 
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -63,6 +69,8 @@ import zarr
 
 from ..storage.artifacts import ValueFingerprintBuilder
 from ..storage.types import member_names
+from ..utils.arguments import quoted_examples
+from ..utils.warnings import warn
 from ..storage.stores import metadata_workers, run_concurrently
 from ..storage.categorical import CategoricalColumn, category_codes_dtype
 from ..storage.metadata_keys import (
@@ -520,15 +528,49 @@ def sources_of_cells(
     return np.flatnonzero(present)
 
 
-def features_measured_by_cells(
+@dataclass(frozen=True, slots=True)
+class CellsMeasuredFeatures:
+    """Which features the sources of some cells measured.
+
+    Attributes:
+        record: The feature table's record of which features each source
+            measured, over every feature of the table.
+        sources: The positions in ``record.sources`` of the sources that the
+            cells belong to.
+        measured: Whether every one of those sources measured each feature.
+    """
+
+    record: FeatureRecord
+    sources: np.ndarray
+    measured: np.ndarray
+
+    def lacking(self, features: np.ndarray, names: np.ndarray) -> str:
+        """Name, for each source of the cells that did not measure some of ``features``, how many it lacks, with examples.
+
+        ``features`` are positions in the feature table, and ``names`` names
+        each feature of the table.
+        """
+        measured = self.record.measured_of(features)
+        sentences = []
+        for code in self.sources:
+            lacked = np.asarray(features)[~measured[code]]
+            if lacked.size:
+                sentences.append(
+                    f"Source {self.record.sources[code]!r} lacks {lacked.size:,}: "
+                    f"{quoted_examples(np.asarray(names)[lacked])}."
+                )
+        return " ".join(sentences)
+
+
+def cells_measured_features(
     cells: Any,
     features: Any,
     rows: np.ndarray,
     *,
     assay: str,
     selected: np.ndarray | None = None,
-) -> np.ndarray | None:
-    """Return whether the source of every cell at ``rows`` measured each feature of ``features``.
+) -> CellsMeasuredFeatures | None:
+    """Return which features of ``features`` the source of every cell at ``rows`` measured.
 
     The cells must be cells that ``assay`` measured. None when the feature
     table holds no record, or when every source of the record measured every
@@ -543,8 +585,149 @@ def features_measured_by_cells(
         return None
     if (record.measured if selected is None else record.measured[:, selected]).all():
         return None
-    present = sources_of_cells(cells, features, rows, record, assay=assay)
-    return np.asarray(np.logical_and.reduce(record.measured[present], axis=0))
+    sources = sources_of_cells(cells, features, rows, record, assay=assay)
+    return CellsMeasuredFeatures(
+        record,
+        sources,
+        np.asarray(np.logical_and.reduce(record.measured[sources], axis=0)),
+    )
+
+
+def features_measured_by_cells(
+    cells: Any,
+    features: Any,
+    rows: np.ndarray,
+    *,
+    assay: str,
+    selected: np.ndarray | None = None,
+) -> np.ndarray | None:
+    """Return whether the source of every cell at ``rows`` measured each feature of ``features``.
+
+    None when :func:`cells_measured_features` returns None.
+
+    Raises:
+        ValueError: As :func:`cell_sources` raises.
+    """
+    measured = cells_measured_features(
+        cells, features, rows, assay=assay, selected=selected
+    )
+    return None if measured is None else measured.measured
+
+
+def _selected_and_unmeasured(
+    measured: CellsMeasuredFeatures, n_features: int, selected: np.ndarray | None
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return the selected features as a mask, and the positions of those that some source of the cells did not measure."""
+    asked = (
+        np.ones(n_features, dtype=bool)
+        if selected is None
+        else np.asarray(selected, dtype=bool)
+    )
+    return asked, np.flatnonzero(asked & ~measured.measured)
+
+
+def leave_out_unmeasured_features(
+    cells: Any,
+    features: Any,
+    rows: np.ndarray,
+    *,
+    assay: str,
+    analysis: str,
+    kind: str,
+    of_cells: str,
+    remedy: str,
+    selected: np.ndarray | None = None,
+    names: np.ndarray | None = None,
+) -> np.ndarray | None:
+    """Leave out the features that the source of some cell at ``rows`` did not measure.
+
+    An analysis that selects, ranks or summarizes features leaves such a
+    feature out, since its zero counts in the cells of a source that did not
+    measure it are not measurements, and warns once: ``analysis``, such as
+    ``"features.hvgs"``, leaves out that many ``kind`` features (``"gene"``)
+    that some source of ``of_cells`` (``"the selected cells"``) did not
+    measure, then how many each source lacks, with examples by ``names``,
+    the feature table's own names when None.
+
+    Returns:
+        The features of the Boolean mask ``selected``, or of every feature
+        without one, that every source of the cells measured; None when it
+        leaves out none of them.
+
+    Raises:
+        ValueError: If every selected feature is left out, naming them by
+            source and ending with ``remedy``; or as :func:`cell_sources`
+            raises.
+    """
+    measured = cells_measured_features(
+        cells, features, rows, assay=assay, selected=selected
+    )
+    if measured is None:
+        return None
+    asked, unmeasured = _selected_and_unmeasured(measured, int(features.N), selected)
+    if not unmeasured.size:
+        return None
+    labels = np.asarray(features.fetch_all("names") if names is None else names)
+    lacking = measured.lacking(unmeasured, labels.astype(str))
+    kept: np.ndarray = np.logical_and(asked, measured.measured)
+    if not kept.any():
+        raise ValueError(
+            f"{analysis} would leave out every selected {kind}, since none was "
+            f"measured by every source of {of_cells}. {lacking} {remedy}"
+        )
+    plural = "" if unmeasured.size == 1 else "s"
+    warn(
+        f"{analysis} leaves out {unmeasured.size:,} {kind}{plural} that some source "
+        f"of {of_cells} did not measure, since their zero counts in its cells are "
+        f"not measurements. {lacking}"
+    )
+    return kept
+
+
+def require_features_measured_by_cells(
+    cells: Any,
+    features: Any,
+    rows: np.ndarray,
+    selected: np.ndarray,
+    *,
+    assay: str,
+    of_cells: str,
+    of_features: str,
+    remedy: str,
+) -> None:
+    """Refuse a feature of the Boolean mask ``selected`` that the source of some cell at ``rows`` did not measure.
+
+    An analysis or an export whose result holds a value for each feature
+    that its caller names refuses such a feature, since its zero counts in
+    the cells of a source that did not measure it are not measurements, as
+    it refuses cells that the assay did not measure
+    (:func:`require_measured_cells`). The cells' sources are read only when
+    some source did not measure a selected feature.
+
+    Raises:
+        ValueError: Saying how many of ``of_features`` (``"selected
+            features"``) some source of ``of_cells`` (``"the selected
+            cells"``) did not measure, how many each source lacks, with
+            examples, the feature columns that record what each source
+            measured, and ``remedy``; or as :func:`cell_sources` raises.
+    """
+    measured = cells_measured_features(
+        cells, features, rows, assay=assay, selected=selected
+    )
+    if measured is None:
+        return
+    asked, unmeasured = _selected_and_unmeasured(measured, int(features.N), selected)
+    if not unmeasured.size:
+        return
+    names = np.asarray(features.fetch_all("names")).astype(str)
+    raise ValueError(
+        f"Assay {assay!r} records that some source of {of_cells} did not measure "
+        f"{unmeasured.size:,} of the {int(asked.sum()):,} {of_features}, so their "
+        "zero counts in its cells are not measurements. "
+        f"{measured.lacking(unmeasured, names)} The feature columns "
+        f"{quoted_examples(measured.record.columns)} record which features each "
+        f"source measured. {remedy}"
+    )
 
 
 def require_measured_features(

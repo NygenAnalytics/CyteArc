@@ -33,7 +33,11 @@ from ...metadata.arguments import (
     SmartLabelArguments,
 )
 from ...metadata.alignment import align_to_cell_ids, keyed_values_remedy
-from ...metadata.membership import exported_measured_features, exported_membership
+from ...metadata.membership import (
+    exported_measured_features,
+    exported_membership,
+    require_features_measured_by_cells,
+)
 from ...metadata.rows import apply_missing_mask, read_metadata_missing_rows
 from ...metadata.selection import resolve_complete_labels
 from ...metadata.artifacts import (
@@ -362,7 +366,10 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
         ``matrix="normed"`` means two different things. Without ``run``,
         ``X`` holds the assay's ``normed`` values of the exported features:
         for RNA, counts scaled by each cell's library size over all of its
-        features to 1,000, without a log transform. With ``run``, ``X`` holds
+        features to 1,000, without a log transform. The source of every
+        exported cell must have measured every exported feature, which a
+        store merged from sources that measured different features records.
+        With ``run``, ``X`` holds
         the run's stored ``normalized`` artifact, the values that its
         reduction read, over the run's selected features only: an RNA run's
         highly variable features (log1p of library-size-scaled counts), an
@@ -404,8 +411,11 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
         Raises:
             ImportError: If ``anndata`` is not installed.
             UnmeasuredCellsError: If normed or other-assay data has an unmeasured cell.
-            ValueError: If an artifact does not cover every exported cell, or
-                a graph does not cover exactly the exported cells.
+            ValueError: If an artifact does not cover every exported cell, a
+                graph does not cover exactly the exported cells, or the
+                normalized values of a feature would be exported over cells
+                whose source did not measure it, as the feature columns
+                ``measured_in_<source>`` of a merged store record.
             OverflowError: If ``dtype`` cannot hold an exported count.
         """
         try:
@@ -538,6 +548,23 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
         if matrix == "normed":
             self._require_measured_cells(
                 assay.name, cells, operation="to_anndata", remedy=remedy
+            )
+            exported = np.zeros(int(assay.feats.N), dtype=bool)
+            exported[feat_idx] = True
+            require_features_measured_by_cells(
+                assay.cells,
+                assay.feats,
+                cell_idx,
+                exported,
+                assay=assay.name,
+                of_cells="the exported cells",
+                of_features="exported features",
+                remedy=(
+                    "Export the cells of the sources that measured them, with "
+                    "cell_key or cell_selection, or only the features that every "
+                    "source of the exported cells measured, with feature_names or "
+                    "feature_indexes."
+                ),
             )
         layer_features: dict[str, tuple[Any, np.ndarray]] = {}
         if layers is not None:

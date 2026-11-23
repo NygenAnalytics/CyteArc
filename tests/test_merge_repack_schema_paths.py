@@ -1353,12 +1353,16 @@ def _zeros_read_as_counts(first: str = "left", *, adt: bool = False) -> str:
         " The merge writes zero counts for the features a source lacks; columns "
         f"such as 'measured_in_{first}' record what each source measured, so "
         + (
-            "plots, marker search, compare.test and the ADT recipe leave those "
-            "zeros out, while normalization and scores still read them as counts."
+            "plots, marker search, bulk profiles and the ADT recipe leave those "
+            "zeros out, normalization, normalized exports, compare.test and "
+            "imputation refuse them, and features.detected and add_grouped_assay "
+            "still read them as counts."
             if adt
-            else "plots, marker search and compare.test leave those zeros out, "
-            "while normalization, feature selection and scores still read them "
-            "as counts."
+            else "plots, marker search, feature selection, WAGGR, AUCell and bulk "
+            "profiles leave those zeros out, normalization, normalized exports, "
+            "compare.test and imputation refuse them, and cell-cycle and "
+            "chromVAR scores, features.detected, add_grouped_assay and mapping "
+            "still read them as counts."
         )
     )
 
@@ -1486,9 +1490,10 @@ def test_merge_names_at_most_five_of_the_genes_that_each_source_lacks(tmp_path):
         "'g1000', 'g1001', 'g1002', 'g1003', 'g1004' and 195 more."
         + _zeros_read_as_counts()
     )
-    # Five names of each source and a count of the others keep it short.
+    # Five names of each source and a count of the others keep it short:
+    # about 300 characters of names beside the warning's own text.
     assert "x" * 100 not in message
-    assert len(message) < 700
+    assert len(message) < 800
 
 
 @pytest.mark.parametrize(

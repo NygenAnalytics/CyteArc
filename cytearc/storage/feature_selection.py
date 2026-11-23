@@ -413,18 +413,42 @@ def _validate_feature_summary_parent(
         )
 
 
+def _is_fingerprint(value: Any) -> bool:
+    """Return whether ``value`` is a SHA-256 fingerprint in lowercase hex."""
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _measured_features_parameters(
+    parameters: Mapping[str, Any], context: dict[str, str | None]
+) -> frozenset[str]:
+    """Return the parameter that records the features every source of the selected cells measured, when the selection records it.
+
+    A selection that leaves out the features some source of its cells did
+    not measure records the fingerprint of the others.
+    """
+    if "measured_features_fingerprint" not in parameters:
+        return frozenset()
+    if not _is_fingerprint(parameters["measured_features_fingerprint"]):
+        raise ArtifactResolutionError(
+            "Fingerprint of the measured features is incompatible",
+            code="corrupt_payload",
+            context=context,
+        )
+    return frozenset({"measured_features_fingerprint"})
+
+
 def _hvg_optional_parameters(
     parameters: Mapping[str, Any], context: dict[str, str | None]
 ) -> frozenset[str]:
-    """Return the HVG parameters its blacklist and binning strategy require."""
-    names: set[str] = set()
+    """Return the HVG parameters its blacklist, binning strategy and measured features require."""
+    names: set[str] = set(_measured_features_parameters(parameters, context))
     if parameters.get("blacklist") or "blacklist_fingerprint" in parameters:
-        fingerprint = parameters.get("blacklist_fingerprint")
-        if (
-            not parameters.get("blacklist")
-            or not isinstance(fingerprint, str)
-            or len(fingerprint) != 64
-            or any(character not in "0123456789abcdef" for character in fingerprint)
+        if not parameters.get("blacklist") or not _is_fingerprint(
+            parameters.get("blacklist_fingerprint")
         ):
             raise ArtifactResolutionError(
                 "HVG blacklist fingerprint is incompatible",
@@ -614,6 +638,8 @@ def _validate_feature_selection_provenance(
         and parameters.get("feature_key") == "names"
     ):
         parameter_names = frozenset({"feature_key"})
+    if status.operation == "select_prevalent_peaks":
+        parameter_names |= _measured_features_parameters(parameters, context)
     received_inputs = set(inputs)
     if received_inputs != input_names or set(parameters) != parameter_names:
         raise ArtifactResolutionError(

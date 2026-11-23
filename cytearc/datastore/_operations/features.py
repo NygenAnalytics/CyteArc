@@ -127,7 +127,7 @@ from ...metadata.arguments import (
     WaggrArguments,
 )
 from ...metadata.membership import (
-    features_measured_by_cells,
+    leave_out_unmeasured_features,
     require_measured_features,
 )
 from ...metadata.selection import (
@@ -151,7 +151,6 @@ from ...utils.arguments import (
     bool_argument,
     float_argument,
     integer_argument,
-    quoted_examples,
 )
 from ...utils.arrays import (
     array_digest,
@@ -328,6 +327,18 @@ def _hvg_diagnostics(
         ],
     )
     return diagnostics
+
+
+def _eligible_detection(
+    detected: np.ndarray, measured: np.ndarray | None
+) -> np.ndarray:
+    """Return each gene's detection for the detection ratio, 0 where ``measured`` leaves the gene out.
+
+    The ratio compares the selected genes with those the selection could
+    take, which leave out the genes that some source of the selected cells
+    did not measure.
+    """
+    return np.asarray(detected) if measured is None else np.where(measured, detected, 0)
 
 
 def _hvg_rules(top_n: int) -> tuple[DiagnosticRule, ...]:
@@ -751,6 +762,30 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             parameters["span"] = options.span
         else:
             parameters.update(theta=options.theta, clip=options.clip)
+        cell_idx = read_stored_selection_indices(
+            self.zw,
+            cell_selection,
+            kind="cell_selection",
+            scope="datastore",
+            assay=None,
+            table_path="cellData",
+        ).astype(np.int64, copy=False)
+        # Genes that some source of the selected cells did not measure take no
+        # part in the scores' fits and are never selected; the selection then
+        # records which genes every source measured.
+        measured = leave_out_unmeasured_features(
+            assay.cells,
+            assay.feats,
+            cell_idx,
+            assay=assay.name,
+            analysis="features.hvgs",
+            kind="gene",
+            of_cells="the selected cells",
+            remedy="Select the highly variable genes of the cells of one source.",
+            names=feature_names,
+        )
+        if measured is not None:
+            parameters["measured_features_fingerprint"] = fingerprint_array(measured)
         feature_ids_fingerprint = _ordered_feature_ids_fingerprint(assay.z)
         execution_options = {
             "show_plot": show_plot,
@@ -774,6 +809,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                 show_plot=show_plot,
                 invalidate_cache=invalidate_cache,
                 plot_kwargs=plot_kwargs,
+                measured=measured,
             )
         inputs: dict[str, Any] = {
             "cell_selection": cell_selection,
@@ -814,14 +850,6 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         )
         if not planned.reused:
             self._require_writable("select_hvgs")
-            cell_idx = read_stored_selection_indices(
-                self.zw,
-                cell_selection,
-                kind="cell_selection",
-                scope="datastore",
-                assay=None,
-                table_path="cellData",
-            ).astype(np.int64, copy=False)
             if batch is None:
                 codes = np.zeros(len(cell_idx), dtype=np.int64)
             scores = assay._batch_hvg_scores(
@@ -835,6 +863,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                 span=options.span,
                 theta=options.theta,
                 clip=options.clip,
+                measured=measured,
             )
             ranking = select_batch_highly_variable_features(
                 scores.scores,
@@ -850,6 +879,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                 max_mean=max_mean,
                 blacklist=blacklist,
                 keep_bounds=keep_bounds,
+                active_features=measured,
             )
             logger.info(f"{int(ranking.selected.sum())} genes marked as HVGs")
             payload = {
@@ -871,7 +901,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                     top_n=top_n,
                     detection_ratio=selected_detection_ratio(
                         ranking.selected,
-                        scores.detected,
+                        _eligible_detection(scores.detected, measured),
                         feature_names,
                         min_cells=min_cells,
                         max_cells=max_cells_int,
@@ -917,8 +947,13 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         show_plot: bool,
         invalidate_cache: bool,
         plot_kwargs: dict[str, Any],
+        measured: np.ndarray | None = None,
     ) -> ArtifactRef:
-        """Select the cytearc flavor's HVGs of all selected cells from their summary."""
+        """Select the cytearc flavor's HVGs of all selected cells from their summary.
+
+        ``measured`` marks the genes that every source of the selected cells
+        measured, or is None for every gene.
+        """
         summary_ref = ensure_feature_summary(
             self.zw,
             assay,
@@ -965,6 +1000,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                 keep_bounds=parameters["keep_bounds"],
                 bin_strategy=parameters["bin_strategy"],
                 feature_names=feature_names,
+                measured=measured,
             )
             _write_feature_selection(
                 self.zw,
@@ -980,7 +1016,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                     top_n=parameters["top_n"],
                     detection_ratio=selected_detection_ratio(
                         values,
-                        summary["normed_n"],
+                        _eligible_detection(summary["normed_n"], measured),
                         feature_names,
                         min_cells=parameters["min_cells"],
                         max_cells=parameters["max_cells"],
@@ -1080,6 +1116,15 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         score over the batches, and the selection also stores each gene's
         ``batch_count`` and ``median_batch_rank`` (NaN for a gene that no
         batch ranks among its ``top_n``).
+
+        On a store merged from sources that measured different genes, as its
+        feature columns ``measured_in_<source>`` record, a gene that some
+        source of the selected cells did not measure takes no part in any
+        flavor's fits, scores 0 and is never selected, with a warning that
+        names such genes, since its zero counts in that source's cells are
+        not measurements. The selection then records the genes that every
+        source of the cells measured, as the fingerprint
+        ``measured_features_fingerprint`` of its parameters.
 
         The artifact holds the ``values`` mask and each gene's
         ``corrected_variance`` (the flavor's score). seurat_v3,
@@ -1402,6 +1447,8 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
 
         The arguments and the assay type are checked first, then the cells
         against the assay's membership, then that the store is writable.
+        The selected features that some source of the cells did not measure
+        are left out, through a feature selection of the others.
         """
         if not isinstance(features, ArtifactRef):
             raise TypeError("features must be an ArtifactRef")
@@ -1416,8 +1463,9 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         # be intact. The feature-selection lineage binds it to the result.
         self._ensure_dataset_fingerprint(assay.name)
         feature_selection = self._features_resolve(assay.name, features)
-        feature_values = _feature_selection_values(self.zw, feature_selection)
-        feature_index = np.flatnonzero(feature_values).astype(np.int64, copy=False)
+        feature_values = np.asarray(
+            _feature_selection_values(self.zw, feature_selection), dtype=bool
+        )
         cell_index = read_stored_selection_indices(
             self.zw,
             cell_selection,
@@ -1428,6 +1476,18 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         ).astype(np.int64, copy=False)
         if len(cell_index) == 0:
             raise ValueError("Cell selection contains no active cells")
+        feature_selection, feature_values = self._measured_feature_selection(
+            assay,
+            feature_selection,
+            feature_values,
+            cell_index,
+            analysis=display_name,
+            remedy=(
+                "Score the cells of the sources that measured them, or features "
+                "that every source measured."
+            ),
+        )
+        feature_index = np.flatnonzero(feature_values).astype(np.int64, copy=False)
         return assay, cell_index, feature_index, feature_selection
 
     @validation_scoped
@@ -1448,7 +1508,11 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
 
         Targets are matched to active feature names without case sensitivity. Sources
         with fewer than ``tmin`` matched non-zero edges are removed. Results are
-        written to the assay's enrichment group and returned lazily.
+        written to the assay's enrichment group and returned lazily. On a store
+        merged from sources that measured different genes, as its feature columns
+        ``measured_in_<source>`` record, the genes of ``features`` that some source
+        of the selected cells did not measure are left out, through a feature
+        selection of the others, with a warning that names them.
 
         Args:
             net: Network with ``source`` and ``target`` columns. An optional
@@ -1472,6 +1536,8 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         Raises:
             PermissionError: If the store is not opened with ``zarr_mode='r+'``.
             UnmeasuredCellsError: If the assay did not measure a selected cell.
+            ValueError: If no selected feature was measured by every source of
+                the selected cells.
 
         Note:
             Cache identity covers selections, method parameters, normalization, and
@@ -1598,7 +1664,11 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
 
         AUCell ranks every feature selected by ``features`` from raw counts. Network
         weights are ignored. Targets are matched without case sensitivity, then
-        sources with fewer than ``tmin`` matched targets are removed.
+        sources with fewer than ``tmin`` matched targets are removed. On a store
+        merged from sources that measured different genes, as its feature columns
+        ``measured_in_<source>`` record, the genes of ``features`` that some source
+        of the selected cells did not measure are left out, through a feature
+        selection of the others, with a warning that names them.
 
         Args:
             net: Network with ``source`` and ``target`` columns.
@@ -1621,6 +1691,8 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         Raises:
             PermissionError: If the store is not opened with ``zarr_mode='r+'``.
             UnmeasuredCellsError: If the assay did not measure a selected cell.
+            ValueError: If no selected feature was measured by every source of
+                the selected cells.
 
         Note:
             Cache identity covers selections, method parameters, and the prepared
@@ -2026,6 +2098,47 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             artifact_root=self.zw,
         )
 
+    def _measured_feature_selection(
+        self,
+        assay: Assay,
+        feature_selection: ArtifactRef,
+        feature_values: np.ndarray,
+        cell_index: np.ndarray,
+        *,
+        analysis: str,
+        remedy: str,
+        feature_names: np.ndarray | None = None,
+    ) -> tuple[ArtifactRef, np.ndarray]:
+        """Return the selected features that every source of some cells measured, as a selection, and its mask.
+
+        A selection of which every source of the cells at ``cell_index``
+        measured every feature is returned as it is. Otherwise the features
+        that some source did not measure are left out, with the warning of
+        :func:`~cytearc.metadata.membership.leave_out_unmeasured_features`,
+        which names them by ``feature_names`` or the assay's own names, and
+        the others are saved as a feature selection, so that the result's
+        lineage records what it read.
+
+        Raises:
+            ValueError: If no selected feature was measured by every source of
+                the cells, ending with ``remedy``.
+        """
+        kept = leave_out_unmeasured_features(
+            assay.cells,
+            assay.feats,
+            cell_index,
+            assay=assay.name,
+            analysis=analysis,
+            kind="feature",
+            of_cells="the selected cells",
+            remedy=remedy,
+            selected=feature_values,
+            names=feature_names,
+        )
+        if kept is None:
+            return feature_selection, feature_values
+        return self._features_snapshot(from_assay=assay.name, mask=kept), kept
+
     def _run_marker_search_artifact(
         self,
         *,
@@ -2079,42 +2192,18 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         tested = _validate_rank_marker_groups(group_ids, group_sizes)
         # The labels are checked, so the features that the cells' sources did
         # not measure are left out of a selection of the others.
-        measured = features_measured_by_cells(
-            assay.cells,
-            assay.feats,
+        feature_selection, feature_values = self._measured_feature_selection(
+            assay,
+            feature_selection,
+            feature_values,
             cell_index,
-            assay=assay.name,
-            selected=feature_values,
+            analysis="The marker search",
+            remedy=(
+                "Search the markers of the cells of the sources that measured "
+                "them, or of features that every source measured."
+            ),
+            feature_names=feature_names,
         )
-        unmeasured = (
-            np.empty(0, dtype=np.int64)
-            if measured is None
-            else np.flatnonzero(feature_values & ~measured)
-        )
-        if unmeasured.size:
-            assert measured is not None
-            names = np.asarray(
-                assay.feats.fetch_all("names")
-                if feature_names is None
-                else feature_names
-            ).astype(str)
-            listed = quoted_examples(names[unmeasured])
-            feature_values = feature_values & measured
-            if not feature_values.any():
-                raise ValueError(
-                    "No selected feature was measured by the source of every "
-                    f"selected cell; some source of the cells did not measure "
-                    f"{listed}. Search the markers of the cells of the sources "
-                    "that measured them, or of features that every source measured."
-                )
-            feature_selection = self._features_snapshot(
-                from_assay=assay.name, mask=feature_values
-            )
-            warn(
-                "The marker search leaves out the features that some source of "
-                "the selected cells did not measure, since their zero counts in "
-                f"its cells are not measurements: {listed}."
-            )
         feature_index = np.flatnonzero(feature_values).astype(np.int64, copy=False)
         # The distinct values of one array have distinct string forms.
         expected_group_cell_counts = {
@@ -3106,6 +3195,13 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         document frequency and ADT CLR geometric means are therefore shared by
         all groups rather than learned separately for each group.
 
+        On a store merged from sources that measured different features, as
+        its feature columns ``measured_in_<source>`` record, the features
+        that some source of the cells that it reads did not measure are left
+        out of the profiles, ``remove_empty_features`` or not, with a warning
+        that names them, since their zero counts in that source's cells are
+        not measurements.
+
         Cells whose group or sub-group label is missing join no group, like
         cells whose value is in ``null_vals``. Missing labels are ``NaN``,
         ``None``, blank text, and values flagged by a linked missing mask.
@@ -3164,7 +3260,8 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             TypeError: If ``pseudo_reps`` or ``random_seed`` is not an integer.
             ValueError: If ``aggr_type``, ``feature_label``, ``pseudo_reps``,
                 or ``random_seed`` is not one of the values above, which is
-                checked before anything is read.
+                checked before anything is read, or if no feature was
+                measured by every source of the cells that it reads.
             UnmeasuredCellsError: If the assay did not measure a cell that is read.
         """
         count_detected = bool_argument(count_detected, "count_detected")
@@ -3295,11 +3392,19 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         n_cells = np.array([len(rows) for rows in column_rows], dtype=np.int64)
         filled = [rows for rows in column_rows if len(rows)]
         # The cells whose counts aggregation reads.
+        read_cells = bulk_read_cells(assay, aggr_type, active_idx, filled)
         self._require_measured_cells(
-            assay.name,
-            bulk_read_cells(assay, aggr_type, active_idx, filled),
-            operation="make_bulk",
-            remedy="cell_selection",
+            assay.name, read_cells, operation="make_bulk", remedy="cell_selection"
+        )
+        measured = leave_out_unmeasured_features(
+            assay.cells,
+            assay.feats,
+            read_cells,
+            assay=assay.name,
+            analysis="compare.compute_bulk",
+            kind="feature",
+            of_cells="the cells that it reads",
+            remedy="Bulk the cells of the sources that measured them.",
         )
         profiles, detected = aggregate_bulk_profiles(
             assay,
@@ -3321,6 +3426,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             remove_empty_features=remove_empty_features,
             remove_empty_columns=remove_empty_columns,
             feature_label=feature_label,
+            measured=measured,
         )
 
     def _statistical_design_columns(
