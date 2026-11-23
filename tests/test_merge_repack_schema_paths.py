@@ -2022,16 +2022,36 @@ def test_merge_records_a_source_whose_name_holds_a_path_separator(tmp_path):
     }
 
 
+_CASE_COLLISION = (
+    "which a file system that ignores case stores as one column. Name the "
+    "sources so that the names differ in more than case, with '/' and '\\' "
+    "counted as '_'."
+)
+_SEPARATOR_COLLISION = (
+    "since a column name counts '/' and '\\' as '_'. Name the sources so that "
+    "the names differ once '/' and '\\' are counted as '_'."
+)
+
+
 @pytest.mark.parametrize(
-    ("names", "columns"),
+    ("names", "where", "reason"),
     [
-        (["Ctrl", "ctrl"], "'measured_in_Ctrl' and 'measured_in_ctrl'"),
-        (["a/b", "a_b"], "'measured_in_a_b' and 'measured_in_a_b'"),
+        (
+            ["Ctrl", "ctrl"],
+            "in the feature columns 'measured_in_Ctrl' and 'measured_in_ctrl'",
+            _CASE_COLLISION,
+        ),
+        (
+            ["a/b", "a_b"],
+            "both record which features they measured in the feature column "
+            "'measured_in_a_b'",
+            _SEPARATOR_COLLISION,
+        ),
     ],
     ids=["case", "separator"],
 )
 def test_merge_refuses_sources_whose_record_columns_would_be_one(
-    tmp_path, names, columns
+    tmp_path, names, where, reason
 ):
     destination = tmp_path / "merged.zarr"
     panels = [
@@ -2041,12 +2061,10 @@ def test_merge_refuses_sources_whose_record_columns_would_be_one(
 
     with pytest.raises(ValueError) as refused:
         DataStoreMerge(panels, str(destination), names, nthreads=1).plan()
-    assert str(refused.value) == (
-        f"Sources {names[0]!r} and {names[1]!r} would record which features they "
-        f"measured in the feature columns {columns}, which a file system that "
-        "ignores case stores as one column. Name the sources so that the names "
-        "differ in more than case, with '/' and '\\' counted as '_'."
-    )
+    lead = f"Sources {names[0]!r} and {names[1]!r} would "
+    if where.startswith("in "):
+        lead += "record which features they measured "
+    assert str(refused.value) == f"{lead}{where}, {reason}"
     assert not destination.exists()
     # Sources that measured the same features need no record, and merge.
     same = [_panel_source({"RNA": _GENES, "ADT": _LEFT_PANEL}) for _ in names]
@@ -2399,22 +2417,26 @@ def test_a_merged_store_that_alone_holds_an_assay_keeps_its_zero_counts(tmp_path
 
 
 @pytest.mark.parametrize(
-    ("name", "columns"),
+    ("name", "where", "reason"),
     [
         pytest.param(
             "inner/_left",
-            "'measured_in_inner__left' and 'measured_in_inner__left'",
+            "both record which features they measured in the feature column "
+            "'measured_in_inner__left'",
+            _SEPARATOR_COLLISION,
             id="separator",
         ),
         pytest.param(
             "Inner/_Left",
+            "record which features they measured in the feature columns "
             "'measured_in_inner__left' and 'measured_in_Inner__Left'",
+            _CASE_COLLISION,
             id="case",
         ),
     ],
 )
 def test_a_merge_refuses_a_source_whose_column_a_source_of_a_merged_store_takes(
-    tmp_path, name, columns
+    tmp_path, name, where, reason
 ):
     inner = _merged_panel_store(tmp_path)
     destination = tmp_path / "outer.zarr"
@@ -2423,10 +2445,7 @@ def test_a_merge_refuses_a_source_whose_column_a_source_of_a_merged_store_takes(
     with pytest.raises(ValueError) as refused:
         DataStoreMerge(sources, str(destination), ["inner", name], nthreads=1).plan()
     assert str(refused.value) == (
-        f"Sources 'inner__left' and {name!r} would record which features they "
-        f"measured in the feature columns {columns}, which a file system that "
-        "ignores case stores as one column. Name the sources so that the names "
-        "differ in more than case, with '/' and '\\' counted as '_'. A merge "
+        f"Sources 'inner__left' and {name!r} would {where}, {reason} A merge "
         "records each source of a merged source by the merged source's name, '__' "
         "and the source's own name."
     )

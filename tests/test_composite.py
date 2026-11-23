@@ -1616,9 +1616,9 @@ def test_a_composite_of_a_merged_store_keeps_the_source_of_each_of_its_cells(tmp
     with pytest.raises(
         ValueError,
         match=re.escape(
-            "Sources 'inner__p1' and 'inner/_p1' would record which features they "
-            "measured in the feature columns 'measured_in_inner__p1' and "
-            "'measured_in_inner__p1'"
+            "Sources 'inner__p1' and 'inner/_p1' would both record which features "
+            "they measured in the feature column 'measured_in_inner__p1', since a "
+            "column name counts '/' and '\\' as '_'"
         ),
     ):
         create_composite(
