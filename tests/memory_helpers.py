@@ -1,4 +1,4 @@
-"""Read the budget that a memory refusal names, follow refusals to a budget that runs, give a domain function a ledger of a budget, trace what a call holds against what its ledger charges, wait until the arrays handed to writes are freed, hold a read's decodes together while it is traced, record and trace what an import's process sends through its pipe, and skip tests that need the resident memory of the test process."""
+"""Read the budget that a memory refusal names, follow refusals to a budget that runs, give a domain function a ledger of a budget, trace what a call holds against what its ledger charges, trace a read of selected cells, wait until the arrays handed to writes are freed, hold a read's decodes together while it is traced, record and trace what an import's process sends through its pipe, and skip tests that need the resident memory of the test process."""
 
 import asyncio
 import re
@@ -158,6 +158,37 @@ def traced_charge(call: Callable[[Any], Any], runs: int = 1) -> TracedCharge:
             )
         )
     return min(traced, key=lambda run: run.held)
+
+
+def traced_selection_read(
+    array: Any, rows: Any, columns: Any, runs: int = 2
+) -> tuple[Any, int]:
+    """Read ``rows`` by ``columns`` of ``array`` with ``read_selection`` at one decode at a time, once untraced and ``runs`` times traced after a full collection each, and return the values and the least that a traced run held at its peak.
+
+    The least of a few runs leaves out a resize of the interpreter's table of
+    interned strings, as :func:`traced_charge` does.
+    """
+    import gc
+    import tracemalloc
+
+    from cytearc.storage.async_execution import zarr_io_concurrency
+    from cytearc.storage.virtual_arrays import read_selection
+
+    peaks = []
+    with zarr_io_concurrency(1):
+        values = read_selection(array, rows, columns)
+        for _ in range(max(1, int(runs))):
+            del values
+            gc.collect()
+            tracemalloc.start()
+            try:
+                before, _ = tracemalloc.get_traced_memory()
+                values = read_selection(array, rows, columns)
+                _, peak = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+            peaks.append(peak - before)
+    return values, min(peaks)
 
 
 class HandedArrays:

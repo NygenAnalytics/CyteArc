@@ -364,28 +364,113 @@ def test_indexed_read_parts_charge_the_narrower_band() -> None:
     # eight columns by an index array, so it also holds Zarr's indexers of
     # them, 64 bytes a column in a sharded read, and Zarr's copy of the two
     # columns of 1,024 rows that it takes from the chunk it decodes; the
-    # reader orders each of the block's rows by row chunk, 32 bytes a row.
+    # reader orders each of the block's rows by row chunk and keeps where
+    # each band starts and stops, 48 bytes a row. The rows may lie in all
+    # four row chunks, a band each, and the reads of the three earlier bands
+    # leave the objects of a read, 32 KiB, and of the four column chunks
+    # that each took, 4 KiB a chunk.
     spread = np.array([0, 1023, 1024, 2047, 2048, 3071, 3072, 4095])
     assert widest_chunk_span(spread, 1024) == 1024
     assert indexed_read_parts(geometry, spread, block_rows=1024) == (
-        geometry.readBytes(8 * 1024 * 2, touched, decodes=1) + 8 * 64 + 1024 * 2 * 2,
-        32,
+        geometry.readBytes(8 * 1024 * 2, touched, decodes=1)
+        + 8 * 64
+        + 1024 * 2 * 2
+        + 32 * 1024
+        + 3 * 4 * 4 * 1024,
+        48,
     )
     # A dense run in each column chunk spans 16 positions: bands of columns,
     # which take each row by an index array, 64 bytes, and copy its 16 values
     # of the chunk, 32 bytes, beside the reader's ordering of the 32 columns,
-    # 32 bytes each. Bands of rows would hold 2 * 65,536 bytes of the block,
-    # the indexers of 32 columns, the copy of 16 columns of 1,024 rows from a
-    # chunk and the ordering of the 1,024 rows, 198,656 bytes, more than the
-    # 164,864 of column bands.
+    # 48 bytes each, and what the read of the first of the two bands leaves
+    # of its four row chunks' objects. Bands of rows would hold 2 * 65,536
+    # bytes of the block, the indexers of 32 columns, the copy of 16 columns
+    # of 1,024 rows from a chunk, what the three earlier bands leave of the
+    # two column chunks each took, and the ordering of the 1,024 rows,
+    # 272,384 bytes, more than the 214,528 of column bands.
     dense = np.concatenate([np.arange(start, start + 16) for start in (0, 1024)])
     assert widest_chunk_span(dense, 1024) == 16
     assert indexed_read_parts(geometry, dense, block_rows=1024) == (
-        decode + 32 * 32,
+        decode + 32 * 48 + 32 * 1024 + 4 * 4 * 1024,
         geometry.readBytes(16 * 2, touched, decodes=1) - decode + 64 + 32,
     )
-    assert 32 * 32 + 1024 * (2 * 16 * 2 + 64 + 32) == 164_864
-    assert 2 * 65_536 + 32 * 64 + 1024 * 16 * 2 + 1024 * 32 == 198_656
+    assert 32 * 48 + 32 * 1024 + 4 * 4 * 1024 + 1024 * (2 * 16 * 2 + 64 + 32) == (
+        214_528
+    )
+    assert (
+        2 * 65_536 + 32 * 64 + 1024 * 16 * 2 + 32 * 1024 + 3 * 2 * 4 * 1024 + 1024 * 48
+        == 272_384
+    )
+
+
+def test_reads_in_bands_are_charged_the_shards_each_band_touches_and_what_the_bands_before_it_leave() -> (
+    None
+):
+    from cytearc.storage.partition import run_shards
+
+    # 30,000 rows by 20 columns in shards of 100 rows of two 10-column
+    # chunks, 4 bytes a value: 100 rows, one from each of 100 shards, by
+    # every other column, five in each chunk.
+    geometry = ArrayGeometry((30_000, 20), (100, 10), (100, 20), 4)
+    columns = np.arange(0, 20, 2)
+    decoded = 100 * 10 * 4
+    stored = decoded + decoded // 128 + 1_024
+    shard = 2 * stored + decoded + 32_768 + 2 * 4_096 + 16_384
+    column_bands, row_bands = index_band_bytes(
+        geometry, columns, rows=100, row_span=1, shards=100
+    )
+    # A band of rows lies in one shard, and holds its 10 values twice, the
+    # shard's read, the indexers of the 10 columns, 64 bytes each, and Zarr's
+    # copy of a row's five columns of a chunk. The reads of the 99 bands
+    # before it took two chunks each and leave up to 192 KiB of their
+    # objects, and the reader orders the 100 rows, 48 bytes each.
+    assert row_bands == 2 * 40 + shard + 10 * 64 + 5 * 4 + 192 * 1024 + 100 * 48
+    # A band of columns takes the 100 rows of a chunk's nine columns in one
+    # read of the 100 shards, one at a time while the task of each of the
+    # other 99 holds the objects of a chunk, 4 KiB. It indexes the 100 rows
+    # and copies their nine values of the chunk, and the read of the band
+    # before it took a chunk in each of 100 row chunks, which leaves up to
+    # 192 KiB; the reader orders the 10 columns.
+    assert column_bands == (
+        2 * 3_600 + shard + 99 * 4_096 + 100 * 64 + 3_600 + 192 * 1024 + 10 * 48
+    )
+    # Ten rows in ten shards: the nine earlier bands of rows leave the objects
+    # of a read and of their 18 chunks, and the band of columns before the
+    # last those of its ten chunks.
+    column_ten, row_ten = index_band_bytes(
+        geometry, columns, rows=10, row_span=1, shards=10
+    )
+    assert row_ten == 2 * 40 + shard + 10 * 64 + 5 * 4 + 32_768 + 18 * 4_096 + 480
+    assert column_ten == (
+        2 * 360 + shard + 9 * 4_096 + 10 * 64 + 360 + 32_768 + 10 * 4_096 + 480
+    )
+    # One row is one band, which leaves no band before it.
+    assert index_band_bytes(geometry, columns, rows=1, row_span=1, shards=1)[1] == (
+        2 * 40 + shard + 10 * 64 + 5 * 4 + 48
+    )
+    # In shards of one 10-column chunk, a band of columns takes one column
+    # shard of each of the 100 rows of shards, and a band of rows the two
+    # column shards of its row, the second waiting while the first is read.
+    halves = ArrayGeometry((30_000, 20), (100, 10), (100, 10), 4)
+    half = stored + decoded + 32_768 + 4_096 + 16_384
+    column_halves, row_halves = index_band_bytes(
+        halves, columns, rows=100, row_span=1, shards=100
+    )
+    assert row_halves == 2 * 40 + half + 4_096 + 10 * 64 + 5 * 4 + 192 * 1024 + 4_800
+    assert column_halves == (
+        2 * 3_600 + half + 99 * 4_096 + 100 * 64 + 3_600 + 192 * 1024 + 10 * 48
+    )
+    # A run of rows touches a row of shards for every 100 rows, and one more
+    # where it does not start at a shard's first row.
+    assert [run_shards(geometry, rows) for rows in (0, 1, 2, 100, 101, 102)] == [
+        1,
+        1,
+        2,
+        2,
+        2,
+        3,
+    ]
+    assert run_shards(None, 1_000) == 1
 
 
 def test_a_read_of_part_of_a_shard_is_charged_the_chunks_between_its_columns() -> None:
@@ -527,6 +612,38 @@ def test_band_shards_count_the_distinct_shards_of_a_selection_a_piece_at_a_time(
     assert peak < 1 << 20
 
 
+@pytest.mark.parametrize("dtype", [np.uint16, np.int32])
+def test_band_shards_count_rows_of_a_narrow_integer_type(dtype: type) -> None:
+    from cytearc.storage.partition import band_shards
+
+    # Shards of 200,000 rows, more than uint16 holds: every eighth of the
+    # first 60,000 rows lies in the first shard, and of four rows around the
+    # boundary two shards each, whatever integer type holds them.
+    geometry = ArrayGeometry((400_000, 20), (200_000, 5), (200_000, 20), 2)
+    rows = np.arange(0, 60_000, 8)
+    assert band_shards(geometry, rows.astype(dtype), 1_000) == 1
+    if np.iinfo(dtype).max >= 400_000:
+        around = np.array([7, 250_000, 199_999, 200_000, 9, 399_999])
+        assert band_shards(geometry, around.astype(dtype), 3) == 2
+        assert band_shards(geometry, around.astype(dtype), 6) == 2
+    # A stream of those rows of such an array charges its blocks as a stream
+    # of their int64 values does, and keeps their 2 or 4 bytes a row, not 8.
+    array = zarr.create_array(
+        store=MemoryStore(),
+        shape=(200_000, 20),
+        chunks=(200_000, 5),
+        shards=(200_000, 20),
+        dtype=np.uint16,
+        fill_value=0,
+    )
+    budget = ResourceBudget(1 << 30, 1)
+    narrow = ChunkedArray(array, rows=rows.astype(dtype), resources=budget)
+    wide = ChunkedArray(array, rows=rows, resources=budget)
+    assert narrow._read_bytes(12_345) == wide._read_bytes(12_345)
+    kept = rows.size * (8 - np.dtype(dtype).itemsize)
+    assert narrow.stream_bytes() == wide.stream_bytes() - kept
+
+
 def test_is_contiguous_checks_a_run_a_piece_at_a_time() -> None:
     import tracemalloc
 
@@ -611,24 +728,36 @@ def test_row_reads_at_a_concurrency_hold_the_shards_and_decodes_they_run_at_once
     )
     # Scattered rows over genes of wide spans in two chunks are read a row
     # chunk at a time, a band of their 4 x 1,000 values twice over beside the
-    # chunks of up to two of the four shards at once, each decoding its two
-    # chunks at once. The band takes its four genes by an index array, so it
-    # also holds Zarr's indexers of them, 64 bytes a gene, and Zarr's copy of
-    # the two genes of 1,000 rows that it takes from a chunk, which the read's
-    # event loop makes a chunk at a time, and the reader orders each row by
-    # row chunk, 32 bytes. A block whose rows form one run is read in one
-    # request, which holds each row's shard-level copy, 16 bytes, and the
-    # copy of its two genes of a chunk, 8 bytes, less than that ordering.
+    # one shard that the band's row chunk lies in, decoding its two chunks at
+    # once. The band takes its four genes by an index array, so it also holds
+    # Zarr's indexers of them, 64 bytes a gene, and Zarr's copy of the two
+    # genes of 1,000 rows that it takes from a chunk, which the read's event
+    # loop makes a chunk at a time, beside what the read of the band before
+    # it leaves of the two chunks it took, and the reader orders each row by
+    # row chunk, 48 bytes. A block whose rows form one run is read in one
+    # request over the two rows of shards that the rows touch, both at once,
+    # which holds more beside the rows, and for each row its shard-level
+    # copy, 16 bytes, and the copy of its two genes of a chunk, 8 bytes, less
+    # than that ordering.
     wide = np.array([0, 39, 40, 79])
     shard_read = 2 * encoded + 2 * decoded + 32_768 + 2 * 4_096 + 2 * 16_384
-    band = 2 * 4 * 1_000 * 4 + 2 * shard_read + 4 * 64 + 1_000 * 2 * 4
+    band = 2 * 4 * 1_000 * 4 + shard_read + 4 * 64 + 1_000 * 2 * 4
+    left = 32_768 + 2 * 4_096
+    run = 2 * shard_read + 4 * 64
+    assert run > band + left
     assert row_read_parts(
         geometry, wide, rows_contiguous=False, concurrency=4, shards=2
-    ) == (band, 32)
-    assert 4 * 4 + 2 * 4 < 32
+    ) == (run, 48)
+    assert 4 * 4 + 2 * 4 < 48
     assert indexed_read_parts(
         geometry, wide, block_rows=1_000, concurrency=4, shards=2
-    ) == (band, 32)
+    ) == (band + left, 48)
+    # A band of one row is a run of one row of shards and one band, which
+    # leaves no band before it.
+    assert row_read_parts(
+        geometry, wide, rows_contiguous=False, concurrency=4, shards=2, band_rows=1
+    ) == (band, 48)
+    assert band > shard_read + 4 * 64
     # An unsharded array's chunks are each read on their own, so a band over
     # three of them holds up to the concurrency of them at once, beside the
     # objects of a read of the three.
@@ -1111,6 +1240,52 @@ def test_streamed_row_blocks_decode_only_as_many_chunks_as_budgeted() -> None:
         "without a budget Zarr uses its own concurrency, so the probe should "
         "observe the overlap this test bounds"
     )
+
+
+def test_a_stream_that_shrinks_its_blocks_charges_each_size_the_shards_it_touches() -> (
+    None
+):
+    from cytearc.storage.execution import execution_report_scope
+
+    # 20,000 cells by 50 features in shards of one chunk of 100 cells, and a
+    # stream of one cell from each of 200 shards in blocks of a shard's 100
+    # rows. A block of r of these cells reads r shards, one at a time, so its
+    # decode holds the objects of a chunk, 4 KiB, for each of the r - 1 that
+    # wait.
+    array = zarr.create_array(
+        store=MemoryStore(),
+        shape=(20_000, 50),
+        chunks=(100, 50),
+        shards=(100, 50),
+        dtype=np.uint16,
+    )
+    values = (np.arange(20_000 * 50) % 1_000).astype(np.uint16).reshape(20_000, 50)
+    array[:] = values
+    cells = np.arange(200) * 100 + 7
+    matrix = ChunkedArray(array, rows=cells)
+    assert matrix._block_size == 100
+    one = matrix._with_block_size(1)._max_decode_bytes()
+    assert matrix._max_decode_bytes() - one == 99 * 4_096
+    resident = matrix._resident_bytes()
+    per_row = matrix._block_owned_bytes() // 100
+    # A budget of blocks of ten cells, which holds less than the decode of a
+    # whole block: each block of ten is charged its own ten shards.
+    budget = resident + one + 9 * 4_096 + 10 * per_row
+    assert budget < resident + matrix._max_decode_bytes()
+    with execution_report_scope() as reports:
+        blocks = list(
+            matrix._stream_blocks(
+                nthreads=1,
+                msg=None,
+                prefetch=None,
+                row_mask=None,
+                memory_bytes=budget,
+            )
+        )
+    assert [len(block) for block in blocks] == [10] * 20
+    np.testing.assert_array_equal(np.vstack(blocks), values[cells])
+    (report,) = reports
+    assert report.plan.reservedBytes <= budget
 
 
 def test_planned_reads_never_decode_more_chunks_than_budgeted() -> None:

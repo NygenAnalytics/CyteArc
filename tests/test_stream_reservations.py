@@ -741,46 +741,107 @@ def test_a_read_of_selected_cells_holds_no_more_than_its_charge(
     assert peak > charge - copy
 
 
-@pytest.mark.parametrize("features", ["all", "gathered"])
+@pytest.mark.parametrize(
+    ("chunks", "shards"),
+    [((100, 10), (100, 20)), ((100, 4), (100, 4))],
+    ids=["one-column-shard", "five-column-shards"],
+)
 @pytest.mark.parametrize("touched", [100, 300])
 def test_a_read_of_cells_spread_over_shards_holds_a_task_for_each_shard(
-    tmp_path: Any, touched: int, features: str
+    tmp_path: Any,
+    touched: int,
+    chunks: tuple[int, int],
+    shards: tuple[int, int],
 ) -> None:
-    # 30,000 cells by 20 features in shards of 100 cells of two 10-feature
-    # chunks; a block of one cell from each of 100 or 300 shards, of every
-    # feature or every other one, which a sharded read of both takes in
-    # bands, and a block of as many shuffled cells of the first one to three
-    # shards.
+    # 30,000 cells by 20 features in shards of 100 cells, of every feature in
+    # two chunks or of four features in one; a block of one cell from each of
+    # 100 or 300 rows of shards, and a block of as many shuffled cells of the
+    # first one to three rows.
     stored, values = _random_bits_store(
-        tmp_path, (30_000, 20), (100, 10), (100, 20), np.float32
+        tmp_path, (30_000, 20), chunks, shards, np.float32
     )
-    columns = None if features == "all" else np.arange(0, 20, 2)
+    column_shards = 20 // shards[1]
     spread = np.arange(touched) * 100 + 7
-    block = ChunkedArray(stored, rows=spread, cols=columns, block_size=touched)
+    block = ChunkedArray(stored, rows=spread, block_size=touched)
     read, peak = _traced_block_read(block)
-    expected = values[spread] if columns is None else values[np.ix_(spread, columns)]
-    np.testing.assert_array_equal(read.view(np.uint32), expected.view(np.uint32))
+    np.testing.assert_array_equal(read.view(np.uint32), values[spread].view(np.uint32))
     clustered = np.random.default_rng(7).permutation(touched)
-    fewer = ChunkedArray(stored, rows=clustered, cols=columns, block_size=touched)
+    fewer = ChunkedArray(stored, rows=clustered, block_size=touched)
     # The read takes the shards one at a time, and the task that Zarr makes
-    # for each of the others holds the objects of a chunk, 4 KiB, until it is
-    # read; as many cells of fewer shards hold the same indexers and copies.
+    # for each of the others, in every column shard, holds the objects of a
+    # chunk, 4 KiB, until it is read; as many cells of fewer rows of shards
+    # hold the same indexers and copies.
     charge = block._read_bytes(read.nbytes)
-    assert charge - fewer._read_bytes(read.nbytes) == (touched - touched // 100) * 4_096
-    # A stream of blocks of ten of these cells charges each block ten shards,
-    # nine of them waiting, where blocks of one cell charge none waiting.
-    tens = ChunkedArray(stored, rows=spread, cols=columns, block_size=10)
-    ones = ChunkedArray(stored, rows=spread, cols=columns, block_size=1)
-    assert tens._read_bytes(0) - ones._read_bytes(0) == 9 * 4_096
+    assert charge - fewer._read_bytes(read.nbytes) == (
+        column_shards * (touched - touched // 100) * 4_096
+    )
+    # A stream of blocks of ten of these cells charges each block the shards
+    # of ten rows, where blocks of one cell charge those of one row.
+    tens = ChunkedArray(stored, rows=spread, block_size=10)
+    ones = ChunkedArray(stored, rows=spread, block_size=1)
+    assert tens._read_bytes(0) - ones._read_bytes(0) == 9 * column_shards * 4_096
     assert peak <= charge
-    if features == "all":
+    if column_shards == 1:
         # Without those tasks the charge would not cover the read, even with
         # the file buffer that it charges a read of part of a shard, which a
-        # read of whole shards, as here, holds no longer from Python 3.14. A
-        # read in bands is charged the wider of two ways to read it.
+        # read of whole shards, as here, holds no longer from Python 3.14.
         geometry = array_geometry(stored)
         assert geometry is not None
         assert peak > charge - geometry.readScratchBytes - (touched - 1) * 4_096
+    else:
+        # A charge of one shard in each row of shards, without the tasks of
+        # the other four column shards, falls short.
+        assert peak > charge - (column_shards - 1) * touched * 4_096
+
+
+@pytest.mark.parametrize("touched", [40, 100])
+def test_a_read_in_bands_of_cells_spread_over_shards_holds_what_the_bands_before_it_leave(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch, touched: int
+) -> None:
+    import sys
+
+    from cytearc.storage import virtual_arrays
+    from tests.memory_helpers import traced_selection_read
+
+    # 30,000 cells by 20 features in shards of 100 cells of two 10-feature
+    # chunks; a block of one cell from each of 40 or 100 shards by every
+    # other feature, which a sharded read of both takes in bands of rows,
+    # each in one shard, and a block of as many shuffled cells of one shard.
+    stored, values = _random_bits_store(
+        tmp_path, (30_000, 20), (100, 10), (100, 20), np.float32
+    )
+    columns = np.arange(0, 20, 2)
+    sliced: list[int] = []
+    read_bands = virtual_arrays._read_bands
+
+    def recording(*args: Any, axis: int, **kwargs: Any) -> np.ndarray:
+        sliced.append(axis)
+        return read_bands(*args, axis=axis, **kwargs)
+
+    monkeypatch.setattr(virtual_arrays, "_read_bands", recording)
+    spread = np.arange(touched) * 100 + 7
+    block = ChunkedArray(stored, rows=spread, cols=columns, block_size=touched)
+    # Each traced read starts after a full collection, so the objects that
+    # the earlier bands leave stay until the collector next runs.
+    read, peak = traced_selection_read(stored, spread, columns)
+    np.testing.assert_array_equal(
+        read.view(np.uint32), values[np.ix_(spread, columns)].view(np.uint32)
+    )
+    assert set(sliced) == {0}
+    charge = block._read_bytes(read.nbytes)
+    assert peak <= charge
+    # The reads of the 39 or 99 bands before the last took two chunks each
+    # and leave the most that such reads leave, 192 KiB. No band waits on
+    # another shard, so as many cells of one shard, one band, are charged the
+    # same but for those objects.
+    clustered = np.random.default_rng(7).permutation(touched)
+    fewer = ChunkedArray(stored, rows=clustered, cols=columns, block_size=touched)
+    left = 192 * 1024
+    assert charge - fewer._read_bytes(read.nbytes) == left
+    if sys.version_info < (3, 14):
+        # Python 3.14's collector frees those objects as the reads go; on
+        # 3.13 the read holds them beyond the rest of its charge.
+        assert peak > charge - left
 
 
 @pytest.mark.parametrize(
@@ -811,7 +872,11 @@ def test_a_read_of_cells_on_zarrs_fused_pipeline_is_charged_its_pools_reads(
 
     # Shuffled cells of four chunks, or of four shards, read as one block on
     # Zarr's fused pipeline with a pool of four threads of the test's own,
-    # each decode holding its chunk until the four hold theirs.
+    # each decode holding its chunk until the four hold theirs. Each value's
+    # high half is zero, so a chunk is stored in about half the bytes that
+    # it decodes to, while the charge counts the stored bytes of data that
+    # does not compress: the read of four column chunks keeps 1.7 to 2.7 MB
+    # of its 16.6 MB charge to spare, where random bits left 0.13 MB.
     monkeypatch.setattr(codec_pipeline, "_pool", None)
     monkeypatch.setattr(codec_pipeline, "_pool_size", 0)
     settings = {
@@ -819,8 +884,15 @@ def test_a_read_of_cells_on_zarrs_fused_pipeline_is_charged_its_pools_reads(
         "codec_pipeline.max_workers": 4,
     }
     cells = np.random.default_rng(8).permutation(shape[0])
+    bits = np.random.default_rng(0).integers(0, 1 << 16, size=shape, dtype=np.uint32)
+    values = bits.view(np.float32)
     with zarr.config.set(settings):
-        stored, values = _random_bits_store(tmp_path, shape, chunks, shards, np.float32)
+        stored = zarr.open_group(
+            store=LocalStore(str(tmp_path)), mode="w"
+        ).create_array(
+            "values", shape=shape, chunks=chunks, shards=shards, dtype=np.float32
+        )
+        stored[:] = values
         geometry = array_geometry(stored)
         assert geometry is not None and geometry.fusedPoolWorkers == 4
         (outer, *_) = stored.metadata.codecs

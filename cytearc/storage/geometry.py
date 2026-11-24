@@ -286,13 +286,21 @@ class ArrayGeometry:
     def bandsLeftoverBytes(self, bands: int) -> int:
         """Return what the reads of ``bands`` bands of chunks leave of their objects once they return.
 
+        The reads take every chunk of the bands, as :meth:`chunksLeftoverBytes`
+        counts them.
+        """
+        return self.chunksLeftoverBytes(max(0, int(bands)) * self.bandChunks())
+
+    def chunksLeftoverBytes(self, chunks: int) -> int:
+        """Return what reads that took ``chunks`` chunks in all leave of their objects once they return.
+
         They are counted as :meth:`objectBytes` counts the objects of a read
-        and of each chunk that it takes while it runs, for every chunk of the
-        bands, whether one read takes them or a read of each band does, up to
+        and of each chunk that it takes while it runs, for every chunk,
+        whether one read takes them or a read of each band does, up to
         192 KiB, where what the reads leave levels off as CPython reuses the
         objects it freed.
         """
-        chunks = max(0, int(bands)) * self.bandChunks()
+        chunks = max(0, int(chunks))
         if chunks == 0:
             return 0
         return min(

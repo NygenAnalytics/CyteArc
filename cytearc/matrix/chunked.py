@@ -224,7 +224,9 @@ class ChunkedArray:
         takes its rows by an index array, as a read of some of this matrix's
         rows does, whatever rows this matrix selects. A block whose rows and
         columns are both index arrays is read in bands instead; see
-        ``_indexed_read_parts``.
+        ``_indexed_read_parts``. Only a block whose rows form one run is then
+        read in one request, over the rows of shards that a run of a block's
+        rows touches.
         """
         if not self._is_numpy:
             reader = virtual_array_reader(cast(zarr.Array, self._backing))
@@ -235,7 +237,12 @@ class ChunkedArray:
         geometry = self._geometry()
         if geometry is None:
             return input_bytes
-        from ..storage.partition import band_shards, coalesced_gap_bytes, is_contiguous
+        from ..storage.partition import (
+            band_shards,
+            coalesced_gap_bytes,
+            is_contiguous,
+            run_shards,
+        )
 
         block_rows = min(self._block_size, max(1, self._n_rows))
         # A read of some of a block's rows touches no more of them.
@@ -255,26 +262,29 @@ class ChunkedArray:
             )
             taken_columns = int(in_chunk.max(initial=0))
             columns_indexed = not is_contiguous(self._cols)
-        if geometry.shards is None:
-            chunks, shards, gap = bands * int(column_bins.size), 1, 0
-        else:
-            per_shard = -(-geometry.axisShard(1) // geometry.axisChunk(1))
-            row_chunks = -(-geometry.axisShard(0) // geometry.axisChunk(0))
-            chunks = row_chunks * min(per_shard, int(column_bins.size))
-            shards = bands * int(np.unique(column_bins // per_shard).size)
-            gap = (
-                0
-                if self._cols is None
-                else coalesced_gap_bytes(geometry, self._cols, chunks=chunks)
-            )
         rows_indexed = rows_indexed or (
             self._rows is not None and not is_contiguous(self._rows)
         )
         parts = self._indexed_read_parts(geometry, bands) if rows_indexed else None
         # A block read in one Zarr request takes its rows by an index array
         # unless it is read in bands, which leaves that request only blocks
-        # whose rows form one run.
+        # whose rows form one run, over the rows of shards that a run touches.
         request_indexes_rows = rows_indexed and parts is None
+        request_bands = (
+            bands if parts is None else min(bands, run_shards(geometry, block_rows))
+        )
+        if geometry.shards is None:
+            chunks, shards, gap = request_bands * int(column_bins.size), 1, 0
+        else:
+            per_shard = -(-geometry.axisShard(1) // geometry.axisChunk(1))
+            row_chunks = -(-geometry.axisShard(0) // geometry.axisChunk(0))
+            chunks = row_chunks * min(per_shard, int(column_bins.size))
+            shards = request_bands * int(np.unique(column_bins // per_shard).size)
+            gap = (
+                0
+                if self._cols is None
+                else coalesced_gap_bytes(geometry, self._cols, chunks=chunks)
+            )
         rows = -(-input_bytes // max(1, self._n_cols * geometry.itemsize))
         read_bytes = geometry.readBytes(
             input_bytes,
@@ -543,8 +553,23 @@ class ChunkedArray:
             # Only callers whose calculation allows different row groups opt in.
             if memory_bytes is not None:
                 bytes_per_row = max(1, unit_bytes // block_rows + scratch_per_row)
-                available = resources.memoryBytes - resident - decode
-                block_rows = max(1, min(block_rows, available // bytes_per_row))
+                if (
+                    resident + decode + block_rows * bytes_per_row
+                    > resources.memoryBytes
+                ):
+                    from ..storage.partition import affordable_width
+
+                    # A smaller block can touch fewer shards, whose tasks its
+                    # decode charges, so each size is charged its own.
+                    def fits(rows: int) -> bool:
+                        held = self._with_block_size(rows)._max_decode_bytes()
+                        return (
+                            resident + held + rows * bytes_per_row
+                            <= resources.memoryBytes
+                        )
+
+                    block_rows = max(1, affordable_width(fits, block_rows))
+                    decode = self._with_block_size(block_rows)._max_decode_bytes()
                 unit_bytes = block_rows * bytes_per_row
             else:
                 unit_bytes += block_rows * scratch_per_row
