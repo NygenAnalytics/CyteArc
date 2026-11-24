@@ -944,7 +944,7 @@ def _held_before_the_shuffle(kind: str) -> int:
     scan reads them. A CSV import holds the reader's IDs and its own copy,
     NumPy text of 4 bytes a character of the longest ID, or without an ID
     column only the names that it makes, and the in-memory import its
-    matrices.
+    matrices and its copy of the cell IDs, as NumPy text too.
     """
     counts = _counts()
     kept = _kept(counts, cutoff=kind.endswith("cutoff")).size
@@ -971,10 +971,11 @@ def _held_before_the_shuffle(kind: str) -> int:
         if kind == "sparse"
         else [csr_matrix(counts[:, columns]) for columns in _ASSAY_COLUMNS.values()]
     )
-    return sum(
+    matrix_bytes = sum(
         matrix.data.nbytes + matrix.indices.nbytes + matrix.indptr.nbytes
         for matrix in matrices
     )
+    return matrix_bytes + 4 * len(f"cell-{_N_CELLS - 1}") * _N_CELLS
 
 
 @pytest.mark.parametrize(

@@ -851,15 +851,17 @@ def test_a_sparse_matrix_import_refuses_a_budget_of_one_byte_at_its_first_step(
         ).dump()
     )
     # The matrix that the writer holds refuses first, and a shuffle of the 30
-    # cells beside it, 24 bytes each, before the shuffle runs.
-    held = matrix.data.nbytes + matrix.indices.nbytes + matrix.indptr.nbytes
+    # cells, 24 bytes each, beside it and the import's copy of the IDs, NumPy
+    # text of 4 bytes a character of the longest, c29, before it runs.
+    matrix_bytes = matrix.data.nbytes + matrix.indices.nbytes + matrix.indptr.nbytes
+    held = matrix_bytes + 30 * 4 * 3
     assert (refusal.item, refusal.needed_bytes) == (
         (
             f"the cells' random order beside the {held} bytes that the import holds",
             held + 720,
         )
         if shuffle_cells
-        else ("the sparse matrix", held + 1)
+        else ("the sparse matrix", matrix_bytes + 1)
     )
 
 
@@ -896,10 +898,12 @@ def test_a_sparse_matrix_import_names_the_budget_of_its_scan_beside_the_matrix(
         )
 
     # A budget one byte above what the import holds, or for a shuffle the
-    # budget of drawing the order beside the matrix, 24 bytes a cell, leaves
-    # no room to scan the matrix. Every row holds 20 values, which the scan
-    # reads at 72 bytes each.
-    budget = 600 * 4 + 600 * 4 + 31 * 4 + 24 * 30 if shuffle_cells else held + 1
+    # budget of drawing the order beside the matrix and the import's copy of
+    # the IDs, 24 bytes a cell and 12 an ID, leaves no room to scan the
+    # matrix. Every row holds 20 values, which the scan reads at 72 bytes each.
+    budget = (
+        600 * 4 + 600 * 4 + 31 * 4 + 30 * 12 + 24 * 30 if shuffle_cells else held + 1
+    )
     refusal = refused(lambda: construct(budget))
     item = (
         f"the 20 values of the longest compressed vector beside the {held} bytes "
