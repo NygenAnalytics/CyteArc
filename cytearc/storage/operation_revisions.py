@@ -204,6 +204,23 @@ def _hvg_selection_1_3(
     return variance_bound or earlier_bounds or earlier_blacklist
 
 
+def _scores_batches_under_an_unrecorded_normalizer(
+    kind: str, parameters: Mapping[str, Any], inputs: Mapping[str, Any]
+) -> bool:
+    """Select batch-aware HVG selections of the cytearc flavor that record no normalizer.
+
+    Such a selection scored each batch's values under the session's
+    normalizer and size factor without recording them, so a call under
+    another normalizer or size factor reused it. The cytearc flavor records
+    no ``flavor``, and the other flavors read the counts.
+    """
+    return (
+        "flavor" not in parameters
+        and "batch" in inputs
+        and "normalization_method" not in parameters
+    )
+
+
 # Released revisions by operation. An operation that is not listed has no
 # revisions, so every artifact of it is revision 1. Append a revision to the
 # tuple of the operation it changes, adding the operation if needed; never
@@ -343,6 +360,17 @@ _OPERATION_REVISIONS: dict[str, tuple[OperationRevision, ...]] = {
             ),
             applies=None,
             added_diagnostics=("selectedDetectionRatio",),
+        ),
+        OperationRevision(
+            revision=4,
+            release="1.5.0",
+            change=(
+                "Batch-aware selections of the cytearc flavor record the "
+                "normalization_method and size_factor of the values they score, so "
+                "a call under another normalizer or size factor computes its own "
+                "selection; affects such selections that record no normalizer"
+            ),
+            applies=_scores_batches_under_an_unrecorded_normalizer,
         ),
     ),
     "import_clones": (

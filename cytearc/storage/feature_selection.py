@@ -513,12 +513,13 @@ def _hvg_contract(
 
     The cytearc flavor of all selected cells reads the feature summary,
     unless it leaves out genes that some source of the cells did not measure,
-    which it records in ``measured_features_fingerprint`` beside the
-    normalizer and size factor of the counts' values. Other flavors,
+    which it records in ``measured_features_fingerprint``. Other flavors,
     batch-aware selections and such cytearc selections read the counts of the
     selected cells, record the dataset they read and the batch labels, and
     store the plotted statistics and, with batches, each feature's batch
-    count and median rank.
+    count and median rank. Cytearc selections that read the counts record the
+    normalizer and size factor of their values, except batch-aware ones that
+    releases before 1.5.0 saved.
     """
     flavor = parameters.get("flavor", "cytearc")
     if flavor in _HVG_FLAVOR_PARAMETERS:
@@ -536,9 +537,12 @@ def _hvg_contract(
     if batch and isinstance(parameters.get("batch_column"), str):
         names |= {"batch_column"}
     measured = "measured_features_fingerprint" in names
-    if flavor == "cytearc" and measured:
-        # Its values then come from the counts, normalized as the feature
-        # summary records it otherwise.
+    # Its values then come from the counts, normalized as the feature summary
+    # records it otherwise. Batch-aware selections of releases before 1.5.0
+    # did not record the normalizer, which revision 4 marks.
+    if flavor == "cytearc" and (
+        measured or (batch and "normalization_method" in parameters)
+    ):
         names |= {"normalization_method", "size_factor"}
     if flavor == "cytearc" and not batch and not measured:
         return (

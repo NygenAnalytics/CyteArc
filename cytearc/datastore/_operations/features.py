@@ -778,11 +778,11 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         )
         if measured is not None:
             parameters["measured_features_fingerprint"] = fingerprint_array(measured)
-            if options.flavor == "cytearc":
-                # The counts' values then come from the assay's normalizer and
-                # size factor, which the feature summary records otherwise.
-                parameters["normalization_method"] = callable_identity(assay.normMethod)
-                parameters["size_factor"] = assay.sf
+        if options.flavor == "cytearc" and (batch is not None or measured is not None):
+            # The counts' values then come from the assay's normalizer and
+            # size factor, which the feature summary records otherwise.
+            parameters["normalization_method"] = callable_identity(assay.normMethod)
+            parameters["size_factor"] = assay.sf
         feature_ids_fingerprint = _ordered_feature_ids_fingerprint(assay.z)
         execution_options = {
             "show_plot": show_plot,
@@ -1106,7 +1106,11 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         median rank first. The stored ``corrected_variance`` is then the mean
         score over the batches, and the selection also stores each gene's
         ``batch_count`` and ``median_batch_rank`` (NaN for a gene that no
-        batch ranks among its ``top_n``).
+        batch ranks among its ``top_n``). The cytearc flavor scores each
+        batch's values under the assay's ``normMethod`` and ``sf``, which the
+        selection records as the ``normalization_method`` and ``size_factor``
+        of its parameters, so a call under another normalizer or size factor
+        computes a selection of its own.
 
         On a store merged from sources that measured different genes, as its
         feature columns ``measured_in_<source>`` record, a gene that some
