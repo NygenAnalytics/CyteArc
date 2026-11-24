@@ -989,6 +989,33 @@ def foreground_color(theme: str = "notebook") -> str:
     return "#e8e8e8" if theme == "dark" else "#333333"
 
 
+# The relative luminance of a background on which black and white text reach
+# the same WCAG 2 contrast ratio, (L + 0.05) / 0.05 = 1.05 / (L + 0.05).
+_EQUAL_CONTRAST_LUMINANCE = (1.05 * 0.05) ** 0.5 - 0.05
+
+
+def text_color_on(color: Any) -> str:
+    """Return black or white, whichever contrasts more with ``color``.
+
+    The choice follows the relative luminance of ``color`` as WCAG 2 defines
+    it, from its linearized sRGB channels: black text above 0.179, where black
+    and white reach the same contrast ratio, and white below, so the text
+    contrasts with any background by at least 4.58 to 1.
+
+    Args:
+        color: A Matplotlib color, such as ``"#F0E442"``.
+    """
+    from ._deps import require_matplotlib
+
+    _, mpl = require_matplotlib()
+    red, green, blue = (
+        channel / 12.92 if channel <= 0.04045 else ((channel + 0.055) / 1.055) ** 2.4
+        for channel in mpl.colors.to_rgb(color)
+    )
+    luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue
+    return "#000000" if luminance > _EQUAL_CONTRAST_LUMINANCE else "#ffffff"
+
+
 def finish_embedding_axes(
     ax: Any,
     *,
