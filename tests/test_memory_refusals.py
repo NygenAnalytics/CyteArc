@@ -931,38 +931,58 @@ def test_a_sparse_matrix_import_names_the_budget_of_its_scan_beside_the_matrix(
     assert not destination.exists()
 
 
-def _notes_csv(path: Path, n_cells: int) -> Path:
-    """Write a CSV of three genes, scores and notes of 300 characters, one of 400."""
+def _notes_reader(path: Path, n_cells: int, **options: Any) -> Any:
+    """Write a CSV of three genes and four cell columns, returning its reader.
+
+    The columns are notes of 300 characters, the middle cell's of 400;
+    scores; tags of two letters, every third one missing; and blanks, which
+    the reader reads as missing text, in chunks of 8 rows.
+    """
+    from cytearc.readers import CSVReader
+
     rng = np.random.default_rng(8)
-    lines = ["cell,g0,g1,g2,note,score"]
+    lines = ["cell,g0,g1,g2,note,score,tag,blank"]
     for row in range(n_cells):
         counts = ",".join(str(value) for value in rng.integers(0, 5, 3))
         width = 400 if row == n_cells // 2 else 300
         note = f"{'n' * (width - 1)}{row % 10}"
-        lines.append(f"cell-{row},{counts},{note},{row / 4}")
+        tag = "" if row % 3 == 0 else "ab"
+        lines.append(f"cell-{row},{counts},{note},{row / 4},{tag},")
     path.write_text("\n".join(lines) + "\n")
-    return path
+    return CSVReader(
+        str(path),
+        id_column=0,
+        cell_data_cols=["note", "score", "tag", "blank"],
+        batch_size=8,
+        pandas_kwargs={"dtype": {"blank": str}},
+        **options,
+    )
+
+
+def _notes_column_bytes(n_cells: int) -> tuple[int, int]:
+    """Return the bytes of the notes CSV's columns in an import, and of the notes.
+
+    Each value takes its missing mark. The notes are text of 4 bytes a
+    character of the widest, 400 in the middle one of the reader's chunks;
+    the scores float64 of 8 bytes; the tags text of 4 bytes a character of
+    two, the missing ones left out of the width; and the blanks text of 4
+    bytes, NumPy's least width.
+    """
+    notes = n_cells * (4 * 400 + 1)
+    return notes + n_cells * ((8 + 1) + (4 * 2 + 1) + (4 + 1)), notes
 
 
 @pytest.mark.parametrize("shuffle_cells", [False, True], ids=["file", "shuffled"])
 def test_a_csv_import_refuses_a_budget_without_room_for_its_cell_column_writes(
     tmp_path: Path, shuffle_cells: bool
 ) -> None:
-    from cytearc.readers import CSVReader
     from cytearc.writers import CSVtoZarr
 
     n_cells = 40
-    path = _notes_csv(tmp_path / "counts.csv", n_cells)
 
     def construct(budget: int) -> None:
         CSVtoZarr(
-            CSVReader(
-                str(path),
-                id_column=0,
-                cell_data_cols=["note", "score"],
-                batch_size=8,
-                temp_dir=str(tmp_path),
-            ),
+            _notes_reader(tmp_path / "counts.csv", n_cells, temp_dir=str(tmp_path)),
             str(tmp_path / f"store-{budget}.zarr"),
             "RNA",
             mem_budget=budget,
@@ -973,16 +993,12 @@ def test_a_csv_import_refuses_a_budget_without_room_for_its_cell_column_writes(
     # After the counts write, each column is joined from its parts and, for
     # a shuffle, gathered in the order: twice the largest column, the notes,
     # beside itself. The import then holds the reader's IDs, NumPy text of 4
-    # bytes a character of cell-39; the notes, text of 4 bytes a character of
-    # the widest, 400 in the middle one of the reader's chunks of 8 rows, and
-    # the scores, float64 of 8 bytes, each with a missing mark a cell; the
-    # count summary, 40 bytes a cell and 16 a gene; and a shuffle's order, 8
-    # bytes a cell.
+    # bytes a character of cell-39; every cell column; the count summary, 40
+    # bytes a cell and 16 a gene; and a shuffle's order, 8 bytes a cell.
     ids = n_cells * 4 * len(f"cell-{n_cells - 1}")
-    notes = n_cells * (4 * 400 + 1)
-    scores = n_cells * (8 + 1)
+    columns, notes = _notes_column_bytes(n_cells)
     order = 8 * n_cells if shuffle_cells else 0
-    held = ids + notes + scores + 40 * n_cells + 16 * 3 + order
+    held = ids + columns + 40 * n_cells + 16 * 3 + order
     needed = held + (2 if shuffle_cells else 1) * notes
     refusal = refused(lambda: construct(needed - 1))
     assert refusal.item == (
@@ -996,22 +1012,17 @@ def test_a_csv_import_refuses_a_budget_without_room_for_its_cell_column_writes(
 def test_a_csv_import_charges_its_counts_write_beside_its_ids_and_cell_columns(
     tmp_path: Path,
 ) -> None:
-    from cytearc.readers import CSVReader
     from cytearc.writers import CSVtoZarr
 
     n_cells = 40
-    path = _notes_csv(tmp_path / "counts.csv", n_cells)
-    reader = CSVReader(
-        str(path), id_column=0, cell_data_cols=["note", "score"], batch_size=8
-    )
+    reader = _notes_reader(tmp_path / "counts.csv", n_cells)
     writer = CSVtoZarr(reader, MemoryStore(), "RNA", nthreads=1, shuffle_cells=False)
     resident, _batches = writer._count_import_requirements()
     # The count summary, 40 bytes a cell and 16 a gene, beside the reader's
     # IDs and the cell columns, which the write gathers as it reads each
-    # chunk: the notes at the width of the widest, 400 characters, and the
-    # float64 scores, each with a missing mark a cell.
+    # chunk.
     ids = n_cells * 4 * len(f"cell-{n_cells - 1}")
-    columns = n_cells * (4 * 400 + 1) + n_cells * (8 + 1)
+    columns, _notes = _notes_column_bytes(n_cells)
     assert resident == 40 * n_cells + 16 * 3 + ids + columns
 
 

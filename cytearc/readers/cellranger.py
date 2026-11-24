@@ -186,13 +186,13 @@ class CrReader(ABC):
         """
         resident = self._sparse_import_resident_bytes()
         try:
-            return scan(max(0, int(maxBytes) - resident))
+            return scan(int(maxBytes) - resident)
         except MemoryBudgetError as error:
             raise memory_refusal(
                 f"Scanning the counts of {self.nCells} cells",
                 f"{error.item} beside the {resident} bytes of the reader's arrays",
                 resident + error.needed_bytes,
-                max(0, int(maxBytes)),
+                int(maxBytes),
             ) from error
 
     def _spill_rows(

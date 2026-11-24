@@ -1041,9 +1041,24 @@ def test_a_budget_without_room_for_the_shuffle_is_refused_before_it_runs(
     assert _no_temporary_files(tmp_path)
 
 
+def _planned_spill_budgets(monkeypatch) -> list[int]:
+    """Record the budget of each spill plan that a 10x, MTX or Tapestri reader makes."""
+    from cytearc.readers import cellranger, mtx
+
+    budgets: list[int] = []
+
+    def recorded(*args: Any, maxBytes: int, **options: Any) -> Any:
+        budgets.append(int(maxBytes))
+        return row_spill.row_spill_plan(*args, maxBytes=maxBytes, **options)
+
+    for module in (cellranger, mtx):
+        monkeypatch.setattr(module, "row_spill_plan", recorded)
+    return budgets
+
+
 @pytest.mark.parametrize("kind", ["10x-cutoff", "mtx-cellMajor-filtered", "tapestri-8"])
 def test_a_shuffled_import_of_a_reader_names_the_budget_that_passes_its_spill(
-    tmp_path, kind
+    tmp_path, kind, monkeypatch
 ) -> None:
     run, expected = _source(tmp_path, kind)
     cells = next(iter(expected.values())).shape[0]
@@ -1064,9 +1079,12 @@ def test_a_shuffled_import_of_a_reader_names_the_budget_that_passes_its_spill(
     assert caught.value.budget_bytes == start
     needed = caught.value.needed_bytes
     assert needed > start
-    # With the budget it names, the spill fits; one byte less is refused,
-    # naming the same budget.
+    # With the budget it names, the spill fits, planned within what the
+    # budget leaves beside the order, its inverse and the reader's arrays;
+    # one byte less is refused, naming the same budget.
+    planned = _planned_spill_budgets(monkeypatch)
     at_budget(needed)
+    assert planned[0] == needed - 16 * cells - _held_before_the_shuffle(kind)
     with pytest.raises(MemoryBudgetError) as below:
         at_budget(needed - 1)
     assert (below.value.needed_bytes, below.value.budget_bytes) == (needed, needed - 1)
