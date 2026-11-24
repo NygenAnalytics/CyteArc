@@ -73,6 +73,8 @@ CI splits the suite into four jobs per configuration; `uv run pytest --shard 2/4
 pandas stores text with pyarrow whenever pyarrow is installed, which the lock file does not do, so four more jobs layer pyarrow on the locked environment and split the quick suite into shards.
 `uv run --with pyarrow pytest -m "not slow and not integration"` runs it locally without changing the project environment.
 
+A weekly run of the Newest releases workflow tests the newest releases of the dependencies, which an install that resolves afresh, such as `pip install cytearc`, takes: it calls the Tests workflow, whose four `highest` jobs install them on Python 3.14 without the lock and run the whole suite. Dispatch Newest releases to run them by hand. Its runs are its own, never Tests runs, so the release workflow's check of the release commit's Tests run never takes one.
+
 Under a memory limit, such as a cgroup cap of 8 GiB, run the four shards one after another, with four workers each; the last command fails if any shard failed:
 
     failed=0
@@ -268,7 +270,7 @@ Note such a rebuild in the release's changelog, and publish it as close to the r
 Publishing a GitHub release runs `.github/workflows/publish.yml`.
 Every job checks out the exact commit that the release tag named when the release was published (`github.sha`), and the upload to PyPI waits for four gates on that commit:
 
-- `verify` runs the test workflow, `pytest.yml`: the static checks, the visual regression comparison, the complete suite on Python 3.13, 3.14, and 3.15 and with the lowest direct dependency versions, and the quick suite with pyarrow installed. A release uploads no coverage report.
+- `verify` requires the latest push or manual run of the test workflow, `pytest.yml`, on that commit to have succeeded: the static checks, the visual regression comparison, the complete suite on Python 3.13, 3.14, and 3.15 and with the lowest direct dependency versions, and the quick suite with pyarrow installed. It runs no tests itself, so run the workflow by hand on a commit that has no such run. A release uploads no coverage report.
 - `docs` runs the documentation workflow, `docs.yml`: the documentation tests, the complete MyST build using committed notebooks, and the nitpicky Sphinx API build with reference coverage. Tutorial execution remains a separate Modal action.
 - `build` first requires the release tag to still name that commit, then builds the wheel and the source distribution from a clean checkout and checks their metadata against the tag.
 - `smoke` runs `tests/smoke_wheel.py` on the built wheel on Linux with Python 3.13, 3.14, and 3.15 and on Windows with Python 3.13.

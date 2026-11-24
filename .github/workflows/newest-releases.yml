@@ -1,0 +1,26 @@
+name: Newest releases
+
+# The highest row of the Tests workflow's test job, which installs the newest
+# releases of the dependencies without the lock, as pip install cytearc does,
+# so a release that breaks CyteArc shows within a week. The row runs in this
+# workflow's runs, never in a Tests run, which the release workflow checks.
+on:
+  schedule:
+    # Weekly, off the hour, at which GitHub delays scheduled runs most.
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - ".github/workflows/newest-releases.yml"
+      - ".github/workflows/pytest.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    uses: ./.github/workflows/pytest.yml
+    with:
+      newest_releases: true
