@@ -12,12 +12,60 @@ from cytearc.writers._store import (
     decode_text,
     fingerprint_row_blocks,
     floating_payload_dtype,
+    metadata_column_write_bytes,
     write_metadata_column,
 )
+from tests.memory_helpers import traced_charge
 
 
 def _group() -> zarr.Group:
     return zarr.open_group(store=MemoryStore(), mode="w")
+
+
+def _third_missing(n_rows: int) -> np.ndarray:
+    return np.arange(n_rows) % 3 == 0
+
+
+@pytest.mark.parametrize(
+    ("values", "missing"),
+    [
+        # Text of 200 characters, with and without missing rows, whose
+        # copies dwarf what else the write holds.
+        (np.full(20_000, "n" * 200), _third_missing(20_000)),
+        (np.full(20_000, "n" * 200), np.zeros(20_000, dtype=bool)),
+        # Narrow text, numbers and flags, of rows enough that the write's 2
+        # bytes a row outweigh Zarr's objects of the new array.
+        (np.full(200_000, "ab"), _third_missing(200_000)),
+        (np.arange(200_000, dtype=np.float64), _third_missing(200_000)),
+        (np.arange(200_000, dtype=np.float64), np.zeros(200_000, dtype=bool)),
+        (np.arange(200_000) % 2 == 0, np.zeros(200_000, dtype=bool)),
+    ],
+    ids=["text", "text-none-missing", "narrow", "float", "float-none-missing", "flags"],
+)
+def test_a_column_write_holds_what_its_size_helper_charges(values, missing) -> None:
+    n_rows = values.size
+    charge = metadata_column_write_bytes(
+        n_rows, values.dtype.itemsize, missing=bool(missing.any())
+    )
+    held = traced_charge(
+        lambda _ledger: write_metadata_column(_group(), "column", values, missing)
+    ).held
+    # Beside the column and its mask, which the caller holds, the write holds
+    # no more than the charge and Zarr's objects of the new array, which the
+    # charge leaves out, and the charge's 2 bytes a row bound its buffers.
+    zarr_objects = 64 * 1024
+    assert charge - 2 * n_rows - zarr_objects <= held <= charge + zarr_objects
+
+
+def test_a_column_of_blank_text_holds_less_than_the_charge_of_missing_rows() -> None:
+    # Text that is missing in every row has no present values to copy, so
+    # its write holds less than the charge, which counts them.
+    values, missing = np.full(200_000, ""), np.ones(200_000, dtype=bool)
+    charge = metadata_column_write_bytes(200_000, 4, missing=True)
+    held = traced_charge(
+        lambda _ledger: write_metadata_column(_group(), "column", values, missing)
+    ).held
+    assert held <= charge
 
 
 def test_decode_text_accepts_text_and_rejects_other_values() -> None:

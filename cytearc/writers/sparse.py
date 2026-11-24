@@ -24,7 +24,7 @@ from ..utils.arrays import (
 )
 from ..utils.count_values import compressed_count_ranges
 from ..utils.logging import logger
-from ..utils.memory_budget import MemoryBudgetError, memory_refusal
+from ..utils.memory_budget import MemoryBudgetError, MemoryLedger, memory_refusal
 from ._store import decode_text
 from ..utils.arguments import bool_argument
 from ..utils.matrix_values import ImportValues
@@ -423,15 +423,14 @@ class SparseToZarr:
         # A shuffled import gathers its copy of the IDs in the order for the
         # cell table, beside the copy; a budget that cannot hold both fails
         # here, before the destination exists.
-        if self._cellOrder is not None and held + 2 * id_bytes > int(
-            self.resources.memoryBytes
-        ):
-            raise memory_refusal(
+        if self._cellOrder is not None:
+            MemoryLedger(
+                int(self.resources.memoryBytes),
                 f"Importing the sparse {'matrix' if single else 'matrices'}",
+            ).refuse_beyond(
                 f"the cell IDs in shuffled order beside the {held + id_bytes} "
                 f"bytes of {what}",
                 held + 2 * id_bytes,
-                int(self.resources.memoryBytes),
             )
         # The destination must be empty, or with overwrite an unprepared store.
         self.z = create_destination(

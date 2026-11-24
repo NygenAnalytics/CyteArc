@@ -101,12 +101,29 @@ def _metadata_dtype(series: pd.Series) -> np.dtype[Any]:
     return resolved
 
 
+# The most characters of a float64's text, such as -2.2250738585072014e-308.
+_FLOAT_TEXT_WIDTH = 24
+
+
 def _text_width(series: pd.Series) -> int:
-    """Return the characters of the widest value of a chunk's column as text, missing values left out."""
+    """Return the most characters of a chunk's values as the text of a text column, missing values left out.
+
+    A text column, one whose chunks hold text, writes each value as
+    ``str`` gives it. Numbers are measured without converting each:
+    integers by their least and greatest, floats at the most characters of
+    a float64's text, and booleans at those of ``False``.
+    """
     present = series[series.notna()]
     if present.empty:
         return 0
-    return int(present.astype(str).str.len().max())
+    kind = present.dtype.kind
+    if kind in "iu":
+        return max(len(str(present.min())), len(str(present.max())))
+    if kind == "f":
+        return _FLOAT_TEXT_WIDTH
+    if kind == "b":
+        return len(str(False))
+    return max(map(len, map(str, present.to_numpy(dtype=object))))
 
 
 def _merged_dtype(current: np.dtype[Any] | None, dtype: np.dtype[Any]) -> np.dtype[Any]:
@@ -354,6 +371,9 @@ class CSVReader:
                     their storage dtype.
         cellDataDtypes: Dtype of each ``cell_data_cols`` column across every
                         row; ``object`` marks a text column.
+        cellDataWidths: Characters of the widest value of each
+                        ``cell_data_cols`` column as text, missing values
+                        left out, which an import holds a text column at.
         tempDir: Parent directory of the temporary files of an import that
                  shuffles cells, or None for the system temporary directory.
     """
@@ -486,7 +506,7 @@ class CSVReader:
             self.cellDataIdx,
             self.countDtype,
             self.countRange,
-            self._cellDataWidths,
+            self.cellDataWidths,
         ) = self._read_text(lambda: self._consistency_check(converter_keys, id_names))
 
     def _compression(self) -> str | None:

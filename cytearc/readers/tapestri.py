@@ -476,12 +476,9 @@ class TapestriReader(CrReader):
         sends each cell's nonzero reads to the cell's destination row as it
         reads them, so an import that shuffles cells reads the file once.
 
-        The scan and the spill run within what ``maxBytes`` leaves beside
-        the reader's strings and the cells' cumulative reads.
-
         Raises:
-            MemoryError: If one cell's reads do not fit in ``maxBytes`` beside
-                them, or with ``destinationRows`` their spill does not.
+            MemoryError: If one cell's reads do not fit in ``maxBytes``, or
+                with ``destinationRows`` their spill does not.
             OSError: If the temporary disk lacks room for the shuffled cells.
             ValueError: If a value is NaN or infinite, or ``destinationRows``
                 is not a permutation of the cells.
@@ -502,9 +499,7 @@ class TapestriReader(CrReader):
             )
 
         if destinationRows is None:
-            value_ranges = self._scan_beside_arrays(
-                maxBytes, lambda scan_bytes: scan(scan_bytes, None)
-            )
+            value_ranges = scan(maxBytes, None)
         else:
             # The first cells, of about a million reads, estimate how many
             # reads the cells hold beside zeros and what they take on disk.

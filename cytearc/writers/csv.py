@@ -20,7 +20,10 @@ from ..utils.arguments import bool_argument
 from ..utils.matrix_values import ImportValues
 
 if TYPE_CHECKING:
+    import zarr
+
     from ..readers._sparse import SparseRowStore
+    from ..utils.memory_budget import MemoryLedger
 
 
 class CSVtoZarr:
@@ -86,9 +89,9 @@ class CSVtoZarr:
             cell IDs and the ``cell_data_cols`` columns that the import holds:
             for a shuffle, drawing the order, gathering the IDs in it, and one
             chunk of rows and their spill beside the order and its inverse;
-            the counts write; and the writes of the cell columns. Each is
-            refused before the store is created, naming the budget that
-            holds it.
+            the counts write and its ``countsT`` transpose; and the writes of
+            the cell columns. Each is refused before the store is created,
+            naming the budget that holds it.
 
     Attributes:
         csvr: A CSVReader object
@@ -183,10 +186,11 @@ class CSVtoZarr:
             self._cellOrder = shuffled_order(self.csvr.nCells, self.shuffleSeed)
             # The copy is gathered in the order beside itself, which it then
             # replaces through the spill.
-            self._refuse_beyond(
-                held_ids + int(self._cellOrder.nbytes),
-                int(cell_ids.nbytes),
-                "the cell IDs in shuffled order",
+            held = held_ids + int(self._cellOrder.nbytes)
+            self._import_ledger().refuse_beyond(
+                f"the cell IDs in shuffled order beside the {held} bytes that the "
+                "import holds",
+                held + int(cell_ids.nbytes),
             )
             cell_ids = cell_ids[self._cellOrder]
             self._spill_rows(held_ids)
@@ -259,66 +263,80 @@ class CSVtoZarr:
         """
         return 0 if self.csvr.cellIds is None else int(self.csvr.cellIds.nbytes)
 
-    def _cell_column_bytes(self) -> tuple[int, int]:
-        """Return the bytes of every cell data column as the import holds it, and of the largest.
+    def _cell_column_itemsizes(self) -> list[int]:
+        """Return the bytes of one value of each cell data column as the import holds it.
 
-        A column holds each cell's value, numbers in their dtype and text of
-        4 bytes a character of the column's widest value, and its missing
-        mark. A shuffled import holds every column from its spill to the end
-        of its counts write, and one in the file's order gathers them during
-        the counts write.
+        Numbers take their dtype's, and text 4 bytes a character of the
+        column's widest value, one character at least, as NumPy holds it.
         """
-        widths = self.csvr._cellDataWidths or []
-        sizes = [
-            self.csvr.nCells
-            * (
-                (4 * max(1, widths[position]) if dtype.kind == "O" else dtype.itemsize)
-                + 1
-            )
+        widths = self.csvr.cellDataWidths or []
+        return [
+            4 * max(1, widths[position]) if dtype.kind == "O" else dtype.itemsize
             for _name, (position, dtype) in self._cellDataColumns
         ]
-        return sum(sizes), max(sizes, default=0)
 
-    def _refuse_beyond(self, held: int, step: int, item: str) -> None:
-        """Refuse a step that holds ``step`` bytes beside ``held`` that the budget cannot hold both of.
+    def _cell_column_bytes(self) -> int:
+        """Return the bytes of the cell data columns as the import holds them, each value with its missing mark.
 
-        Raises:
-            MemoryBudgetError: Naming the budget that holds both.
+        A shuffled import holds every column from its spill to the end of
+        its counts write, and one in the file's order gathers them during
+        the counts write.
         """
-        from ..utils.memory_budget import memory_refusal
+        return self.csvr.nCells * sum(
+            itemsize + 1 for itemsize in self._cell_column_itemsizes()
+        )
 
-        budget = int(self.resources.memoryBytes)
-        if held + step > budget:
-            raise memory_refusal(
-                f"Importing the counts of {self.csvr.nCells} cells",
-                f"{item} beside the {held} bytes that the import holds",
-                held + step,
-                budget,
-            )
+    def _import_ledger(self) -> "MemoryLedger":
+        """Return a ledger of the import's budget, whose refusals name the import."""
+        from ..utils.memory_budget import MemoryLedger
+
+        return MemoryLedger(
+            int(self.resources.memoryBytes),
+            f"Importing the counts of {self.csvr.nCells} cells",
+        )
 
     def _check_cell_column_writes(self) -> None:
         """Refuse a budget that cannot hold the writes of the cell columns, after the counts write.
 
-        Each column is joined from its parts and, when the import shuffles,
-        gathered in the order, beside every column's parts, the reader's cell
-        IDs, the order and the count summary.
+        Each column is joined from its parts, with its missing marks, and
+        written, beside every column's parts, the reader's cell IDs, a
+        shuffled import's order and the count summary. A shuffled import
+        gathers the column in the order first, which holds less than its
+        write's copies. A text column may hold blank values, which the
+        write copies around.
 
         Raises:
-            MemoryBudgetError: Naming the budget that holds the largest
-                column's write.
+            MemoryBudgetError: Naming the budget that holds the write of the
+                column that holds the most.
         """
         from ..storage.identity import CountSummary
+        from ._store import metadata_column_write_bytes
 
-        columns, largest = self._cell_column_bytes()
+        n_cells = self.csvr.nCells
         order = 0 if self._cellOrder is None else int(self._cellOrder.nbytes)
         held = (
             self._id_bytes()
-            + columns
+            + self._cell_column_bytes()
             + order
-            + CountSummary.nbytes_for(self.csvr.nCells, self.csvr.nFeatures)
+            + CountSummary.nbytes_for(n_cells, self.csvr.nFeatures)
         )
-        copies = 1 if self._cellOrder is None else 2
-        self._refuse_beyond(held, copies * largest, "the largest cell column's write")
+        writes = [
+            n_cells * (itemsize + 1)
+            + metadata_column_write_bytes(n_cells, itemsize, missing=dtype.kind == "O")
+            for itemsize, (_name, (_position, dtype)) in zip(
+                self._cell_column_itemsizes(), self._cellDataColumns, strict=True
+            )
+        ]
+        self._import_ledger().refuse_beyond(
+            "the largest cell column's write beside the "
+            f"{held} bytes that the import holds",
+            held + max(writes, default=0),
+        )
+
+    def _counts_t_resident_bytes(self) -> int:
+        """Return what the import holds beside its ``countsT`` write: the reader's cell IDs and a shuffled import's order."""
+        order = 0 if self._cellOrder is None else int(self._cellOrder.nbytes)
+        return self._id_bytes() + order
 
     def _chunk_rows(self) -> int:
         """Return the rows of one reader chunk, which is also a batch of shuffled rows."""
@@ -342,7 +360,7 @@ class CSVtoZarr:
         resident = (
             CountSummary.nbytes_for(self.csvr.nCells, self.csvr.nFeatures)
             + self._id_bytes()
-            + self._cell_column_bytes()[0]
+            + self._cell_column_bytes()
         )
         store = self._shuffledStore
         if self._cellOrder is None or store is None:
@@ -372,9 +390,9 @@ class CSVtoZarr:
         """
         from ..readers._row_spill import (
             RowSpillPlan,
+            admitted_spill_plan,
             dense_sample_rows,
             dense_spill_estimate,
-            least_admitted_budget,
             row_spill_plan,
             spill_rows,
         )
@@ -384,7 +402,7 @@ class CSVtoZarr:
         assert self._cellOrder is not None
         n_cells, n_features = self.csvr.nCells, self.csvr.nFeatures
         destinations = destination_rows(self._cellOrder)
-        held = 2 * int(destinations.nbytes) + held_ids + self._cell_column_bytes()[0]
+        held = 2 * int(destinations.nbytes) + held_ids + self._cell_column_bytes()
         available = int(self.resources.memoryBytes) - held
         chunk_values = self._chunk_rows() * n_features
         chunk_bytes = 2 * chunk_values * self.csvr.countDtype.itemsize
@@ -401,7 +419,7 @@ class CSVtoZarr:
             )
 
         try:
-            plan = planned(available)
+            plan = admitted_spill_plan(planned, available)
         except MemoryBudgetError as error:
             # The spill runs beside the order and its inverse, the cell IDs
             # and the cell columns, so the budget that passes it holds those
@@ -414,7 +432,7 @@ class CSVtoZarr:
             raise memory_refusal(
                 f"Importing the counts of {n_cells} cells",
                 f"{error.item} beside the {held} bytes of its {beside}",
-                held + least_admitted_budget(planned, error),
+                held + error.needed_bytes,
                 int(self.resources.memoryBytes),
             ) from error
         parts: dict[int, list[tuple[np.ndarray, np.ndarray]]] = {
@@ -497,6 +515,7 @@ class CSVtoZarr:
             transposed=counts_t_assays((self.assayName,), assay_types),
             admitCounts=dense_counts_admission(resident + producer_reserve),
             requested=requested,
+            countsTResidentBytes=self._counts_t_resident_bytes(),
         )
 
     def dump(self) -> None:
@@ -522,7 +541,7 @@ class CSVtoZarr:
         from ..storage.schema import load_count_array
         from ..storage.metadata_keys import metadata_column_keys
         from ..utils.matrix_values import linear_values
-        from ._store import keyed_metadata_columns, write_metadata_column
+        from ._store import keyed_metadata_columns
 
         if self.shuffleCells and self._shuffledStore is None:
             raise RuntimeError(
@@ -604,20 +623,15 @@ class CSVtoZarr:
             )
         finally:
             self._release_shuffled_rows()
-        for name, (position, _dtype) in metadata:
-            values = np.concatenate([values for values, _missing in parts[position]])
-            missing = np.concatenate([missing for _values, missing in parts[position]])
-            if self._cellOrder is not None:
-                values = values[self._cellOrder]
-                missing = missing[self._cellOrder]
-            write_metadata_column(
-                cell_data_grp, name, values, missing, profile=self.profile
-            )
+        self._write_cell_columns(cell_data_grp, metadata, parts)
+        # countsT runs beside neither the columns' parts nor the summary.
+        parts.clear()
         logger.info(
             f"Wrote {self.csvr.nCells} cells and {self.csvr.nFeatures} features "
             f"from CSV to assay {self.assayName}"
         )
         finalize_counts(store, summary=summary)
+        del summary
         from .counts_t import finalize_writer_counts_t
 
         finalize_writer_counts_t(
@@ -628,7 +642,25 @@ class CSVtoZarr:
             resources=self.resources,
             profile=self.profile,
             io=self.io,
+            resident_bytes=self._counts_t_resident_bytes(),
         )
+
+    def _write_cell_columns(
+        self,
+        group: "zarr.Group",
+        metadata: list[tuple[str, tuple[int, np.dtype[Any]]]],
+        parts: dict[int, list[tuple[np.ndarray, np.ndarray]]],
+    ) -> None:
+        """Join each cell column from its parts and write it in the order of the cells."""
+        from ._store import write_metadata_column
+
+        for name, (position, _dtype) in metadata:
+            values = np.concatenate([values for values, _missing in parts[position]])
+            missing = np.concatenate([missing for _values, missing in parts[position]])
+            if self._cellOrder is not None:
+                values = values[self._cellOrder]
+                missing = missing[self._cellOrder]
+            write_metadata_column(group, name, values, missing, profile=self.profile)
 
 
 def _changed_rows_message(n_cells: int) -> str:

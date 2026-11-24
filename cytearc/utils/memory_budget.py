@@ -292,12 +292,19 @@ def object_array_bytes(n_values: int) -> int:
 def held_array_bytes(values: np.ndarray) -> int:
     """Return the bytes of an array, with those of the objects that an object array holds.
 
-    Each object counts as ``sys.getsizeof`` measures it, so a reader measures
-    the text it keeps once, rather than at every step that charges it.
+    Each object counts once, as ``sys.getsizeof`` measures it, however many
+    elements refer to it, as the rows of a column share the strings that
+    pandas reads once. A reader measures the text it keeps once, rather
+    than at every step that charges it.
     """
     held = int(values.nbytes)
     if values.dtype.kind == "O":
-        held += sum(map(sys.getsizeof, values))
+        flat = values.ravel()
+        _ids, first = np.unique(
+            np.fromiter(map(id, flat), dtype=np.intp, count=flat.size),
+            return_index=True,
+        )
+        held += sum(map(sys.getsizeof, flat[first]))
     return held
 
 

@@ -885,7 +885,8 @@ def test_a_10x_budget_without_room_for_the_spill_is_refused_with_the_bytes_it_ne
         assert buckets == rows and int((least // 32) // row_bytes) == 1
         needed = held + arrays + least
         item = (
-            f"the row spill of a cell shuffle beside the {held} bytes of its cell order"
+            f"the row spill of a cell shuffle beside the {held} bytes of its cell "
+            f"order and the {arrays} bytes of the reader's arrays"
         )
         assert caught.value.needed_bytes == needed
         assert caught.value.budget_bytes == budget
@@ -958,13 +959,15 @@ def _held_before_the_shuffle(kind: str) -> int:
         return 8 * kept + 8 * (counts.shape[0] + 1) + 8 * (kept + 1)
     if kind.startswith("parse"):
         # A Parse reader keeps the file's wells as ASCII strings, 41 bytes and
-        # one a character each beside a reference of 8, its samples A, B or
-        # C alike, and its qualities, gene counts and source rows of 8 bytes;
-        # the kept cells' copies refer to the strings and copy the numbers.
+        # one a character each beside a reference of 8; its samples as
+        # references to the three strings A, B and C, which pandas reads once
+        # each; and its qualities, gene counts and source rows of 8 bytes.
+        # The kept cells' copies refer to the strings and copy the numbers.
         kept = _source_rows(kind).size
         n_file = counts.shape[0]
         wells = sum(8 + 41 + len(f"well-{row}") for row in range(n_file))
-        cell_columns = n_file * (8 + 41 + 1) + 3 * 8 * n_file
+        samples = 8 * n_file + 3 * (41 + 1)
+        cell_columns = samples + 3 * 8 * n_file
         return 8 * kept + 8 * (kept + 1) + wells + cell_columns + 5 * 8 * kept
     if kind.startswith("mtx"):
         slots = 8 * (kept + 1) if "unordered" in kind else 0
@@ -1074,7 +1077,8 @@ def test_a_shuffled_import_of_a_reader_names_the_budget_that_passes_its_spill(
     # the spill's buckets, a quarter of its budget, must read the longest.
     assert caught.value.item == (
         f"the row spill of a cell shuffle beside the {16 * cells} bytes of its "
-        "cell order"
+        f"cell order and the {_held_before_the_shuffle(kind)} bytes of the "
+        "reader's arrays"
     )
     assert caught.value.budget_bytes == start
     needed = caught.value.needed_bytes
@@ -1091,24 +1095,86 @@ def test_a_shuffled_import_of_a_reader_names_the_budget_that_passes_its_spill(
     assert _no_temporary_files(tmp_path)
 
 
+@pytest.mark.parametrize("shuffle_cells", [False, True], ids=["file", "shuffled"])
+@pytest.mark.parametrize("kind", ["10x-cutoff", "mtx-cellMajor-filtered", "csv"])
+def test_an_import_charges_its_counts_t_write_with_what_it_still_holds(
+    tmp_path, monkeypatch, kind, shuffle_cells
+) -> None:
+    from cytearc.storage import sharding
+
+    charged: list[int] = []
+    preflight = sharding.preflight_counts_t_spec
+
+    def recorded(*args: Any, residentBytes: int = 0, **options: Any) -> Any:
+        charged.append(int(residentBytes))
+        return preflight(*args, residentBytes=residentBytes, **options)
+
+    monkeypatch.setattr(sharding, "preflight_counts_t_spec", recorded)
+    run, expected = _source(tmp_path, kind)
+    run(tmp_path / "store.zarr", {"shuffle_cells": shuffle_cells})
+    cells = next(iter(expected.values())).shape[0]
+    # countsT runs beside the reader's arrays, or a CSV reader's IDs, NumPy
+    # text of 4 bytes a character of cell-156, and a shuffled import's order,
+    # 8 bytes a cell: the counts write lets go of the shuffled cells and the
+    # count summaries first.
+    reader = (
+        4 * len(f"cell-{_N_CELLS - 1}") * _N_CELLS
+        if kind == "csv"
+        else _held_before_the_shuffle(kind)
+    )
+    held = reader + (8 * cells if shuffle_cells else 0)
+    # The layout fit plans the write and the write admits itself, both with
+    # that charge.
+    assert len(charged) >= 2
+    assert set(charged) == {held}
+
+
+def test_a_10x_import_lets_go_of_its_count_summaries_before_counts_t(
+    tmp_path, monkeypatch
+) -> None:
+    import gc
+
+    from cytearc.storage import sharding
+    from cytearc.storage.identity import CountSummary
+
+    run, _expected = _source(tmp_path, "10x-cutoff")
+    summaries: list[int] = []
+    preflight = sharding.preflight_counts_t_spec
+
+    def recorded(*args: Any, **options: Any) -> Any:
+        gc.collect()
+        alive = sum(isinstance(item, CountSummary) for item in gc.get_objects())
+        summaries.append(alive)
+        return preflight(*args, **options)
+
+    monkeypatch.setattr(sharding, "preflight_counts_t_spec", recorded)
+    run(tmp_path / "store.zarr", {"shuffle_cells": True})
+    # The layout fit plans countsT before the counts write makes a summary,
+    # and the write admits it once the summaries are let go.
+    assert summaries and summaries[-1] == 0
+
+
+@pytest.mark.parametrize("dtype", [np.float64, np.float32])
 @pytest.mark.parametrize("longest", [50, 0])
 def test_a_spill_plan_refuses_a_budget_whose_buckets_cannot_read_the_longest_row(
-    longest,
+    longest, dtype
 ) -> None:
     from cytearc.readers._row_spill import row_spill_plan
 
     # A row arrives whole in one bucket, which reads in a quarter of the
-    # budget: each float64 value takes 3 * 8 + 32 bytes as it is read, and
-    # the row 112 more for its piece and pointers; a row of no values reads
-    # as one value. Three rows need less beside the buckets than this.
-    read = max(1, longest) * (3 * 8 + 32) + 112
+    # budget: each value takes three times its bytes and 32 more as it is
+    # read, 8 or 4 bytes for float64 or float32, and the row 112 more for
+    # its piece and pointers; a row of no values reads as one value. Three
+    # rows need less beside the buckets than this.
+    itemsize = 8 if dtype is np.float64 else 4
+    read = max(1, longest) * (3 * itemsize + 32) + 112
     destinations = np.array([2, 0, 1])
 
     def planned(budget: int) -> Any:
         return row_spill_plan(
             destinations,
             (3, 50),
-            np.float64,
+            dtype,
             entries=None,
             longest=longest,
             maxBytes=budget,
@@ -1155,7 +1221,7 @@ def test_a_tapestri_scan_in_the_files_order_names_the_budget_beside_its_strings(
     )
     assert (caught.value.item, caught.value.needed_bytes) == (item, needed)
     assert str(caught.value) == (
-        f"Scanning the counts of {n_cells} cells holds about {needed} bytes for "
+        f"Importing the counts of {n_cells} cells holds about {needed} bytes for "
         f"{item}, more than the memory budget of 1 bytes. Raise mem_budget to at "
         f"least {needed} bytes."
     )

@@ -33,8 +33,8 @@ from ._matrix_market import (
 from .cellranger import CrReader
 from ._row_spill import (
     RowSpillPlan,
+    admitted_spill_plan,
     checked_destinations,
-    plan_beside_arrays,
     row_spill_plan,
     spill_rows,
 )
@@ -2171,7 +2171,8 @@ class MtxReader(CrReader):
         that :meth:`consume` would yield them, and each is sent to its
         destination row in temporary files; ``consume`` then yields them
         once in destination order, from those files. The pass holds what one batch of about a
-        million counts holds as it is read and sent, within ``maxBytes``.
+        million counts holds as it is read and sent, within ``maxBytes``,
+        which an import gives beside the reader's arrays.
 
         Raises:
             MemoryBudgetError: With ``destinationRows``, if ``maxBytes``
@@ -2195,8 +2196,7 @@ class MtxReader(CrReader):
         """Read the kept cells in batches and send each to its destination row.
 
         A batch holds about a million counts, or as many cells as the budget
-        holds beside the reader's arrays, the parse buffer and what sending a
-        batch holds.
+        holds beside the parse buffer and what sending a batch holds.
         """
         self._release_shuffled_rows()
         destinations = checked_destinations(destinationRows, self.nCells)
@@ -2204,8 +2204,6 @@ class MtxReader(CrReader):
         lines = engine._importLinesInMem
         pointers = engine._cumulativeRowNnz
         longest = int(np.diff(pointers).max(initial=0))
-        resident = engine.resident_bytes()
-        available = maxBytes - resident
 
         def held(plan: RowSpillPlan, rows: int) -> int:
             return int(plan.batch_bytes(engine.max_window_nnz(rows))) + int(
@@ -2223,8 +2221,7 @@ class MtxReader(CrReader):
                 least=lambda plan: held(plan, 1),
             )
 
-        # The spill runs beside the reader's arrays.
-        plan = plan_beside_arrays(planned, resident, maxBytes)
+        plan = admitted_spill_plan(planned, maxBytes)
         # Batches start at the cells of a million counts on average and
         # halve until their widest window fits.
         window = scan_window_values(longest)
@@ -2232,11 +2229,11 @@ class MtxReader(CrReader):
             1, min(self.nCells, window * self.nCells // max(1, plan.entries or 0))
         )
         while rows > 1 and (
-            engine.max_window_nnz(rows) > window or held(plan, rows) > available
+            engine.max_window_nnz(rows) > window or held(plan, rows) > maxBytes
         ):
             rows //= 2
         buffer_bytes = plan.batch_buffer_bytes(
-            available - plan.ownerBytes - engine.producer_staging_bytes(rows, lines),
+            maxBytes - plan.ownerBytes - engine.producer_staging_bytes(rows, lines),
             engine.max_window_nnz(rows),
         )
         batches = engine.consume(rows, lines)

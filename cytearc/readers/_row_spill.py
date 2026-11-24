@@ -25,11 +25,11 @@ from ._sparse import ROW_BYTES, SparseRowStore, encoded_entry_bytes
 
 __all__ = [
     "RowSpillPlan",
+    "admitted_spill_plan",
     "checked_destinations",
     "dense_sample_rows",
     "dense_spill_estimate",
     "least_admitted_budget",
-    "plan_beside_arrays",
     "row_spill_consumer",
     "row_spill_plan",
     "sample_rows",
@@ -359,25 +359,26 @@ def least_admitted_budget(
     return high
 
 
-def plan_beside_arrays(
-    planned: Callable[[int], RowSpillPlan], resident: int, maxBytes: int
+def admitted_spill_plan(
+    planned: Callable[[int], RowSpillPlan], maxBytes: int
 ) -> RowSpillPlan:
-    """Plan a reader's spill within what ``maxBytes`` leaves beside the ``resident`` bytes of its arrays.
+    """Return the plan of a spill within ``maxBytes``, refusing a budget that does not admit it.
 
     ``planned`` returns the plan of a budget, as :func:`row_spill_plan` does.
+    Its caller restates a refusal beside what it holds besides the spill.
 
     Raises:
-        MemoryBudgetError: If the spill does not fit, naming the least budget
-            that holds the arrays and passes the spill: a larger budget sizes
-            larger buckets, which need less beside them.
+        MemoryBudgetError: If ``maxBytes`` does not admit the spill, naming
+            the least budget that does, which :func:`least_admitted_budget`
+            finds: a larger budget sizes larger buckets, which need less
+            beside them.
     """
     try:
-        return planned(int(maxBytes) - int(resident))
+        return planned(int(maxBytes))
     except MemoryBudgetError as error:
-        needed = int(resident) + least_admitted_budget(planned, error)
+        needed = least_admitted_budget(planned, error)
         raise MemoryBudgetError(
-            "Shuffling cells exceeds the memory limit. Beside the "
-            f"{int(resident)} bytes of the reader's arrays, reading the rows and "
+            "Shuffling cells exceeds the memory limit. Reading the rows and "
             f"sending them to their buckets needs at least {needed} bytes.",
             needed_bytes=needed,
             budget_bytes=int(maxBytes),
