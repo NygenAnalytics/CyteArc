@@ -271,13 +271,16 @@ class TrajectoryStatesArguments(OperationArguments):
     #: The cells searched, those of the graph left out because they lie
     #: outside the largest connected component of scored cells, the terminal
     #: states found, the states that hold fewer cells than cells_per_state,
-    #: and the crispness of the memberships.
+    #: the crispness of the memberships, whether its optimization converged
+    #: or stopped at its limit of trials, and the gap between the last
+    #: eigenvalue kept and the next.
     diagnostics: ClassVar[tuple[str, ...]] = (
         "searchedCells",
         "cellsLeftOut",
         "terminalStates",
         "statesShortOfCells",
         "crispness",
+        "crispnessOptimization",
         "boundaryGap",
     )
     call: ClassVar[str | None] = "ds.trajectory.states"

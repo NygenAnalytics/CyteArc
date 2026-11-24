@@ -71,6 +71,7 @@ __all__ = [
     "state_cells",
     "state_labels",
     "state_names",
+    "trial_limit",
     "vertex_rows",
 ]
 
@@ -94,7 +95,7 @@ _SMALL_ARRAY_BYTES = 2**20
 #: How close the last eigenvalue kept and the first one left out may come,
 #: relative to the latter's distance from one, before they count as tied.
 #: Identical parts of a walk tie them to 1e-9; on the pancreas walks and the
-#: synthetic processes of the tests the closest pair stayed 8e-3 apart.
+#: synthetic processes of the tests the closest pair stayed 7e-3 apart.
 TIE_TOLERANCE = 1e-6
 
 
@@ -109,7 +110,9 @@ class FoundStates:
     ``walk_share`` its share of a long walk's time, ``direction`` its mean
     direction score rescaled to [0, 1], and ``roles`` its role.
     ``eigenvalues`` holds the walk's ``n_states + 1`` leading eigenvalues,
-    largest real part first.
+    largest real part first. ``optimization_converged`` is False when
+    Nelder-Mead stopped at its limit of :func:`trial_limit` trials before
+    the crispness converged.
     """
 
     memberships: np.ndarray = field(repr=False)
@@ -121,6 +124,7 @@ class FoundStates:
     roles: tuple[str, ...]
     eigenvalues: np.ndarray
     crispness: float
+    optimization_converged: bool
 
 
 def splits_conjugate_pair(eigenvalues: np.ndarray, n_states: int) -> bool:
@@ -360,21 +364,37 @@ def _trial_gap(free: np.ndarray, start: np.ndarray, tail: np.ndarray) -> float:
     return float(n_states - np.sum(trial**2 / first[np.newaxis, :]))
 
 
-def optimize_rotation(basis: np.ndarray) -> np.ndarray:
-    """Return the feasible rotation of the basis that Nelder-Mead finds most crisp.
+def trial_limit(n_states: int) -> int:
+    """Return the most trials that Nelder-Mead evaluates for ``n_states`` states.
+
+    SciPy's ``fmin`` allows by default 200 evaluations of the objective, and
+    as many iterations, for each of the ``(n_states - 1)**2`` free entries
+    of the rotation.
+    """
+    return 200 * (n_states - 1) ** 2
+
+
+def optimize_rotation(basis: np.ndarray) -> tuple[np.ndarray, bool]:
+    """Return the feasible rotation of the basis that Nelder-Mead finds most crisp, and whether it converged.
 
     Weber (2006), Algorithm 3.11, as Lange et al. (2022) run it: SciPy's
     ``fmin`` with its defaults optimizes the entries of the rotation outside
     its first row and column, making each trial feasible before evaluating
-    it, and stops after at most ``200 * (n_states - 1)**2`` evaluations. It
-    starts from the entries of Algorithm 3.9's guess. Algorithm 3.11 starts
-    from the feasible guess, whose entries Algorithm 3.10 divides by the sum
-    of its first row; the objective does not depend on that scale, but
-    ``fmin``'s absolute tolerances do, and the guess before division gives
-    CellRank 2.4.0's memberships. Two states have one free entry, which
-    only scales the rotation and so leaves the objective unchanged, so their
-    feasible guess is returned. The optimization advances a progress bar
+    it, and stops after at most :func:`trial_limit` evaluations, the default
+    limit, which the call passes explicitly. It starts from the entries of
+    Algorithm 3.9's guess. Algorithm 3.11 starts from the
+    feasible guess, whose entries Algorithm 3.10 divides by the sum of its
+    first row; the objective does not depend on that scale, but ``fmin``'s
+    absolute tolerances do, and the guess before division gives CellRank
+    2.4.0's memberships. Two states have one free entry, which only scales
+    the rotation and so leaves the objective unchanged, so their feasible
+    guess is returned, converged. The optimization advances a progress bar
     with its evaluations.
+
+    The second value is False when ``fmin`` stopped at its limit of
+    evaluations or of iterations before its simplex converged. An iteration
+    evaluates at least one trial beside the first simplex's, so the
+    evaluations reach their limit first.
     """
     n_states = basis.shape[1]
     # Each trial reads the basis's columns after the first, held contiguous
@@ -383,9 +403,8 @@ def optimize_rotation(basis: np.ndarray) -> np.ndarray:
     guess = initial_rotation(basis)
     start = feasible_rotation(guess, tail)
     if n_states == 2:
-        return start
-    n_free = (n_states - 1) ** 2
-    most = 200 * n_free
+        return start, True
+    most = trial_limit(n_states)
     progress = _SolveProgress(
         basis.shape[0],
         f"the memberships of {n_states} states",
@@ -402,13 +421,22 @@ def optimize_rotation(basis: np.ndarray) -> np.ndarray:
 
     finished = False
     try:
-        free = fmin(objective, guess[1:, 1:].ravel(), disp=False)
+        # The warning flag is 0 when the simplex converged, 1 or 2 when the
+        # evaluations or the iterations reached their limit.
+        free, _value, _iterations, _evaluations, warnflag = fmin(
+            objective,
+            guess[1:, 1:].ravel(),
+            maxiter=most,
+            maxfun=most,
+            disp=False,
+            full_output=True,
+        )
         finished = True
     finally:
         progress.close(finished)
     best = start.copy()
     best[1:, 1:] = np.asarray(free).reshape(n_states - 1, n_states - 1)
-    return feasible_rotation(best, tail)
+    return feasible_rotation(best, tail), int(warnflag) == 0
 
 
 def coarse_grain(
@@ -577,7 +605,7 @@ def find_states(
         )
         basis = invariant_basis(walk, eigenvalues, eigenvectors, n_states)
         del eigenvectors
-        rotation = optimize_rotation(basis)
+        rotation, optimization_converged = optimize_rotation(basis)
         memberships = basis @ rotation
         del basis
         coarse, walk_share = coarse_grain(walk, memberships)
@@ -606,6 +634,7 @@ def find_states(
         roles=tuple(roles),
         eigenvalues=eigenvalues,
         crispness=crispness,
+        optimization_converged=optimization_converged,
     )
 
 

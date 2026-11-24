@@ -266,6 +266,7 @@ from ...trajectory.states import (
     search_bytes as _search_bytes_impl,
     state_labels as _state_labels_impl,
     state_names as _state_names_impl,
+    trial_limit as _trial_limit_impl,
 )
 from ...trajectory.results import (
     STATE_TABLE_COLUMNS,
@@ -817,6 +818,26 @@ _STATES_WARNINGS = (
         ),
     ),
 )
+
+
+def _optimization_warning(n_states: int) -> DiagnosticRule:
+    """The warning of a state search whose optimization stopped at its limit of trials before it converged.
+
+    A search of two states has nothing to optimize and always converges, so
+    the neighbors that the warning names hold at least two states.
+    """
+    return DiagnosticRule(
+        "crispnessOptimization",
+        applies=lambda numbers: numbers["crispnessOptimization"] != "converged",
+        message=lambda _numbers: (
+            f"The optimization of the memberships of {n_states} states stopped at its "
+            f"limit of {_trial_limit_impl(n_states):,} trials before their crispness "
+            "converged, so the states depend on where the optimization stopped, and a "
+            "small change to the graph can give other terminal states. Compare the "
+            f"terminal states with those of n_states={n_states - 1} and "
+            f"n_states={n_states + 1}, or check each terminal state with markers"
+        ),
+    )
 
 
 def _potency_species(
@@ -2821,6 +2842,16 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         identical parts of a walk tie, since the last state is then one mix
         of their directions among many.
 
+        The memberships are the crispest, those whose states overlap least,
+        that Nelder-Mead finds in at most ``200 * (n_states - 1)**2``
+        trials, as CellRank runs it. A search of many states can stop at
+        that limit before the crispness converges. Its states then depend on
+        where the optimization stopped, and a small change to the graph can
+        give other terminal states, so the search warns. The artifact's
+        diagnostics, which ``ds.artifacts.inspect(states).diagnostics``
+        returns, record the ``crispness`` and the ``crispnessOptimization``,
+        ``"converged"`` or ``"stopped_at_limit"``.
+
         Args:
             graph: Explicit connectivity-map or integrated-graph artifact to
                 walk on.
@@ -3068,6 +3099,11 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                         np.count_nonzero(cell_counts < validated["cells_per_state"])
                     ),
                     "crispness": float(found.crispness),
+                    "crispnessOptimization": (
+                        "converged"
+                        if found.optimization_converged
+                        else "stopped_at_limit"
+                    ),
                     "boundaryGap": _boundary_gap_impl(found.eigenvalues, n_states),
                 },
             )
@@ -3078,7 +3114,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         warn_diagnostics(
             arguments,
             inspect_artifact(self.zw, planned.ref).diagnostics,
-            _STATES_WARNINGS,
+            (*_STATES_WARNINGS, _optimization_warning(n_states)),
         )
         return planned.ref
 
