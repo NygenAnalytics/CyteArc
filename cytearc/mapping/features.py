@@ -361,7 +361,7 @@ class AlignedFeatureStream:
             [self._feature_coverage]
             + [
                 columns.size / len(self._reference_feature_keys)
-                for columns in self._source_features.values()
+                for columns, _unmeasured in self._source_features.values()
             ]
         )
         if self.renormalize_subset and lowest_coverage < 1:
@@ -446,11 +446,13 @@ class AlignedFeatureStream:
         query holds.
 
         Raises:
-            ValueError: If ``missing_feature_policy`` is ``"error"`` and a
-                source of the selected cells did not measure such a feature.
+            ValueError: If a source of the selected cells measured none of the
+                reference features that the query holds, or if
+                ``missing_feature_policy`` is ``"error"`` and a source did not
+                measure some of them, naming each such source.
         """
         self._cell_sources: np.ndarray | None = None
-        self._source_features: dict[int, np.ndarray] = {}
+        self._source_features: dict[int, tuple[np.ndarray, np.ndarray]] = {}
         self._measured_features_fingerprint: str | None = None
         if sources is None:
             return
@@ -466,20 +468,43 @@ class AlignedFeatureStream:
         lacking = [code for code in present if not measured[code].all()]
         if not lacking:
             return
-        if missing_feature_policy == "error":
-            code = lacking[0]
-            unmeasured = self._reference_index_map[~measured[code]]
+        empty = [code for code in lacking if not measured[code].any()]
+        if empty:
+            several = len(empty) > 1
             raise ValueError(
-                f"Query source {record.sources[code]!r} did not measure "
-                f"{unmeasured.size} required reference features, as the feature "
-                f"column {record.columns[code]!r} records: "
-                f"{quoted_examples(self._reference_feature_keys[unmeasured])}. Map "
-                "the cells of the sources that measured them, or fill them with "
+                f"Query source{'s' if several else ''} "
+                f"{quoted_examples([record.sources[code] for code in empty])} "
+                "measured none of the reference features, as the feature "
+                f"column{'s' if several else ''} "
+                f"{quoted_examples([record.columns[code] for code in empty])} "
+                f"record{'' if several else 's'}, so none of "
+                f"{'their' if several else 'its'} cells can be mapped; map the "
+                "cells of the other sources"
+            )
+        if missing_feature_policy == "error":
+            sentences = []
+            for code in lacking:
+                unmeasured = self._reference_index_map[~measured[code]]
+                sentences.append(
+                    f"Source {record.sources[code]!r} lacks {unmeasured.size:,}: "
+                    f"{quoted_examples(self._reference_feature_keys[unmeasured])}."
+                )
+            several = len(lacking) > 1
+            raise ValueError(
+                f"{f'{len(lacking):,} sources' if several else 'A source'} of the "
+                "selected query cells did not measure required reference "
+                f"features, as the feature column{'s' if several else ''} "
+                f"{quoted_examples([record.columns[code] for code in lacking])} "
+                f"record{'' if several else 's'}. {' '.join(sentences)} Map the "
+                "cells of the sources that measured them, or fill them with "
                 "missing_feature_policy='reference_mean' or 'zero'"
             )
         self._cell_sources = read_only_copy(codes)
         self._source_features = {
-            int(code): read_only_copy(self._reference_index_map[measured[code]])
+            int(code): (
+                read_only_copy(self._reference_index_map[measured[code]]),
+                read_only_copy(self._reference_index_map[~measured[code]]),
+            )
             for code in present
         }
         fingerprint = ValueFingerprintBuilder()
@@ -534,7 +559,8 @@ class AlignedFeatureStream:
             arrays.append(self._cell_scalars)
         if self._cell_sources is not None:
             arrays.append(self._cell_sources)
-            arrays.extend(self._source_features.values())
+            for pair in self._source_features.values():
+                arrays.extend(pair)
         return sum(array.nbytes for array in arrays) + np.dtype(np.float64).itemsize
 
     def _read_parts(self, rows: int) -> tuple[int, int]:
@@ -670,10 +696,12 @@ class AlignedFeatureStream:
 
     def _fill_unmeasured(self, row_offset: int, values: np.ndarray) -> None:
         """Fill the reference features that the source of a block's cell did not measure, which are missing for that cell."""
-        for rows, measured in self.measured_rows(row_offset, len(values)):
-            unmeasured = np.setdiff1d(self._reference_index_map, measured)
+        assert self._cell_sources is not None
+        codes = self._cell_sources[row_offset : row_offset + len(values)]
+        for code in np.unique(codes):
+            unmeasured = self._source_features[int(code)][1]
             if unmeasured.size:
-                values[np.ix_(rows, unmeasured)] = (
+                values[np.ix_(np.flatnonzero(codes == code), unmeasured)] = (
                     self._reference_normalized_means[unmeasured]
                     if self._missing_feature_policy == "reference_mean"
                     else 0.0
@@ -694,6 +722,6 @@ class AlignedFeatureStream:
             return ((rows, self._reference_index_map),)
         codes = self._cell_sources[row_offset : row_offset + n_rows]
         return tuple(
-            (rows[codes == code], self._source_features[int(code)])
+            (rows[codes == code], self._source_features[int(code)][0])
             for code in np.unique(codes)
         )

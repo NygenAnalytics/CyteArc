@@ -358,6 +358,15 @@ def fingerprint_array(values: np.ndarray) -> str:
     return builder.hexdigest()
 
 
+def is_fingerprint(value: Any) -> bool:
+    """Return whether ``value`` is a fingerprint as ``fingerprint_array`` gives one: 64 lowercase hexadecimal digits."""
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
 def _stored_array_chunk_rows(array: Any) -> int:
     return scan_band(array_geometry(array), fallback=max(1, int(array.shape[0])))
 

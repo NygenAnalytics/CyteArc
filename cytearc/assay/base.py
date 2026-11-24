@@ -1,5 +1,5 @@
 import threading
-from collections.abc import Generator, Iterator, Sequence
+from collections.abc import Callable, Generator, Iterator, Sequence
 from typing import Any, cast
 
 import numpy as np
@@ -88,10 +88,11 @@ def _score_index_sets(
     rand_seed: int,
     log_transform: bool,
     measured: np.ndarray | None = None,
+    totals: Callable[[], np.ndarray] | None = None,
 ) -> list[np.ndarray]:
     """Score feature index sets of ``assay``, as ``_score_feature_sets`` says."""
     from ..features.scoring import binned_sampling
-    from .hvg_statistics import cell_totals_over_features
+    from .hvg_statistics import cell_totals
     from .rna import RNAassay
 
     log_transform, _ = check_normalization_flags(
@@ -144,9 +145,9 @@ def _score_index_sets(
             totals=(
                 None
                 if measured is None
-                else cell_totals_over_features(
-                    assay, cell_idx, np.flatnonzero(measured)
-                )
+                else cell_totals(assay, cell_idx, measured)
+                if totals is None
+                else totals()
             ),
         )
         return [
@@ -680,24 +681,19 @@ class Assay:
         self,
         cell_index: np.ndarray,
         feature_index: np.ndarray,
-        *,
-        totals: np.ndarray | None = None,
     ) -> np.ndarray:
         """Compute selected-feature count percentages in bounded row blocks.
 
         Only the selected features are read, feature-major from ``countsT``
         when that touches fewer chunk bytes. The denominator is each cell's
         prepared total, ``<assay>_nCounts``, the float64 sum of all its counts
-        that preparation recorded, so the full matrix is never read, or each
-        cell's value of ``totals``, such as its total over the features that
-        every source of a merged store measured. Sums are float64 for every
-        count dtype.
+        that preparation recorded, so the full matrix is never read. Sums are
+        float64 for every count dtype.
         """
         from ..metadata.selection import NormalizationSpec
         from .normalization import feature_value_blocks
 
-        if totals is None:
-            totals = self._cell_count_totals(cell_index)
+        totals = self._cell_count_totals(cell_index)
         values = np.empty(len(cell_index), dtype=np.float64)
         _, blocks = feature_value_blocks(
             self,
@@ -1173,6 +1169,7 @@ class Assay:
         rand_seed: int,
         log_transform: bool = False,
         measured: np.ndarray | None = None,
+        totals: Callable[[], np.ndarray] | None = None,
     ) -> list[np.ndarray]:
         """Score each set of feature indexes against its own controls.
 
@@ -1187,8 +1184,9 @@ class Assay:
         store's cells measured, which holds every feature of the sets, scores
         as a store of those features alone scores: controls are binned and
         drawn among them, and each cell's total, which library-size values
-        divide by, is its total over them, which one more pass over their
-        counts gives.
+        divide by, is its total over them, which ``totals`` gives when the
+        caller holds them, or one more pass over the counts
+        (``hvg_statistics.cell_totals``).
 
         Returns:
             The scores of each set, in the order of ``feature_sets``.
@@ -1203,6 +1201,7 @@ class Assay:
             rand_seed=rand_seed,
             log_transform=log_transform,
             measured=measured,
+            totals=totals,
         )
 
     def __repr__(self) -> str:

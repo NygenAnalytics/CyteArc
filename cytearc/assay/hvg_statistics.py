@@ -102,11 +102,6 @@ class GroupedMoments:
     maximum: np.ndarray
 
 
-# How errors name each cell's total over the features that every source of a
-# merged store measured.
-_MEASURED_TOTALS = "The totals over the genes that every source of the cells measured"
-
-
 @njit(cache=True, nogil=True)
 def _band_totals_kernel(
     values: np.ndarray, value_rows: np.ndarray, local: np.ndarray, out: np.ndarray
@@ -461,6 +456,39 @@ def cell_totals_over_features(
     return totals
 
 
+def cell_totals(
+    assay: "Assay", cell_idx: np.ndarray, features: np.ndarray | None = None
+) -> np.ndarray:
+    """Return each selected cell's total count over the features of the Boolean mask ``features``.
+
+    Without a mask, the totals are the prepared ``<assay>_nCounts``. A mask
+    of most features, such as the features that every source of a merged
+    store measured, takes each cell's prepared total less its counts of the
+    other features, and a mask of fewer features sums its own, so the pass
+    over the counts reads the smaller set (:func:`cell_totals_over_features`).
+    Whole counts sum exactly either way. Counts with fractions can differ
+    from a direct sum by the rounding of float64 sums, about ``1e-15`` of the
+    prepared total, and a total that rounding takes below zero is zero.
+
+    Args:
+        assay: A prepared assay.
+        cell_idx: The sorted, unique selected cells.
+        features: The features to total, every feature when None.
+
+    Returns:
+        The float64 total of each cell of ``cell_idx``, in its order.
+    """
+    totals = assay._cell_count_totals(cell_idx)
+    if features is None:
+        return totals
+    kept = np.asarray(features, dtype=bool)
+    if np.count_nonzero(kept) < kept.size / 2:
+        return cell_totals_over_features(assay, cell_idx, np.flatnonzero(kept))
+    totals -= cell_totals_over_features(assay, cell_idx, np.flatnonzero(~kept))
+    np.maximum(totals, 0.0, out=totals)
+    return totals
+
+
 def grouped_moments(
     assay: "RNAassay",
     cell_idx: np.ndarray,
@@ -503,14 +531,10 @@ def grouped_moments(
     if library_size:
         assert assay.sf is not None
         scale = float(assay.sf)
-        inverse_totals = (
-            library_size_divisors(
-                assay._cell_count_totals(cell_idx),
-                source=assay._totals_name,
-                copy=False,
-            )
-            if totals is None
-            else library_size_divisors(totals, source=_MEASURED_TOTALS, copy=False)
+        inverse_totals = library_size_divisors(
+            assay._cell_count_totals(cell_idx) if totals is None else totals,
+            source=assay._totals_name,
+            copy=False,
         )
         np.reciprocal(inverse_totals, out=inverse_totals)
     else:

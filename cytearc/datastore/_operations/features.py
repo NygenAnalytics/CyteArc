@@ -63,7 +63,7 @@ from ...storage.selections import (
 )
 from ...storage.types import as_zarr_array, as_zarr_group
 from ...assay import Assay, RNAassay
-from ...assay.hvg_statistics import _MEASURED_TOTALS, cell_totals_over_features
+from ...assay.hvg_statistics import cell_totals
 from ...assay.normalization import (
     library_size_divisors,
     norm_lib_size,
@@ -128,8 +128,11 @@ from ...metadata.arguments import (
     WaggrArguments,
 )
 from ...metadata.membership import (
+    CellsMeasuredFeatures,
+    cells_measured_features,
+    leave_out_unmeasured,
     leave_out_unmeasured_features,
-    measured_feature_mask,
+    measured_mask,
     require_measured_features,
 )
 from ...metadata.selection import (
@@ -1152,8 +1155,8 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         warning that names such genes, since its zero counts in that source's
         cells are not measurements. Every flavor then scores the other genes
         as a store of them alone scores them, each cell's total taken over
-        them, which one more pass over their counts gives, and the cytearc
-        flavor reads the counts as batch-aware selections do; the left-out
+        them, its prepared total less its counts of the other genes, and the
+        cytearc flavor reads the counts as batch-aware selections do; the left-out
         genes score 0, hold no statistics and are never selected. The
         selection records the genes that every source of the cells measured,
         as the fingerprint ``measured_features_fingerprint`` of its
@@ -1476,13 +1479,18 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         from_assay: str | None,
         cell_selection: ArtifactRef,
         features: ArtifactRef,
-    ) -> tuple[RNAassay, np.ndarray, np.ndarray, ArtifactRef]:
+        measured_totals: bool = False,
+    ) -> tuple[RNAassay, np.ndarray, np.ndarray, ArtifactRef, np.ndarray | None]:
         """Check an enrichment request and read its cell and feature rows.
 
         The arguments and the assay type are checked first, then the cells
         against the assay's membership, then that the store is writable.
         The selected features that some source of the cells did not measure
-        are left out, through a feature selection of the others.
+        are left out, through a feature selection of the others. With
+        ``measured_totals``, the cells' sources are read once for that and
+        for the mask of the features that every source of the cells measured,
+        which the last item returns, None when it leaves none out or without
+        ``measured_totals``.
         """
         if not isinstance(features, ArtifactRef):
             raise TypeError("features must be an ArtifactRef")
@@ -1510,6 +1518,13 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         ).astype(np.int64, copy=False)
         if len(cell_index) == 0:
             raise ValueError("Cell selection contains no active cells")
+        reading = (
+            cells_measured_features(
+                assay.cells, assay.feats, cell_index, assay=assay.name
+            )
+            if measured_totals
+            else None
+        )
         feature_selection, feature_values = self._measured_feature_selection(
             assay,
             feature_selection,
@@ -1520,9 +1535,16 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                 "Score the cells of the sources that measured them, or features "
                 "that every source measured."
             ),
+            measured=reading,
         )
         feature_index = np.flatnonzero(feature_values).astype(np.int64, copy=False)
-        return assay, cell_index, feature_index, feature_selection
+        return (
+            assay,
+            cell_index,
+            feature_index,
+            feature_selection,
+            measured_mask(reading),
+        )
 
     @validation_scoped
     def _scores_waggr(
@@ -1548,8 +1570,8 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         of the selected cells did not measure are left out, through a feature
         selection of the others, with a warning that names them, and each cell's
         library size is its total over the genes that every such source
-        measured, as a store of those genes alone holds it, which one more pass
-        over their counts gives. The scores then record those genes as
+        measured, as a store of those genes alone holds it: its prepared total
+        less its counts of the other genes. The scores then record those genes as
         ``measured_features_fingerprint``.
 
         Args:
@@ -1592,13 +1614,16 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
 
         if mode not in {"wmean", "wsum"}:
             raise ValueError("mode must be 'wmean' or 'wsum'")
-        assay, cell_index, feature_index, feature_selection = (
+        # Each cell's library size leaves out the genes of its own source that
+        # another source of the cells did not measure.
+        assay, cell_index, feature_index, feature_selection, measured = (
             self._prepare_enrichment_assay(
                 display_name="WAGGR",
                 operation="run_waggr",
                 from_assay=from_assay,
                 cell_selection=cell_selection,
                 features=features,
+                measured_totals=True,
             )
         )
         feature_names = np.asarray(assay.feats.fetch_all("names"))[feature_index]
@@ -1621,11 +1646,6 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             raise ValueError("WAGGR requires a finite positive size factor") from exc
         if not np.isfinite(size_factor) or size_factor <= 0:
             raise ValueError("WAGGR requires a finite positive size factor")
-        # Each cell's library size leaves out the genes of its own source that
-        # another source of the cells did not measure.
-        measured = measured_feature_mask(
-            assay.cells, assay.feats, cell_index, assay=assay.name
-        )
 
         arguments = WaggrArguments(
             cell_selection=cell_selection,
@@ -1643,19 +1663,10 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         )
 
         def score_batches() -> Iterator[np.ndarray]:
-            cell_scalars = (
-                library_size_divisors(
-                    assay.cells.fetch_all(f"{assay.name}_nCounts")[cell_index],
-                    source=f"{assay.name}_nCounts",
-                )
-                if measured is None
-                else library_size_divisors(
-                    cell_totals_over_features(
-                        assay, cell_index, np.flatnonzero(measured)
-                    ),
-                    source=_MEASURED_TOTALS,
-                    copy=False,
-                )
+            cell_scalars = library_size_divisors(
+                cell_totals(assay, cell_index, measured),
+                source=f"{assay.name}_nCounts",
+                copy=False,
             )
             model = build_waggr_model(network)
             raw = assay.rawData[:, network.matched_feature_index][cell_index, :]
@@ -1764,7 +1775,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         )
         from ...features.enrichment.net import prepare_network
 
-        assay, cell_index, feature_index, feature_selection = (
+        assay, cell_index, feature_index, feature_selection, _ = (
             self._prepare_enrichment_assay(
                 display_name="AUCell",
                 operation="run_aucell",
@@ -2186,6 +2197,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         remedy: str,
         feature_names: np.ndarray | None = None,
         kind: str = "feature",
+        measured: CellsMeasuredFeatures | None = None,
     ) -> tuple[ArtifactRef, np.ndarray]:
         """Return the selected features that every source of some cells measured, as a selection, and its mask.
 
@@ -2196,17 +2208,24 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         which calls them ``kind`` features and names them by
         ``feature_names`` or the assay's own names, and the others are saved
         as a feature selection, so that the result's lineage records what it
-        read.
+        read. ``measured``, a reading of the cells' sources that the caller
+        already holds, saves reading them again.
 
         Raises:
             ValueError: If no selected feature was measured by every source of
                 the cells, ending with ``remedy``.
         """
-        kept = leave_out_unmeasured_features(
-            assay.cells,
+        kept = leave_out_unmeasured(
+            cells_measured_features(
+                assay.cells,
+                assay.feats,
+                cell_index,
+                assay=assay.name,
+                selected=feature_values,
+            )
+            if measured is None
+            else measured,
             assay.feats,
-            cell_index,
-            assay=assay.name,
             analysis=analysis,
             kind=kind,
             of_cells="the selected cells",
@@ -3050,16 +3069,16 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                 if not len(group)
             ]
             if emptied:
-                logger.warning(
+                warn(
                     (
-                        "1 group keeps no feature that every source measured and "
-                        "is left out"
+                        "add_grouped_assay leaves out 1 group that keeps no feature "
+                        "that every source measured: "
                         if len(emptied) == 1
-                        else f"{len(emptied):,} groups keep no feature that every "
-                        "source measured and are left out"
+                        else f"add_grouped_assay leaves out {len(emptied):,} groups "
+                        "that keep no feature that every source measured: "
                     )
-                    + " of the grouped assay: "
                     + quoted_examples([f"group_{value}" for value in emptied])
+                    + "."
                 )
             group_set = [
                 value

@@ -8,7 +8,7 @@ from ..matrix import ChunkedArray
 from ..metadata import MetaData
 from ..utils.compute import compute_with_progress
 from .base import Assay
-from .hvg_statistics import cell_totals_over_features
+from .hvg_statistics import cell_totals
 from .normalization import (
     NormMethod,
     PearsonResidualNormalizer,
@@ -129,7 +129,7 @@ class ATACassay(Assay):
         ``measured_peaks``, the mask of the peaks that every source of a
         merged store's sorted cells ``cell_idx`` measured, takes each cell's
         term-frequency denominator over those peaks, as a store of them alone
-        does, which one more pass over their counts gives.
+        does (``hvg_statistics.cell_totals``).
         """
         renormalize_subset = bool_argument(renormalize_subset, "renormalize_subset")
         log_transform = bool_argument(log_transform, "log_transform")
@@ -149,46 +149,6 @@ class ATACassay(Assay):
                 return self.normMethod(self, counts)
             finally:
                 self.n_term_per_doc, self.n_docs, self.n_docs_per_term = previous
-
-    def _write_normalized_payload(
-        self,
-        cell_idx: np.ndarray,
-        feat_idx: np.ndarray,
-        location: str,
-        *,
-        log_transform: bool,
-        renormalize_subset: bool,
-        mirror: zarr.Array | None = None,
-        measured_peaks: np.ndarray | None = None,
-    ) -> None:
-        """Write one normalization payload, as ``Assay`` writes it.
-
-        ``measured_peaks``, the mask of the peaks that every source of a
-        merged store's cells measured, takes each cell's term frequency over
-        them (see ``_normalized``).
-        """
-        if measured_peaks is None:
-            super()._write_normalized_payload(
-                cell_idx,
-                feat_idx,
-                location,
-                log_transform=log_transform,
-                renormalize_subset=renormalize_subset,
-                mirror=mirror,
-            )
-            return
-        cell_idx, feat_idx = self._payload_indices(cell_idx, feat_idx)
-        self._write_normalized_values(
-            self._normalized(
-                cell_idx,
-                feat_idx,
-                renormalize_subset=renormalize_subset,
-                log_transform=log_transform,
-                measured_peaks=measured_peaks,
-            ),
-            location,
-            mirror=mirror,
-        )
 
     def _normalization_flags(self) -> frozenset[str]:
         """Return the normalization flags that ``normed`` applies.
@@ -287,9 +247,7 @@ class ATACassay(Assay):
                     self.nthreads,
                 )
         elif measured_peaks is not None:
-            terms = cell_totals_over_features(
-                self, cell_idx, np.flatnonzero(measured_peaks)
-            )
+            terms = cell_totals(self, cell_idx, measured_peaks)
         else:
             terms = self._cell_count_totals(cell_idx)
         terms[terms == 0] = 1
@@ -300,23 +258,22 @@ class ATACassay(Assay):
         cell_idx: np.ndarray,
         feat_idx: np.ndarray,
         *,
-        renormalize_subset: bool = False,
+        measured_peaks: np.ndarray | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Compute document frequency and TF-IDF prevalence in one raw-data pass.
 
-        ``renormalize_subset`` takes each cell's term-frequency denominator
-        over ``feat_idx``, which one more pass over their counts gives.
+        ``measured_peaks`` takes each cell's term-frequency denominator over
+        the peaks of that mask, as ``_terms_per_document`` does.
         """
         n_docs = len(cell_idx)
-        counts = self.rawData[:, feat_idx][cell_idx, :]
         document_frequency, term_frequency_sum = stream_document_frequency(
-            counts,
+            self.rawData[:, feat_idx][cell_idx, :],
             memory_bytes=int(self.resources.memoryBytes),
             nthreads=self.nthreads,
             msg=f"({self.name}) Calculating peak prevalence across cells",
             operation="ATAC peak prevalence",
             term_totals=self._terms_per_document(
-                cell_idx, counts=counts, renormalize_subset=renormalize_subset
+                cell_idx, measured_peaks=measured_peaks
             ),
         )
         assert term_frequency_sum is not None
@@ -328,12 +285,12 @@ class ATACassay(Assay):
         cell_idx: np.ndarray,
         feat_idx: np.ndarray,
         *,
-        renormalize_subset: bool = False,
+        measured_peaks: np.ndarray | None = None,
     ) -> dict[str, np.ndarray]:
         """Compute peak sufficient statistics without persisting metadata.
 
-        ``renormalize_subset`` summarizes the values that take each cell's
-        term-frequency denominator over ``feat_idx``.
+        ``measured_peaks`` summarizes the values that take each cell's
+        term-frequency denominator over the peaks of that mask.
         """
         cell_idx = np.asarray(cell_idx, dtype=np.int64)
         feat_idx = np.asarray(feat_idx, dtype=np.int64)
@@ -344,11 +301,15 @@ class ATACassay(Assay):
             document_frequency, prevalence = self._streaming_tfidf_feature_stats(
                 cell_idx,
                 feat_idx,
-                renormalize_subset=renormalize_subset,
+                measured_peaks=measured_peaks,
             )
         else:
-            normed = self.normed(
-                cell_idx, feat_idx, renormalize_subset=renormalize_subset
+            normed = self._normalized(
+                cell_idx,
+                feat_idx,
+                renormalize_subset=False,
+                log_transform=False,
+                measured_peaks=measured_peaks,
             )
             document_frequency = compute_with_progress(
                 (normed > 0).sum(axis=0),

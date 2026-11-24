@@ -637,11 +637,11 @@ A store merged from sources that measured different features records which featu
 
 - plots and `get_cell_vals` show such a feature as missing in that cell and normalize each feature over the cells whose source measured it;
 - `markers.search`, `features.hvgs`, `features.prevalent_peaks`, `features.detected`, `scores.waggr`, `scores.aucell`, `scores.cell_cycle`, `scores.chromvar`, `qc.feature_percentage`, `regulons.grn`, `add_grouped_assay` and `compare.compute_bulk` leave out the features that some source of their cells did not measure, with one warning that names how many each source lacks, and raise `ValueError` when none remains; `add_grouped_assay` leaves them out of each group, and a group that keeps none out of the new assay;
-- HVGs, prevalent peaks, cell-cycle scores, WAGGR, feature percentages and the TF-IDF normalization of an ATAC assay divide each cell's counts by its total over the features that every source of the cells measured, as a store of those features alone does, and record those features as `measured_features_fingerprint`;
+- HVGs, prevalent peaks, cell-cycle scores, WAGGR and the TF-IDF normalization of an ATAC assay, which compare cells across sources, divide each cell's counts by its total over the features that every source of the cells measured, as a store of those features alone does, and record those features as `measured_features_fingerprint`; feature percentages and the library-size normalization of an RNA assay keep each cell's own total, as its source's own store gives it;
 - `mapping.run` projects each query cell on the reference features that its own source measured; the others are missing for that cell and take the fill of `missing_feature_policy`, so each source's cells map as its own store maps them;
 - `compare.test`, `imputation.compute_imputed`, `features.normalize` and `to_anndata(matrix="normed")` raise `ValueError` for such a feature, naming the features and the sources that lack them; select the cells of the sources that measured them, or only the features that every source of the cells measured.
 
-Potency scores and the pseudotime and lineage analyses of features still read such zeros as counts; run them over the features that every source of their cells measured.
+The percentage columns that preparation writes, such as `<assay>_percentMito` and `<assay>_percentRibo`, potency scores, `add_melded_assay` and the pseudotime and lineage analyses of features still read such zeros as counts; run them over the features that every source of their cells measured.
 
 ```{eval-rst}
 .. autoexception:: cytearc.metadata.membership.UnmeasuredCellsError

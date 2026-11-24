@@ -1,4 +1,4 @@
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -99,6 +99,7 @@ def ensure_feature_summary(
     *,
     log_transform: bool = False,
     measured: np.ndarray | None = None,
+    totals: Callable[[], np.ndarray] | None = None,
     invalidate_cache: bool = False,
 ) -> ArtifactRef:
     """Plan or compute the sufficient-statistics artifact for an assay.
@@ -114,7 +115,9 @@ def ensure_feature_summary(
     them alone summarizes them: each cell's total, which library-size values
     and term frequencies divide by, is its total over them, and every other
     feature holds zeros. The summary then records the mask as
-    ``measured_features_fingerprint``.
+    ``measured_features_fingerprint``. ``totals``, when the caller holds
+    them, gives those totals of an RNA summary, which is otherwise one more
+    pass over the counts.
     """
     operation = getattr(assay, "_feature_summary_operation", None)
     if log_transform and operation != "summarize_rna_features":
@@ -188,13 +191,17 @@ def ensure_feature_summary(
         measured is not None
         and "renormalize_subset" in applicable_normalization_flags(assay)
     )
-    if log_transform:
+    if operation == "summarize_rna_features":
         raw_payload = cast("RNAassay", assay)._compute_feature_summary(
-            cell_idx, feature_idx, log_transform=True, renormalize_subset=renormalize
+            cell_idx,
+            feature_idx,
+            log_transform=log_transform,
+            renormalize_subset=renormalize,
+            totals=totals,
         )
     else:
-        raw_payload = cast("RNAassay | ATACassay", assay)._compute_feature_summary(
-            cell_idx, feature_idx, renormalize_subset=renormalize
+        raw_payload = cast("ATACassay", assay)._compute_feature_summary(
+            cell_idx, feature_idx, measured_peaks=measured if renormalize else None
         )
     payload = {}
     for name in names:

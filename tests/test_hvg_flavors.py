@@ -77,6 +77,7 @@ from tests.storage_helpers import (
     by_cell_id,
     finalize_test_counts,
     insert_nullable_cell_column,
+    write_count_store,
 )
 
 _GOLDEN = Path(__file__).parent / "scanpy_hvg_1_12_4_golden.json"
@@ -863,6 +864,92 @@ def test_cell_totals_over_features_sum_the_selected_counts(banded) -> None:
         [0.0] * len(cells)
     )
     assert cell_totals_over_features(banded.RNA, cells[:0], genes).size == 0
+
+
+def test_cell_totals_read_the_smaller_set_of_features_and_sum_whole_counts_exactly(
+    banded, monkeypatch
+) -> None:
+    from cytearc.assay import hvg_statistics
+
+    read: list[list[int]] = []
+    sum_counts = hvg_statistics.cell_totals_over_features
+
+    def recorded(assay: Any, cells: np.ndarray, features: np.ndarray) -> np.ndarray:
+        read.append(features.tolist())
+        return sum_counts(assay, cells, features)
+
+    monkeypatch.setattr(hvg_statistics, "cell_totals_over_features", recorded)
+    cells = np.arange(0, _N_CELLS, 2)
+    counts = _COUNTS[cells].astype(np.float64)
+    third = np.arange(_N_GENES) % 3 == 0
+    np.testing.assert_array_equal(
+        hvg_statistics.cell_totals(banded.RNA, cells), counts.sum(axis=1)
+    )
+    assert read == []
+    # A third of the genes is summed, and two thirds are the prepared totals
+    # less the other third.
+    for kept in (third, ~third):
+        np.testing.assert_array_equal(
+            hvg_statistics.cell_totals(banded.RNA, cells, kept),
+            counts[:, kept].sum(axis=1),
+        )
+    assert read == [np.flatnonzero(third).tolist()] * 2
+
+
+def test_cell_totals_of_counts_with_fractions_stay_within_rounding_and_above_zero(
+    tmp_path, monkeypatch
+) -> None:
+    from cytearc.assay import hvg_statistics
+
+    rng = np.random.default_rng(3)
+    values = rng.gamma(0.4, 7.3, size=(200, 300))
+    values[values < 1] = 0
+    write_count_store(str(tmp_path / "store.zarr"), {"RNA": values}, "float64")
+    store = DataStore(
+        str(tmp_path / "store.zarr"),
+        default_assay="RNA",
+        min_features_per_cell=-1,
+        nthreads=1,
+    )
+    kept = rng.random(300) < 0.8
+    found = hvg_statistics.cell_totals(store.RNA, np.arange(200), kept)
+    direct = values[:, kept].sum(axis=1)
+    # The prepared total less the other features rounds unlike the direct
+    # sum, by about 1e-15 of the total.
+    assert np.any(found != direct)
+    assert np.all(np.abs(found - direct) <= 1e-14 * values.sum(axis=1))
+
+    # A cell that counts only the other features keeps a total of zero when
+    # rounding takes their sum above its prepared total.
+    monkeypatch.setattr(
+        hvg_statistics,
+        "cell_totals_over_features",
+        lambda _assay, _cells, _features: np.array([0.6000000000000001, 0.5]),
+    )
+    prepared = SimpleNamespace(_cell_count_totals=lambda _cells: np.array([0.6, 2.0]))
+    assert hvg_statistics.cell_totals(
+        prepared, np.arange(2), np.array([True, True, True, False])
+    ).tolist() == [0.0, 1.5]
+
+
+def test_rna_summaries_over_a_subset_divide_by_the_totals_that_their_caller_holds(
+    banded,
+) -> None:
+    """Cell-cycle scores take each cell's total once, for their summary and their scores."""
+    cells = np.arange(_N_CELLS)
+    genes = np.arange(0, _N_GENES, 2)
+    counts = _COUNTS[np.ix_(cells, genes)].astype(np.float64)
+    # No set of genes gives these totals, so only the caller's function does.
+    totals = 1.5 * counts.sum(axis=1) + 1
+    summary = banded.RNA._compute_feature_summary(
+        cells, genes, renormalize_subset=True, totals=lambda: totals.copy()
+    )
+    values = 1000 * counts / totals[:, None]
+    np.testing.assert_allclose(summary["normed_tot"], values.sum(axis=0), rtol=1e-12)
+    np.testing.assert_array_equal(summary["normed_n"], (values > 0).sum(axis=0))
+    np.testing.assert_allclose(
+        summary["sigmas"], values.var(axis=0), rtol=1e-10, atol=1e-12
+    )
 
 
 def test_grouped_statistics_check_their_batches(banded) -> None:

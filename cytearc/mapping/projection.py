@@ -26,10 +26,11 @@ from ..storage.artifacts import (
     fingerprint_array,
     fingerprint_stored_arrays,
     inspect_artifact,
+    is_fingerprint,
 )
 from ..storage.diagnostics import declare_diagnostics
 from ..storage.errors import ArtifactResolutionError
-from ..storage.feature_selection import _is_fingerprint, resolve_feature_selection
+from ..storage.feature_selection import resolve_feature_selection
 from ..storage.geometry import array_geometry
 from ..storage.identity import read_dataset_fingerprint
 from ..storage.partition import row_band
@@ -508,7 +509,7 @@ def _load_projection(
     # Only a merged query whose sources did not measure some reference
     # feature records what each measured.
     if "measured_features_fingerprint" in parameters:
-        if not _is_fingerprint(parameters["measured_features_fingerprint"]):
+        if not is_fingerprint(parameters["measured_features_fingerprint"]):
             raise ValueError("Projection measured_features_fingerprint is malformed")
         parameter_names = parameter_names | {"measured_features_fingerprint"}
     if set(parameters) != parameter_names:

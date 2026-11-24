@@ -603,6 +603,13 @@ def cells_measured_features(
     )
 
 
+def measured_mask(measured: CellsMeasuredFeatures | None) -> np.ndarray | None:
+    """Return the features that every source of some cells measured, from a reading of :func:`cells_measured_features`, or None when it leaves none out."""
+    if measured is None or measured.measured.all():
+        return None
+    return measured.measured
+
+
 def measured_feature_mask(
     cells: Any, features: Any, rows: CellRows, *, assay: str
 ) -> np.ndarray | None:
@@ -617,10 +624,7 @@ def measured_feature_mask(
     Raises:
         ValueError: As :func:`cell_sources` raises.
     """
-    measured = cells_measured_features(cells, features, rows, assay=assay)
-    if measured is None or measured.measured.all():
-        return None
-    return measured.measured
+    return measured_mask(cells_measured_features(cells, features, rows, assay=assay))
 
 
 def _selected_and_unmeasured(
@@ -668,9 +672,35 @@ def leave_out_unmeasured_features(
             source and ending with ``remedy``; or as :func:`cell_sources`
             raises.
     """
-    measured = cells_measured_features(
-        cells, features, rows, assay=assay, selected=selected
+    return leave_out_unmeasured(
+        cells_measured_features(cells, features, rows, assay=assay, selected=selected),
+        features,
+        analysis=analysis,
+        kind=kind,
+        of_cells=of_cells,
+        remedy=remedy,
+        selected=selected,
+        names=names,
     )
+
+
+def leave_out_unmeasured(
+    measured: CellsMeasuredFeatures | None,
+    features: Any,
+    *,
+    analysis: str,
+    kind: str,
+    of_cells: str,
+    remedy: str,
+    selected: np.ndarray | None = None,
+    names: np.ndarray | None = None,
+) -> np.ndarray | None:
+    """Leave out the features that ``measured``, a reading of :func:`cells_measured_features`, marks as unmeasured by some source of its cells.
+
+    Warns and raises as :func:`leave_out_unmeasured_features`, which reads
+    the cells' sources first; a caller that already holds the reading leaves
+    them out without reading the sources again.
+    """
     if measured is None:
         return None
     asked, unmeasured = _selected_and_unmeasured(measured, int(features.N), selected)
@@ -720,9 +750,33 @@ def require_features_measured_by_cells(
             examples, the feature columns that record what each source
             measured, and ``remedy``; or as :func:`cell_sources` raises.
     """
-    measured = cells_measured_features(
-        cells, features, rows, assay=assay, selected=selected
+    require_measured(
+        cells_measured_features(cells, features, rows, assay=assay, selected=selected),
+        features,
+        selected,
+        assay=assay,
+        of_cells=of_cells,
+        of_features=of_features,
+        remedy=remedy,
     )
+
+
+def require_measured(
+    measured: CellsMeasuredFeatures | None,
+    features: Any,
+    selected: np.ndarray,
+    *,
+    assay: str,
+    of_cells: str,
+    of_features: str,
+    remedy: str,
+) -> None:
+    """Refuse a feature of the Boolean mask ``selected`` that ``measured``, a reading of :func:`cells_measured_features`, marks as unmeasured by some source of its cells.
+
+    Raises as :func:`require_features_measured_by_cells`, which reads the
+    cells' sources first; a caller that already holds the reading checks it
+    without reading the sources again.
+    """
     if measured is None:
         return
     asked, unmeasured = _selected_and_unmeasured(measured, int(features.N), selected)
