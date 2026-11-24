@@ -6839,7 +6839,7 @@ def test_the_random_arrangement_check_rejects_orders_that_are_not(arrangement):
 # Sources shuffled with seeds of their own, with one seed for both, as
 # default imports share shuffle_seed=0, or kept in file order.
 @pytest.mark.parametrize("import_seeds", ["own", "shared", "file order"])
-def test_a_merge_of_shuffled_sources_lists_its_cells_in_a_uniform_order(
+def test_a_merge_of_shuffled_sources_holds_each_group_as_a_random_sample_does(
     import_seeds,
 ):
     from scipy import stats
@@ -8930,10 +8930,11 @@ def test_a_merge_holding_csr_windows_decodes_each_source_chunk_once(
         )
 
 
+@pytest.mark.slow
 def test_a_merge_holds_csr_windows_from_the_least_budget_that_fits_them(
     tmp_path, monkeypatch, sparse_shard_sources
 ):
-    def merge(path, budget):
+    def merge(path, budget, **options):
         return _merge_chunk_columns(
             sparse_shard_sources,
             path,
@@ -8941,6 +8942,7 @@ def test_a_merge_holds_csr_windows_from_the_least_budget_that_fits_them(
             mem_budget=budget,
             sparse=None,
             policy=_SPARSE_BAND_POLICY,
+            **options,
         )
 
     # Each refusal names a budget that passes its step, and each refusal of
@@ -8981,14 +8983,24 @@ def test_a_merge_holds_csr_windows_from_the_least_budget_that_fits_them(
     assert sum(merged["decodes"].values()) > sum(decodes.values())
     assert not below["sparse"]
     assert below["csr_needed"] == budget
-    assert below["held_rows"] < 256
+    assert 0 < below["held_rows"] < 256
     assert sum(below["decodes"].values()) > sum(merged["decodes"].values())
+    # Dense windows of part of a shard keep no head: beside what a write that
+    # reads batch by batch keeps, the write keeps their rows of the sources'
+    # 400 uint16 features alone, at that budget and at an ample one.
+    batchwise = merge(tmp_path / "batchwise.zarr", None, most_rows=0)
+    partial = merge(tmp_path / "partial.zarr", None, most_rows=120)
+    assert partial["held_rows"] == 120
+    for windows in (below, partial):
+        held = windows["held_rows"] * 400 * 2
+        assert windows["resident"] - batchwise["resident"] == held
     assert not ample["sparse"]
     assert ample["held_rows"] == 256
     assert ample["heads"] == {True}
     assert ample["decodes"] == decodes
     _same_files(merged, below)
     _same_files(merged, ample)
+    _same_files(merged, partial)
     stored = zarr.open_group(str(tmp_path / "merged.zarr"), mode="r")
     assert _rows_by_id(stored, "Counts/counts") == _source_rows(sparse_shard_sources)
 
@@ -9173,13 +9185,15 @@ def test_a_dense_merge_write_makes_each_batch_once_the_previous_one_is_gone(
     import cytearc.merge.writer as merge_writer
     from cytearc import DataStore
 
-    # Each batch that the write takes is watched, and each piece that a
-    # batch scatters looks whether the batch before it is still alive.
+    # Each batch that the write takes is watched. Each window of merged rows
+    # that the next batch takes, and each piece that a batch scatters, looks
+    # whether the batch before it is still alive.
     yielded: list[weakref.ref] = []
     alive: list[bool] = []
-    write, scatter = (
+    write, scatter, windows = (
         merge_writer.write_dense_from_row_batches,
         merge_writer.scatter_block_dense,
+        merge_writer.iter_row_plan_windows,
     )
 
     def watched_write(destination, batches, **options):
@@ -9196,8 +9210,15 @@ def test_a_dense_merge_write_makes_each_batch_once_the_previous_one_is_gone(
             alive.append(yielded[-1]() is not None)
         return scatter(*args, **options)
 
+    def watched_windows(*args, **options):
+        for window in windows(*args, **options):
+            if yielded:
+                alive.append(yielded[-1]() is not None)
+            yield window
+
     monkeypatch.setattr(merge_writer, "write_dense_from_row_batches", watched_write)
     monkeypatch.setattr(merge_writer, "scatter_block_dense", watched_scatter)
+    monkeypatch.setattr(merge_writer, "iter_row_plan_windows", watched_windows)
     DataStoreMerge(
         datasets=[
             DataStore(location, default_assay="Counts", nthreads=1)
@@ -9211,11 +9232,11 @@ def test_a_dense_merge_write_makes_each_batch_once_the_previous_one_is_gone(
         policy=CountMatrixPolicy(unitBytes=1280, chunkBytes=640),
     ).dump()
 
-    # The write takes 69 batches of 16 cells, and makes each after the first
+    # The write takes 69 batches of 16 cells, and starts each after the first
     # once neither it nor the band buffer holds the batch before it, which
     # the write's reserve does not count.
     assert len(yielded) == -(-1100 // 16)
-    assert len(alive) > len(yielded)
+    assert len(alive) > 2 * len(yielded)
     assert not any(alive)
 
 
@@ -9243,6 +9264,52 @@ def test_held_csr_windows_give_each_source_row_once_in_order(tmp_path, dtype):
     starts = [start for start, _ in pieces]
     assert starts == sorted(starts)
     np.testing.assert_array_equal(np.vstack([rows for _, rows in pieces]), values)
+
+
+@pytest.mark.parametrize("sparse", [False, True], ids=["dense", "csr"])
+def test_held_rows_give_the_head_of_the_first_cells_shard_last_without_its_window(
+    tmp_path, sparse
+):
+    import weakref
+
+    from cytearc import DataStore
+    from cytearc.merge.writer import _chunk_column_runs, _HeldSourceRows
+
+    location = str(tmp_path / "source.zarr")
+    values = _csr_window_source(location, "uint16", 0.05)
+    counts = DataStore(location, default_assay="Counts", nthreads=1).Counts.rawData
+    held = _HeldSourceRows(
+        counts,
+        _chunk_column_runs(counts),
+        400,
+        1,
+        sparse=sparse,
+        first_row=530,
+        keep_head=True,
+    )
+    refills, first_window = [], []
+    refill = held._refill
+
+    def recorded(row):
+        refill(row)
+        refills.append(row)
+        window = held._values[0] if sparse else held._values
+        first_window.append(weakref.ref(window))
+
+    held._refill = recorded
+    # The source gives its rows from row 530 on and then from row 0, in takes
+    # of 50 rows, so rows 400 to 529 of the first window's shard come last.
+    # Copies of the rows taken leave the windows to the held rows alone.
+    pieces = []
+    for first, stop in ((530, 1000), (0, 530)):
+        for start in range(first, stop, 50):
+            taken = held.take(start, min(50, stop - start))
+            pieces.extend(rows.copy() for _, rows in taken)
+    # Each shard is read once: the head comes from what the first window
+    # kept, which lets the window itself go when the next one is read.
+    assert refills == [530, 800, 0]
+    assert first_window[0]() is None
+    np.testing.assert_array_equal(np.vstack(pieces), np.r_[values[530:], values[:530]])
 
 
 def _batch_reads(locations, batch_rows: int, seed: int = 42) -> list[int]:
@@ -9634,7 +9701,7 @@ def test_a_merge_holds_the_most_rows_of_each_source_that_fit(
     [{"a": True, "b": True}, {"a": True, "b": False}, {"a": False, "b": False}],
     ids=["both_shuffled", "b_in_file_order", "both_in_file_order"],
 )
-def test_contiguous_slices_of_a_merge_of_shuffled_imports_are_random_samples(
+def test_contiguous_slices_of_a_merge_of_imports_of_distinct_seeds_are_random_samples(
     tmp_path, shuffled
 ):
     from scipy import stats

@@ -928,6 +928,66 @@ def test_merge_refuses_a_feature_profile_beyond_its_budget(tmp_path):
     assert not destination.exists()
 
 
+def test_counting_merged_cells_charges_what_placing_each_sources_counts_holds(
+    monkeypatch,
+):
+    import tracemalloc
+
+    import cytearc.merge.writer as merge_writer
+    from cytearc.merge.row_plan import RowPlan, build_row_plan
+    from cytearc.storage.budget import ResourceBudget
+    from cytearc.utils.memory_budget import MemoryBudgetError
+
+    counts = []
+    for n_cells in (40_000, 20_000):
+        values = np.ones((n_cells, 2), dtype=np.uint16)
+        values[::3, 1] = 0
+        counts.append(values)
+    sources = [
+        _open(_write_source(MemoryStore(), {"RNA": values})) for values in counts
+    ]
+    assays = [source.get_assay("RNA") for source in sources]
+    row_plan = build_row_plan([40_000, 20_000], _NAMES, seed=0)
+    # With the reads charged nothing, the refusal names the profile, a count
+    # for each merged cell and one more, and the charge of placing the larger
+    # source's counts at its merged rows.
+    monkeypatch.setattr(merge_writer, "_row_nnz_load_bytes", lambda assay, source: 0)
+    profile = 8 * (row_plan.nCells + 1)
+    with pytest.raises(MemoryBudgetError) as refused:
+        merge_writer._cumulative_row_nnz(
+            assays, row_plan, ResourceBudget(profile, 1), resident_bytes=0
+        )
+    place = refused.value.needed_bytes - profile
+
+    peaks = {}
+    find = RowPlan.destination_rows
+
+    def traced(plan: RowPlan, source: int) -> np.ndarray:
+        tracemalloc.reset_peak()
+        before = tracemalloc.get_traced_memory()[0]
+        rows = find(plan, source)
+        peaks[source] = tracemalloc.get_traced_memory()[1] - before
+        return rows
+
+    monkeypatch.setattr(RowPlan, "destination_rows", traced)
+    tracemalloc.start()
+    try:
+        cumulative, _, _ = merge_writer._cumulative_row_nnz(
+            assays, row_plan, ResourceBudget(profile + place, 1), resident_bytes=0
+        )
+    finally:
+        tracemalloc.stop()
+    np.testing.assert_array_equal(
+        np.diff(cumulative), _merged_order_values(row_plan, [("", c) for c in counts])
+    )
+    # Placing holds the source's counts, 8 bytes a cell, beside what finding
+    # their merged rows holds at its peak: the rows and their copy in the
+    # source's order. The charge also counts the flag of every merged cell,
+    # which the search frees before it copies the rows.
+    held = 8 * 40_000 + peaks[0]
+    assert held <= place <= held + row_plan.nCells + 4_096
+
+
 # Each pair of features shares a name, so a merge by name sums the pair and
 # writes through sparse batches, whose memory grows with their values.
 _PAIRED_NAMES = [f"G{index // 2}" for index in range(24)]

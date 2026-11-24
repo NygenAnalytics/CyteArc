@@ -4125,7 +4125,7 @@ def test_reopened_composite_retries_throttled_source_reads(
     ],
     ids=["shuffled", "shuffled_rows", "b_in_file_order"],
 )
-def test_contiguous_slices_of_a_composite_of_shuffled_imports_are_random_samples(
+def test_contiguous_slices_of_a_composite_of_imports_of_distinct_seeds_are_random_samples(
     tmp_path, shuffled, rows
 ):
     from cytearc.merge import DataStoreMerge
