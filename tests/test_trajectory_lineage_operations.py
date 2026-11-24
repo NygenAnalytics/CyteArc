@@ -999,9 +999,10 @@ def test_lineage_aggregation_records_the_distance_and_leaves_out_search_settings
 
     # The settings have no effect, so the call asks for the stored modules.
     assert searched == lineage_aggregation
-    ignored = [str(item.message) for item in caught if "no effect" in str(item.message)]
+    ignored = [item for item in caught if "no effect" in str(item.message)]
     assert len(ignored) == 1
-    assert ignored[0].endswith("can be dropped: 'M', 'ef'")
+    assert ignored[0].category is FutureWarning
+    assert str(ignored[0].message).endswith("can be dropped: 'M', 'ef'")
     before = set(datastore.artifacts.list(kind="lineage_aggregation", from_assay="RNA"))
     with pytest.raises(
         ValueError, match="ann_params contains unsupported parameters: 'n_trees'"
@@ -1009,6 +1010,39 @@ def test_lineage_aggregation_records_the_distance_and_leaves_out_search_settings
         datastore.trajectory.lineage_aggregation(
             lineage_fate, **arguments, ann_params={"n_trees": 10}
         )
+    after = set(datastore.artifacts.list(kind="lineage_aggregation", from_assay="RNA"))
+    assert after == before
+
+
+def test_lineage_aggregation_charges_the_neighbor_search_to_its_memory_budget(
+    datastore, lineage_fate, mark_hvgs, monkeypatch
+):
+    import cytearc.datastore._operations.trajectory as operations
+    from cytearc.utils.memory_budget import MemoryBudgetError
+
+    before = set(datastore.artifacts.list(kind="lineage_aggregation", from_assay="RNA"))
+    charged: list[tuple] = []
+
+    def search_bytes(*args, **kwargs):
+        charged.append((args, kwargs))
+        return 1 << 50
+
+    monkeypatch.setattr(
+        operations, "_nearest_feature_profiles_bytes_impl", search_bytes
+    )
+
+    with pytest.raises(MemoryBudgetError):
+        datastore.trajectory.lineage_aggregation(
+            lineage_fate,
+            features=mark_hvgs,
+            n_bins=9,
+            n_clusters=4,
+            invalidate_cache=True,
+        )
+
+    # Every selected feature over three lineages of 9 bins, with 11 neighbors.
+    n_selected = len(_feature_indices(datastore, mark_hvgs))
+    assert charged == [((n_selected, 27, 11, datastore.nthreads), {"space": "l2"})]
     after = set(datastore.artifacts.list(kind="lineage_aggregation", from_assay="RNA"))
     assert after == before
 

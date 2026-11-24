@@ -1,20 +1,18 @@
-from typing import Any
-
 import numpy as np
 from numba import prange
-
-import cytearc
 
 from ..utils.arguments import integer_argument
 from ..utils.arrays import rolling_window
 from ..utils.logging import logger
 from ..utils.numba import njit, numba_threads
-from .parameters import resolve_aggregation_ann_params
+from ..utils.progress import iter_progress
+from ..utils.shutdown import shutdown_checkpoint
 
 __all__ = [
     "aggregate_feature_profiles",
     "knn_clustering",
     "nearest_feature_profiles",
+    "nearest_feature_profiles_bytes",
     "scatter_feature_clusters",
     "validate_pseudotime_regressor",
 ]
@@ -146,6 +144,33 @@ def aggregate_feature_profiles(
 
 # The distances between feature profiles that ann_params' "space" names.
 _FEATURE_SPACES = ("l2", "ip", "cosine")
+# The multiply-adds of one block of rows of the neighbor search, about a tenth
+# of a second on four threads, between which a shutdown request is honored and
+# progress is reported.
+_BLOCK_OPERATIONS = 1 << 30
+# The bytes of the progress bar and the loop over blocks, a few kilobytes.
+_SEARCH_OVERHEAD_BYTES = 1 << 16
+
+
+def nearest_feature_profiles_bytes(
+    n_profiles: int,
+    n_bins: int,
+    n_neighbors: int,
+    nthreads: int,
+    *,
+    space: str = "l2",
+) -> int:
+    """Return the bytes that :func:`nearest_feature_profiles` holds beside the profiles.
+
+    These are the transposed copy of the profiles, the unit profiles of a
+    ``"cosine"`` search, one row of distances for each thread, the neighbors
+    it returns and the progress bar.
+    """
+    rows = max(0, int(n_profiles))
+    copies = (2 if space == "cosine" else 1) * rows * max(0, int(n_bins)) * 8
+    scratch = max(1, int(nthreads)) * rows * 8
+    neighbors = rows * max(0, int(n_neighbors)) * 8
+    return copies + scratch + neighbors + _SEARCH_OVERHEAD_BYTES
 
 
 @njit(cache=True, nogil=True)
@@ -167,45 +192,49 @@ def _unit_profiles(profiles: np.ndarray) -> np.ndarray:
 def _nearest_profiles(
     profiles: np.ndarray,
     columns: np.ndarray,
-    n_neighbors: int,
+    first: int,
+    stop: int,
     inner_product: bool,
-    n_workers: int,
-) -> np.ndarray:
-    """Return each profile's ``n_neighbors`` nearest other profiles, nearest first.
+    distances: np.ndarray,
+    neighbors: np.ndarray,
+) -> None:
+    """Fill the rows ``first`` to ``stop`` of ``neighbors`` with each profile's nearest other profiles, nearest first.
 
     The distance is the squared Euclidean distance, or one minus the inner
     product, summed over the bins in order, one multiplication and one
-    addition at a time, so that it is the same on every platform; of two
-    equally near profiles the earlier comes first. ``columns`` holds the
-    profiles transposed, in C order, so that each bin's sums run along
-    contiguous memory. Each row is computed alone, so the result does not
-    depend on ``n_workers``.
+    addition at a time, so that the same profiles give the same distance on
+    every platform; of two equally near profiles the earlier comes first.
+    ``columns`` holds the profiles transposed, in C order, so that each bin's
+    sums run along contiguous memory, and each row of ``distances`` is one
+    worker's scratch. Each row of ``neighbors`` is computed alone, so the
+    result depends neither on the workers nor on the blocks of rows.
     """
     n_profiles, n_bins = profiles.shape
-    neighbors = np.empty((n_profiles, n_neighbors), dtype=np.int64)
+    n_neighbors = neighbors.shape[1]
+    n_workers = distances.shape[0]
     for worker in prange(n_workers):
-        distances = np.empty(n_profiles, dtype=np.float64)
+        scratch = distances[worker]
         nearest = np.empty(n_neighbors, dtype=np.float64)
-        for row in range(worker, n_profiles, n_workers):
-            distances[:] = 0.0
+        for row in range(first + worker, stop, n_workers):
+            scratch[:] = 0.0
             for position in range(n_bins):
                 value = profiles[row, position]
                 column = columns[position]
                 if inner_product:
                     for other in range(n_profiles):
-                        distances[other] += column[other] * value
+                        scratch[other] += column[other] * value
                 else:
                     for other in range(n_profiles):
                         offset = column[other] - value
-                        distances[other] += offset * offset
+                        scratch[other] += offset * offset
             if inner_product:
                 for other in range(n_profiles):
-                    distances[other] = 1.0 - distances[other]
+                    scratch[other] = 1.0 - scratch[other]
             found = 0
             for other in range(n_profiles):
                 if other == row:
                     continue
-                distance = distances[other]
+                distance = scratch[other]
                 if found == n_neighbors and not distance < nearest[n_neighbors - 1]:
                     continue
                 slot = found if found < n_neighbors else n_neighbors - 1
@@ -219,7 +248,6 @@ def _nearest_profiles(
                 neighbors[row, slot] = other
                 if found < n_neighbors:
                     found += 1
-    return neighbors
 
 
 def nearest_feature_profiles(
@@ -234,9 +262,11 @@ def nearest_feature_profiles(
     ``space`` names the distance: ``"l2"`` the squared Euclidean distance,
     ``"ip"`` one minus the inner product and ``"cosine"`` one minus the
     cosine similarity. Every distance is computed, each summed over the bins
-    in order, so the neighbors are exact and the same on every platform and
-    for any ``nthreads``; of two equally near features the earlier comes
-    first.
+    in order, so the neighbors are exact and the same profiles give the same
+    neighbors on every platform and for any ``nthreads``; of two equally near
+    features the earlier comes first. The search runs over blocks of features,
+    between which it reports progress and honors a shutdown request, and holds
+    what :func:`nearest_feature_profiles_bytes` counts beside the profiles.
 
     Args:
         profiles: The features' profiles, features by bins, finite.
@@ -260,7 +290,7 @@ def nearest_feature_profiles(
         raise ValueError("profiles must be a matrix of features by bins")
     if not np.isfinite(values).all():
         raise ValueError("Feature profiles must be finite")
-    n_profiles = values.shape[0]
+    n_profiles, n_bins = values.shape
     n_neighbors = integer_argument(n_neighbors, "n_neighbors")
     if not 1 <= n_neighbors < n_profiles:
         raise ValueError(f"n_neighbors must satisfy 1 <= n_neighbors < {n_profiles}")
@@ -276,43 +306,56 @@ def nearest_feature_profiles(
             )
         values = _unit_profiles(values)
     workers = min(nthreads, n_profiles)
+    columns = np.ascontiguousarray(values.T)
+    distances = np.empty((workers, n_profiles), dtype=np.float64)
+    neighbors = np.empty((n_profiles, n_neighbors), dtype=np.int64)
+    block = max(workers, _BLOCK_OPERATIONS // max(1, n_profiles * n_bins))
+    starts = range(0, n_profiles, block)
     with numba_threads(workers):
-        return np.asarray(
+        for first in iter_progress(
+            starts, desc="Finding feature neighbors", total=len(starts)
+        ):
+            shutdown_checkpoint()
             _nearest_profiles(
                 values,
-                np.ascontiguousarray(values.T),
-                n_neighbors,
+                columns,
+                first,
+                min(first + block, n_profiles),
                 space != "l2",
-                workers,
+                distances,
+                neighbors,
             )
-        )
+    shutdown_checkpoint()
+    return neighbors
 
 
 def knn_clustering(
-    d_array: "cytearc.matrix.ChunkedArray",
+    profiles: np.ndarray,
     n_neighbors: int,
     n_clusters: int,
     nthreads: int,
-    ann_params: dict[str, Any] | None = None,
+    *,
+    space: str = "l2",
 ) -> np.ndarray:
     """Cluster pseudotime-ordered feature profiles into modules.
 
     Each feature's ``n_neighbors`` nearest other features, found exactly by
-    :func:`nearest_feature_profiles` with the distance that
-    ``ann_params["space"]`` names, form a graph whose Paris hierarchy is cut
-    into ``n_clusters`` modules. The modules are numbered from 1 by the median
-    bin of their features' peaks, and modules whose medians tie by the cut's
-    order, the larger first. The modules therefore depend only on the
-    profiles, not on the platform or ``nthreads``.
+    :func:`nearest_feature_profiles` with the distance that ``space`` names,
+    form a graph whose Paris hierarchy is cut into ``n_clusters`` modules. The
+    modules are numbered from 1 by the median bin of their features' peaks,
+    and modules whose medians tie by the cut's order, the larger first. The
+    modules therefore depend only on the profiles, not on the platform or
+    ``nthreads``.
     """
     import pandas as pd
     from scipy.sparse import csr_matrix
 
-    from ..utils.compute import compute_with_progress
+    from ..clustering.paris import fit_paris_hierarchy, fixed_cut
 
-    if len(d_array.shape) != 2:
-        raise ValueError("d_array must be two-dimensional")
-    n_genes = int(d_array.shape[0])
+    profiles = np.asarray(profiles)
+    if profiles.ndim != 2:
+        raise ValueError("profiles must be two-dimensional")
+    n_genes = int(profiles.shape[0])
     if n_genes < 2:
         raise ValueError("At least two retained genes are required for clustering")
     if isinstance(n_neighbors, (bool, np.bool_)) or not isinstance(
@@ -332,87 +375,49 @@ def knn_clustering(
     if not 1 <= n_clusters <= n_genes:
         raise ValueError(f"n_clusters must satisfy 1 <= n_clusters <= {n_genes}")
 
-    def make_knn_mat(profiles: np.ndarray, k: int) -> "csr_matrix":
-        logger.debug("Pseudotime modules: finding feature neighbors")
-        indices_mat = nearest_feature_profiles(
-            profiles,
-            k,
-            space=str(resolved_ann_params["space"]),
-            nthreads=nthreads,
-        )
-        return csr_matrix(
-            (
-                np.ones(indices_mat.shape[0] * indices_mat.shape[1]),
-                (
-                    np.repeat(
-                        np.arange(indices_mat.shape[0]),
-                        indices_mat.shape[1],
-                    ),
-                    indices_mat.flatten(),
-                ),
-            ),
-            shape=(indices_mat.shape[0], indices_mat.shape[0]),
-        )
+    logger.debug("Pseudotime modules: finding feature neighbors")
+    indices_mat = nearest_feature_profiles(
+        profiles, n_neighbors, space=space, nthreads=nthreads
+    )
+    graph = csr_matrix(
+        (
+            np.ones(indices_mat.size),
+            (np.repeat(np.arange(n_genes), n_neighbors), indices_mat.ravel()),
+        ),
+        shape=(n_genes, n_genes),
+    )
+    del indices_mat
 
-    def make_clusters(matrix: "csr_matrix", n_cluster: int) -> np.ndarray:
-        from ..clustering.paris import fit_paris_hierarchy, fixed_cut
+    logger.debug("Pseudotime modules: clustering modules")
+    hierarchy = fit_paris_hierarchy(graph, nthreads=nthreads)
+    n_components = int(np.count_nonzero(hierarchy.synthetic_joins)) + 1
+    if 1 < n_clusters < n_components:
+        raise ValueError(
+            f"The feature KNN graph has {n_components} disconnected "
+            f"components, which cannot form n_clusters={n_clusters} modules. "
+            "Increase n_neighbors or n_clusters."
+        )
+    clusters = fixed_cut(hierarchy, n_clusters)
 
-        logger.debug("Pseudotime modules: clustering modules")
-        hierarchy = fit_paris_hierarchy(
-            matrix,
-            nthreads=nthreads,
-        )
-        n_components = int(np.count_nonzero(hierarchy.synthetic_joins)) + 1
-        if 1 < n_cluster < n_components:
-            raise ValueError(
-                f"The feature KNN graph has {n_components} disconnected "
-                f"components, which cannot form n_clusters={n_cluster} modules. "
-                "Increase n_neighbors or n_clusters."
-            )
-        return fixed_cut(hierarchy, n_cluster)
-
-    def fix_cluster_order(
-        data: "cytearc.matrix.ChunkedArray",
-        clusters: np.ndarray,
-        threads: int,
-    ) -> np.ndarray:
-        idxmax = compute_with_progress(
-            data.argmax(axis=1),
-            "Sorting clusters",
-            threads,
-        )
-        # The cut labels its clusters by size, so a stable sort numbers
-        # modules of equal median peaks the same way on every platform.
-        cluster_medians = (
-            pd.DataFrame([idxmax, clusters])
-            .T.groupby(1)
-            .median()[0]
-            .sort_values(kind="stable")
-        )
-        return np.asarray(
-            pd.Series(clusters)
-            .replace(
-                dict(
-                    zip(
-                        cluster_medians.index,
-                        range(1, 1 + len(cluster_medians)),
-                        strict=True,
-                    )
+    # The cut labels its clusters by size, so a stable sort numbers modules of
+    # equal median peaks the same way on every platform.
+    peaks = profiles.argmax(axis=1)
+    cluster_medians = (
+        pd.DataFrame([peaks, clusters])
+        .T.groupby(1)
+        .median()[0]
+        .sort_values(kind="stable")
+    )
+    return np.asarray(
+        pd.Series(clusters)
+        .replace(
+            dict(
+                zip(
+                    cluster_medians.index,
+                    range(1, 1 + len(cluster_medians)),
+                    strict=True,
                 )
             )
-            .values
         )
-
-    resolved_ann_params = resolve_aggregation_ann_params(
-        ann_params,
-        dim=int(d_array.shape[1]),
-    )
-    profiles = compute_with_progress(d_array, None, nthreads)
-    return fix_cluster_order(
-        d_array,
-        make_clusters(
-            make_knn_mat(profiles, n_neighbors),
-            n_clusters,
-        ),
-        nthreads,
+        .values
     )

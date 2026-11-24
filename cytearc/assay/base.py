@@ -899,13 +899,16 @@ class Assay:
         z_scale: bool,
         batch_size: int | None,
         norm_params: dict[str, Any],
+        held_bytes: int = 0,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Aggregate normalized features along a cell ordering in memory.
 
         Returns the features-by-bins profiles, the streamed feature indices,
         and the mask of features that pass the expression and variability
         filter. Nothing is written, so a caller can validate the result before
-        it starts an artifact.
+        it starts an artifact. ``held_bytes`` is what the caller holds beside
+        the profiles, such as what clustering them takes, which the memory
+        budget must also fit.
         """
         from ..trajectory.feature_dynamics import (
             AGGREGATION_SCRATCH_ITEMSIZE,
@@ -918,7 +921,11 @@ class Assay:
         valid = np.empty(n_features, dtype=bool)
         ordering_idx = np.argsort(cell_ordering, kind="stable")
         resident_bytes = (
-            data.nbytes + feature_indices.nbytes + valid.nbytes + ordering_idx.nbytes
+            data.nbytes
+            + feature_indices.nbytes
+            + valid.nbytes
+            + ordering_idx.nbytes
+            + max(0, int(held_bytes))
         )
         offset = 0
         for item in self.iter_normed_feature_wise(

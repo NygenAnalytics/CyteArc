@@ -851,9 +851,9 @@ def test_aggregation_provenance_records_resolved_ann_defaults(
 
 
 def _ignored_settings_warnings(caught: list) -> list[str]:
-    return [
-        str(item.message) for item in caught if "have no effect" in str(item.message)
-    ]
+    ignored = [item for item in caught if "have no effect" in str(item.message)]
+    assert all(item.category is FutureWarning for item in ignored)
+    return [str(item.message) for item in ignored]
 
 
 @pytest.mark.parametrize(
@@ -901,6 +901,39 @@ def test_aggregation_leaves_out_the_settings_of_an_approximate_search(
         "space": "l2",
         "dim": 10,
     }
+
+
+def test_aggregation_charges_the_neighbor_search_to_its_memory_budget(
+    datastore, pseudotime_scoring, few_features, monkeypatch
+):
+    import cytearc.datastore._operations.trajectory as operations
+    from cytearc.utils.memory_budget import MemoryBudgetError
+
+    before = _aggregation_artifacts(datastore)
+    charged: list[tuple] = []
+
+    def search_bytes(*args, **kwargs):
+        charged.append((args, kwargs))
+        return 1 << 50
+
+    monkeypatch.setattr(
+        operations, "_nearest_feature_profiles_bytes_impl", search_bytes
+    )
+
+    with pytest.raises(MemoryBudgetError):
+        datastore.trajectory.aggregation(
+            pseudotime_scoring,
+            features=few_features,
+            window_size=50,
+            chunk_size=10,
+            n_clusters=3,
+            ann_params={"space": "cosine"},
+            invalidate_cache=True,
+        )
+
+    # The 40 selected features over 10 bins, with 11 neighbors each.
+    assert charged == [((40, 10, 11, datastore.nthreads), {"space": "cosine"})]
+    assert _aggregation_artifacts(datastore) == before
 
 
 @pytest.mark.parametrize(
@@ -1419,40 +1452,22 @@ def test_regressor_validation_rejects_invalid_columns(
         )
 
 
-class _ShapeOnlyArray:
-    def __init__(self, shape: tuple[int, ...]):
-        self.shape = shape
-
-
 def test_knn_clustering_rejects_infeasible_parameters():
+    square = np.eye(3)
     with pytest.raises(ValueError, match="two-dimensional"):
-        knn_clustering(_ShapeOnlyArray((3,)), 1, 1, 1)
+        knn_clustering(np.zeros(3), 1, 1, 1)
     with pytest.raises(ValueError, match="At least two"):
-        knn_clustering(_ShapeOnlyArray((1, 3)), 1, 1, 1)
+        knn_clustering(np.zeros((1, 3)), 1, 1, 1)
     with pytest.raises(TypeError, match="n_neighbors"):
-        knn_clustering(_ShapeOnlyArray((3, 3)), True, 2, 1)
+        knn_clustering(square, True, 2, 1)
     with pytest.raises(ValueError, match="n_neighbors"):
-        knn_clustering(_ShapeOnlyArray((3, 3)), np.int64(3), np.int32(2), 1)
+        knn_clustering(square, np.int64(3), np.int32(2), 1)
     with pytest.raises(ValueError, match="n_clusters"):
-        knn_clustering(_ShapeOnlyArray((3, 3)), np.int32(1), np.int64(4), 1)
+        knn_clustering(square, np.int32(1), np.int64(4), 1)
     with pytest.raises(TypeError, match="n_clusters"):
-        knn_clustering(_ShapeOnlyArray((3, 3)), 1, np.bool_(True), 1)
-    with pytest.raises(ValueError, match="effective bin count"):
-        knn_clustering(
-            _ShapeOnlyArray((3, 3)),
-            1,
-            2,
-            1,
-            {"dim": 2},
-        )
-    with pytest.raises(ValueError, match="unsupported parameters: 'n_trees'"):
-        knn_clustering(
-            _ShapeOnlyArray((3, 3)),
-            1,
-            2,
-            1,
-            {"n_trees": 2},
-        )
+        knn_clustering(square, 1, np.bool_(True), 1)
+    with pytest.raises(ValueError, match="space must be one of"):
+        knn_clustering(square, 1, 2, 1, space="hamming")
 
 
 def test_feature_cluster_scatter_honors_custom_unassigned_value():
@@ -1570,29 +1585,25 @@ def _ring_profiles(n_features: int) -> np.ndarray:
 
 
 def test_knn_clustering_reports_disconnected_feature_graph():
-    from cytearc.matrix import ChunkedArray
-
     rng = np.random.default_rng(3)
     centers = np.array([[0.0, 0.0], [100.0, 0.0], [0.0, 100.0]])
     profiles = np.repeat(centers, 5, axis=0) + rng.normal(scale=0.01, size=(15, 2))
 
     with pytest.raises(ValueError, match="3 disconnected components") as error:
-        knn_clustering(ChunkedArray.from_numpy(profiles), 2, 2, 1)
+        knn_clustering(profiles, 2, 2, 1)
     assert "n_neighbors" in str(error.value)
 
-    labels = knn_clustering(ChunkedArray.from_numpy(profiles), 2, 3, 1)
+    labels = knn_clustering(profiles, 2, 3, 1)
     assert sorted(np.unique(labels)) == [1, 2, 3]
     for group in range(3):
         assert np.unique(labels[5 * group : 5 * group + 5]).size == 1
 
 
 def test_knn_clustering_never_exceeds_requested_clusters_on_tied_heights():
-    from cytearc.matrix import ChunkedArray
-
     n_features = 12
     # The two nearest neighbors of each ring point are its ring neighbors,
     # so the feature graph is a cycle whose Paris merges tie in height.
-    profiles = ChunkedArray.from_numpy(_ring_profiles(n_features))
+    profiles = _ring_profiles(n_features)
     for n_clusters in range(1, n_features + 1):
         labels = knn_clustering(profiles, 2, n_clusters, 1)
         assert sorted(np.unique(labels)) == list(range(1, n_clusters + 1))
@@ -1665,6 +1676,92 @@ def test_nearest_feature_profiles_sum_each_distance_over_the_bins_in_order():
     assert nearest_feature_profiles(profiles, 2)[0].tolist() == [2, 1]
 
 
+def test_nearest_feature_profiles_round_each_product_before_adding_it():
+    # x**2 and y**2 round to 1 + 2**-29 and 1 + 24 * 2**-30 + 2**-52, and both
+    # sums round to 2 + 26 * 2**-30, a tie that the earlier row wins. A fused
+    # multiply-add rounds the second product only with the sum, which puts
+    # [x, y] one unit in the last place nearer than [y, x].
+    x, y = 1 + 2**-30, 1 + 12 * 2**-30
+    profiles = np.array([[0.0, 0.0], [y, x], [x, y]])
+
+    assert nearest_feature_profiles(profiles, 2)[0].tolist() == [1, 2]
+
+
+def test_nearest_feature_profiles_stop_between_blocks_and_report_each(monkeypatch):
+    from cytearc.trajectory import feature_dynamics
+    from cytearc.utils.progress import observe_progress
+    from cytearc.utils.shutdown import ShutdownRequested, ShutdownToken, shutdown_scope
+
+    profiles = np.random.default_rng(12).normal(size=(40, 3))
+    whole = nearest_feature_profiles(profiles, 4, nthreads=2)
+    # Blocks of one row for each of the two threads: 20 blocks.
+    monkeypatch.setattr(feature_dynamics, "_BLOCK_OPERATIONS", 1)
+    updates: list[tuple[str | None, int, int | None]] = []
+
+    def observe(_bar: int, description: str | None, done: int, total: int | None):
+        updates.append((description, done, total))
+
+    with observe_progress(observe):
+        blocked = nearest_feature_profiles(profiles, 4, nthreads=2)
+
+    np.testing.assert_array_equal(blocked, whole)
+    assert updates == [("Finding feature neighbors", done, 20) for done in range(1, 21)]
+
+    # A request to stop, made once the first block is done, ends the search
+    # before the second.
+    token = ShutdownToken()
+    updates.clear()
+
+    def stop(_bar: int, description: str | None, done: int, total: int | None):
+        updates.append((description, done, total))
+        token.request(reason="stop the search")
+
+    with shutdown_scope(token), observe_progress(stop):
+        with pytest.raises(ShutdownRequested, match="stop the search"):
+            nearest_feature_profiles(profiles, 4, nthreads=2)
+    assert updates == [("Finding feature neighbors", 1, 20)]
+
+
+@pytest.mark.parametrize(
+    ("n_profiles", "n_bins", "nthreads", "space"),
+    [(3000, 50, 4, "l2"), (2000, 200, 2, "ip")],
+)
+def test_nearest_feature_profiles_bytes_count_what_the_search_holds(
+    n_profiles, n_bins, nthreads, space
+):
+    import tracemalloc
+
+    from cytearc.trajectory.feature_dynamics import nearest_feature_profiles_bytes
+
+    profiles = np.random.default_rng(13).normal(size=(n_profiles, n_bins))
+    # A first search compiles the kernel and makes what a process makes once.
+    nearest_feature_profiles(profiles, 11, nthreads=nthreads, space=space)
+    tracemalloc.start()
+    before, _ = tracemalloc.get_traced_memory()
+    nearest_feature_profiles(profiles, 11, nthreads=nthreads, space=space)
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    # The transposed copy, a row of distances for each thread and the
+    # neighbors, held at once, and at most the progress bar's 64 KiB beside.
+    arrays = n_profiles * n_bins * 8 + nthreads * n_profiles * 8 + n_profiles * 11 * 8
+    held = peak - before
+    assert (
+        arrays
+        <= held
+        <= nearest_feature_profiles_bytes(n_profiles, n_bins, 11, nthreads, space=space)
+    )
+    assert (
+        nearest_feature_profiles_bytes(n_profiles, n_bins, 11, nthreads, space=space)
+        == arrays + 2**16
+    )
+    # A cosine search also holds the unit profiles.
+    assert (
+        nearest_feature_profiles_bytes(n_profiles, n_bins, 11, nthreads, space="cosine")
+        == arrays + n_profiles * n_bins * 8 + 2**16
+    )
+
+
 def test_nearest_feature_profiles_do_not_depend_on_the_threads():
     profiles = np.random.default_rng(11).normal(size=(101, 6))
 
@@ -1710,41 +1807,47 @@ def test_nearest_feature_profiles_take_whole_numbers(options):
 
 
 def test_knn_clustering_numbers_modules_from_the_earliest_median_peak():
-    from cytearc.matrix import ChunkedArray
-
     # Three far-apart groups whose profiles peak at the last, the first and
     # the third of four bins, in row order.
     centers = 3.0 * np.eye(4)[[3, 0, 2]]
     rng = np.random.default_rng(6)
     profiles = np.repeat(centers, 5, axis=0) + rng.normal(scale=0.01, size=(15, 4))
 
-    labels = knn_clustering(ChunkedArray.from_numpy(profiles), 2, 3, 1)
+    labels = knn_clustering(profiles, 2, 3, 1)
 
     np.testing.assert_array_equal(labels, np.repeat([3, 1, 2], 5))
 
 
 def test_knn_clustering_numbers_modules_whose_peaks_tie_in_the_order_of_the_cut():
-    from cytearc.matrix import ChunkedArray
-
-    # Three far-apart groups whose profiles all peak at the first bin, so the
-    # median peaks of their modules tie. The cut labels groups by decreasing
-    # size, and the rows hold the smallest group first.
-    centers = np.array(
-        [[3.0, 0.0, 0.0, 2.0], [3.0, 2.0, 0.0, 0.0], [3.0, 0.0, 2.0, 0.0]]
-    )
-    sizes = (3, 7, 5)
+    # Twenty far-apart groups of 3 to 22 profiles, all peaking at the first
+    # bin, so the median peaks of their modules tie; NumPy's quicksort keeps
+    # the order of 16 tied values but not of 20. The rows hold the groups in
+    # an order that their sizes do not follow.
+    sizes = np.arange(3, 23)
     rng = np.random.default_rng(5)
-    profiles = np.repeat(centers, sizes, axis=0) + rng.normal(scale=0.01, size=(15, 4))
+    centers = np.zeros((20, 21))
+    centers[:, 0] = 100.0
+    centers[np.arange(20), np.arange(1, 21)] = 50.0
+    order = rng.permutation(20)
+    profiles = np.concatenate(
+        [
+            centers[group] + rng.normal(scale=0.01, size=(sizes[group], 21))
+            for group in order
+        ]
+    )
     assert (profiles.argmax(axis=1) == 0).all()
 
-    labels = knn_clustering(ChunkedArray.from_numpy(profiles), 2, 3, 1)
+    labels = knn_clustering(profiles, 2, 20, 1)
 
-    np.testing.assert_array_equal(labels, np.repeat([3, 1, 2], sizes))
+    # The cut labels its clusters by decreasing size, so the group of s
+    # profiles is module 23 - s.
+    np.testing.assert_array_equal(
+        labels,
+        np.concatenate([np.full(sizes[group], 23 - sizes[group]) for group in order]),
+    )
 
 
-def test_knn_clustering_measures_the_distance_that_ann_params_names():
-    from cytearc.matrix import ChunkedArray
-
+def test_knn_clustering_measures_the_distance_that_space_names():
     # Two rays 0.3 radians apart, each with four profiles near length 1 and
     # four near length 10. Cosine distances join each ray; squared Euclidean
     # distances join the near profiles of both rays, and the far ones.
@@ -1754,50 +1857,21 @@ def test_knn_clustering_measures_the_distance_that_ann_params_names():
     ray = np.repeat([0, 1], 8)
     far = np.tile(lengths > 5, 2)
 
-    by_angle = knn_clustering(
-        ChunkedArray.from_numpy(profiles), 4, 2, 1, {"space": "cosine"}
-    )
-    by_position = knn_clustering(ChunkedArray.from_numpy(profiles), 4, 2, 1)
+    by_angle = knn_clustering(profiles, 4, 2, 1, space="cosine")
+    by_position = knn_clustering(profiles, 4, 2, 1)
 
     assert len(set(zip(ray.tolist(), by_angle.tolist(), strict=True))) == 2
     assert len(set(zip(far.tolist(), by_position.tolist(), strict=True))) == 2
 
 
-def test_knn_clustering_leaves_out_the_settings_of_an_approximate_search():
-    from cytearc.matrix import ChunkedArray
-
-    rng = np.random.default_rng(4)
-    profiles = np.repeat(rng.normal(scale=3.0, size=(4, 6)), 10, axis=0)
-    profiles += rng.normal(size=profiles.shape)
-    exact = knn_clustering(ChunkedArray.from_numpy(profiles), 5, 4, 1)
-
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        searched = knn_clustering(
-            ChunkedArray.from_numpy(profiles),
-            5,
-            4,
-            1,
-            {"ef": 40, "M": 16, "max_elements": 2, "space": "l2"},
-        )
-
-    np.testing.assert_array_equal(searched, exact)
-    (message,) = _ignored_settings_warnings(caught)
-    assert message.endswith("can be dropped: 'M', 'ef', 'max_elements'")
-
-
 def test_knn_clustering_gives_the_same_modules_on_any_thread_count():
-    from cytearc.matrix import ChunkedArray
-
     rng = np.random.default_rng(9)
     profiles = np.repeat(rng.normal(scale=3.0, size=(6, 8)), 20, axis=0)
     profiles += rng.normal(size=profiles.shape)
 
-    one = knn_clustering(ChunkedArray.from_numpy(profiles), 5, 6, 1)
+    one = knn_clustering(profiles, 5, 6, 1)
 
-    np.testing.assert_array_equal(
-        knn_clustering(ChunkedArray.from_numpy(profiles, nthreads=4), 5, 6, 4), one
-    )
+    np.testing.assert_array_equal(knn_clustering(profiles, 5, 6, 4), one)
     assert sorted(np.unique(one)) == list(range(1, 7))
 
 

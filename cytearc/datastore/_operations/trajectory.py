@@ -100,6 +100,7 @@ from ...storage.selections import (
 )
 from ...storage.arrays import create_zarr_dataset
 from ...trajectory.feature_dynamics import (
+    nearest_feature_profiles_bytes as _nearest_feature_profiles_bytes_impl,
     scatter_feature_clusters as _scatter_feature_clusters_impl,
     validate_pseudotime_regressor,
 )
@@ -5775,9 +5776,9 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
         ``n_clusters`` modules: each retained feature's ``n_neighbors``
         nearest features, found exactly from every distance between their
         profiles, form a graph whose Paris hierarchy is cut into the modules.
-        Of two equally near features the earlier ranks first, so the modules
-        are the same on every platform. The modules are numbered from 1 by the
-        median bin of their features' peaks.
+        Of two equally near features the earlier ranks first, so the same
+        profiles give the same modules on every platform. The modules are
+        numbered from 1 by the median bin of their features' peaks.
 
         Args:
             pseudotime: Explicit pseudotime artifact defining cells and ordering.
@@ -5796,7 +5797,8 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
                 the squared Euclidean distance and the default; ``"ip"``,
                 one minus the inner product; or ``"cosine"``, one minus the
                 cosine similarity. The settings of an approximate search,
-                such as ``ef``, have no effect and are left out with a warning.
+                such as ``ef``, have no effect and are left out with a
+                ``FutureWarning``.
             nan_cluster_value: Value assigned to features excluded from clustering.
             **norm_params: Extra keyword arguments forwarded to normalized expression.
 
@@ -5989,6 +5991,17 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
         self._require_writable("run_pseudotime_aggregation")
         logger.info("Pseudotime modules: aggregating feature profiles")
         check_normalization()
+        # Clustering holds a copy of the retained profiles and what the search
+        # for each one's nearest profiles holds beside them.
+        n_features = len(feature_indices)
+        clustering_bytes = n_features * effective_bins * 8
+        clustering_bytes += _nearest_feature_profiles_bytes_impl(
+            n_features,
+            effective_bins,
+            n_neighbors,
+            self.nthreads,
+            space=str(resolved_ann_params["space"]),
+        )
         full_data, stored_feature_indices, valid_features = (
             assay._aggregate_ordering_profiles(
                 cell_idx=cell_indices,
@@ -6001,6 +6014,7 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
                 z_scale=z_scale,
                 batch_size=batch_size,
                 norm_params=resolved_norm_params,
+                held_bytes=clustering_bytes,
             )
         )
         valid_count = int(np.count_nonzero(valid_features))
@@ -6015,15 +6029,11 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             )
         valid_feature_indices = stored_feature_indices[valid_features]
         clusts = knn_clustering(
-            d_array=ChunkedArray.from_numpy(
-                full_data[valid_features],
-                nthreads=self.nthreads,
-                resources=self.resources,
-            ),
+            full_data[valid_features],
             n_neighbors=n_neighbors,
             n_clusters=n_clusters,
             nthreads=self.nthreads,
-            ann_params=resolved_ann_params,
+            space=str(resolved_ann_params["space"]),
         )
         check_normalization()
         with artifact_transaction(self.zw, planned) as aggregation_group:
@@ -6962,7 +6972,8 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
                 the squared Euclidean distance and the default; ``"ip"``,
                 one minus the inner product; or ``"cosine"``, one minus the
                 cosine similarity. The settings of an approximate search,
-                such as ``ef``, have no effect and are left out with a warning.
+                such as ``ef``, have no effect and are left out with a
+                ``FutureWarning``.
             nan_cluster_value: Value assigned to features excluded from clustering.
             invalidate_cache: Compute a new result even when one matches.
             **norm_params: Extra keyword arguments forwarded to normalized
@@ -7163,8 +7174,9 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             axes.ordering, axes.weights, n_bins
         )
         feature_names = _feature_names_at(assay, feature_indices)
-        # The cells' fate weights, the operator, the feature names, and three
-        # copies of the profiles: streamed, finalized, and clustered.
+        # The cells' fate weights, the operator, the feature names, three
+        # copies of the profiles, streamed, finalized and clustered, and what
+        # the search for each profile's nearest profiles holds beside them.
         profile_bytes = n_selected * dims * 8
         resident_bytes = (
             axes.nbytes
@@ -7173,6 +7185,13 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             )
             + feature_names.nbytes
             + 3 * profile_bytes
+            + _nearest_feature_profiles_bytes_impl(
+                n_selected,
+                dims,
+                n_neighbors,
+                self.nthreads,
+                space=str(resolved_ann_params["space"]),
+            )
         )
 
         def blocks() -> Iterator[tuple[np.ndarray, np.ndarray]]:
@@ -7215,15 +7234,11 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
                 "or n_clusters."
             )
         clusters = knn_clustering(
-            d_array=ChunkedArray.from_numpy(
-                data[valid].reshape(valid_count, dims),
-                nthreads=self.nthreads,
-                resources=self.resources,
-            ),
+            data[valid].reshape(valid_count, dims),
             n_neighbors=n_neighbors,
             n_clusters=n_clusters,
             nthreads=self.nthreads,
-            ann_params=resolved_ann_params,
+            space=str(resolved_ann_params["space"]),
         )
         check_normalization()
         feature_clusters = np.full(n_selected, nan_cluster_value, dtype=np.int64)

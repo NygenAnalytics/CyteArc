@@ -30,7 +30,8 @@ def requested_ann_params(ann_params: Mapping[str, Any] | None) -> dict[str, Any]
     """Return the ``ann_params`` of a call without the settings of an HNSW search.
 
     The feature neighbors are exact, so a setting of the HNSW search, such as
-    ``ef``, has no effect: it is left out, with one warning that names it.
+    ``ef``, has no effect: it is left out, with one ``FutureWarning`` that
+    names it.
 
     Raises:
         TypeError: If ``ann_params`` is neither a mapping nor None.
@@ -58,7 +59,8 @@ def requested_ann_params(ann_params: Mapping[str, Any] | None) -> dict[str, Any]
         warn(
             "Feature modules find each feature's nearest features exactly, so "
             "these settings of an approximate search in ann_params have no "
-            "effect and can be dropped: " + ", ".join(repr(name) for name in ignored)
+            "effect and can be dropped: " + ", ".join(repr(name) for name in ignored),
+            FutureWarning,
         )
     return {
         name: value
