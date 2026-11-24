@@ -9420,17 +9420,33 @@ def test_a_merge_holds_windows_of_a_composite_source(
 
     # The composite's 1,100 cells, which it reads from its sources in one run
     # of every column, are held 80 cells at a time within each of its
-    # shards, beside windows of the left source's 600 cells read a chunk
-    # column at a time.
+    # shards, beside windows of the left source's 600 cells, in one shard,
+    # read a chunk column at a time. Each source gives its cells from the
+    # first cell that the merge's default seed draws, then from its first.
+    from cytearc.merge.row_plan import build_row_plan
+
+    def windows(n_cells: int, shard_rows: int, first: int) -> int:
+        count = 0
+        for start, stop in ((first, n_cells), (0, first)):
+            row = start
+            while row < stop:
+                end = min(stop, (row // shard_rows + 1) * shard_rows)
+                count += -(-(end - row) // 80)
+                row = end
+        return count
+
     shard = DataStore(
         joint, default_assay="Counts", nthreads=1
     ).Counts.rawData.chunksize[0]
-    joint_reads = sum(
-        -(-min(shard, 1100 - start) // 80) for start in range(0, 1100, shard)
-    )
+    first_joint, first_left = build_row_plan(
+        [1100, 600], ["joint", "left"], seed=42
+    ).firstCells
     assert merged["batch_rows"] == 16
     assert merged["held_rows"] == 80
-    assert merged["widths"] == {40: joint_reads, 10: 4 * -(-600 // 80)}
+    assert merged["widths"] == {
+        40: windows(1100, shard, first_joint),
+        10: 4 * windows(600, 600, first_left),
+    }
     assert sum(merged["decodes"].values()) < sum(reference["decodes"].values())
     assert merged["cut"] > 0
     assert merged["alive"] <= 1

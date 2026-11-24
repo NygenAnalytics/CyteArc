@@ -1033,27 +1033,34 @@ def _count_store(path: Path, counts: np.ndarray, cell_prefix: str) -> Any:
     return store
 
 
-def test_a_composite_refuses_a_budget_of_one_byte_at_its_mappings(
+def test_a_composite_refuses_small_budgets_at_its_cell_order_and_its_mappings(
     tmp_path: Path,
 ) -> None:
     from cytearc.composite import create_composite
 
+    # Few cells of many features, whose mappings need more than their order.
     rng = np.random.default_rng(0)
-    first = _count_store(tmp_path / "first.zarr", rng.poisson(1.0, (300, 64)), "a")
-    second = _count_store(tmp_path / "second.zarr", rng.poisson(1.0, (300, 64)), "b")
-    refusal = refused(
-        lambda: create_composite(
+    first = _count_store(tmp_path / "first.zarr", rng.poisson(1.0, (20, 64)), "a")
+    second = _count_store(tmp_path / "second.zarr", rng.poisson(1.0, (20, 64)), "b")
+
+    def create(budget: int) -> object:
+        return create_composite(
             {"first": first, "second": second},
             at=tmp_path / "joint.zarr",
             features="union",
-            mem_budget=1,
+            mem_budget=budget,
             nthreads=1,
         )
-    )
+
+    # A budget of one byte is refused at the order of the cells, and the
+    # budget that the order names at the mappings.
+    ordering = refused(lambda: create(1))
+    assert ordering.item == "the shuffle that arranges the sources' turns"
+    refusal = refused(lambda: create(ordering.needed_bytes))
     assert refusal.item == "the composite row and feature mappings"
 
 
-def test_a_merge_refuses_a_budget_of_one_byte_at_its_schema_discovery(
+def test_a_merge_refuses_small_budgets_at_its_cell_order_and_its_schema_discovery(
     tmp_path: Path,
 ) -> None:
     from cytearc.merge import DataStoreMerge
@@ -1061,18 +1068,24 @@ def test_a_merge_refuses_a_budget_of_one_byte_at_its_schema_discovery(
     rng = np.random.default_rng(11)
     left = _count_store(tmp_path / "left.zarr", rng.poisson(1.0, (20, 12)), "l")
     right = _count_store(tmp_path / "right.zarr", rng.poisson(1.0, (16, 12)), "r")
-    refusal = refused(
-        lambda: DataStoreMerge(
+
+    def plan(budget: int) -> object:
+        return DataStoreMerge(
             datasets=[left, right],
             zarr_path=str(tmp_path / "merged.zarr"),
             names=["left", "right"],
             prepend_text="",
             seed=0,
             overwrite=True,
-            mem_budget=1,
+            mem_budget=budget,
             nthreads=1,
         ).plan()
-    )
+
+    # A budget of one byte is refused at the order of the cells, and the
+    # budget that the order names at the schema discovery of the cell table.
+    ordering = refused(lambda: plan(1))
+    assert ordering.item == "the shuffle that arranges the sources' turns"
+    refusal = refused(lambda: plan(ordering.needed_bytes))
     assert refusal.item == "one source row of merged cell metadata schema discovery"
 
 

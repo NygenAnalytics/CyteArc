@@ -126,9 +126,11 @@ def _identity_inputs(n_cells: int):
     tables = [_cell_table(values) for values in sources]
     plan = build_row_plan([values.size for values in sources], list(SOURCES), seed=0)
     merged = np.empty(n_cells, dtype=_merged_id_dtype(ids))
-    # Each source's cells take, in their order, the rows the plan gives it.
+    # Each source's cells take, in their order from the source's first cell
+    # and then from its first stored cell, the rows the plan gives it.
     for index, name in enumerate(SOURCES):
-        merged[plan.owners == index] = np.char.add(f"{name}__", sources[index])
+        given = np.roll(sources[index], -plan.firstCells[index])
+        merged[plan.owners == index] = np.char.add(f"{name}__", given)
     group = zarr.open_group(store=MemoryStore(), mode="w")
     stored = create_metadata_column(
         group, "ids", data=merged, chunkSize=metadata_chunk_rows(plan)
@@ -351,8 +353,11 @@ def test_merge_counts(bench, stores, tmp_path) -> None:
         _assays, _alignment, plan, root = prepared(n_cells)
         sources = [_counts(name, n_cells) for name in SOURCES]
         expected = np.empty((n_cells, inputs.N_GENES), dtype=np.uint16)
+        # Each source's rows, from its first cell and then from its first
+        # stored cell, fill the merged rows that the plan gives it.
         for index, values in enumerate(sources):
-            expected[plan.owners == index] = values
+            given = np.roll(values, -plan.firstCells[index], axis=0)
+            expected[plan.owners == index] = given
         assert rows == n_cells
         np.testing.assert_array_equal(root["RNA/counts"][:], expected)
 
