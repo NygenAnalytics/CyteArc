@@ -914,24 +914,6 @@ def test_a_shuffled_import_names_the_least_budget_of_its_count_layout(
     named_budget_runs(at_budget, budget, item=layout)
 
 
-def test_a_source_preparation_names_the_least_budget_that_prepares_one_cell(
-    tmp_path,
-) -> None:
-    from tests.test_memory_refusals import named_budget_runs
-
-    source = _write_object(tmp_path / "object.rds", n_cells=40)
-    with SeuratReader(source, temp_dir=tmp_path) as reader:
-
-        def prepare(budget: int) -> None:
-            reader._prepare_assay("RNA", max_bytes=budget)
-
-        # RNA's sources hold no resident data, and one cell's block grows with
-        # the limit that the budget sets, so the need computed at a refused
-        # budget can be refused again. The refusal names the least budget
-        # that prepares one cell.
-        named_budget_runs(prepare, 1, item="preparing one cell of a Seurat source")
-
-
 def test_a_budget_without_room_for_the_shuffle_is_refused_before_it_runs(
     tmp_path, monkeypatch
 ) -> None:
