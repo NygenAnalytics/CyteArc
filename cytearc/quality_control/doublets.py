@@ -84,13 +84,19 @@ THRESHOLD_SMOOTHING_STEPS = 10_000
 # at least this share of them on each side, or Otsu's threshold is taken: a
 # minimum that leaves fewer cuts a few outlying doublets from the rest.
 THRESHOLD_SIDE_SHARE = 0.05
+# Otsu's threshold replaces such a minimum only when the doublet rate that it
+# estimates, the share of cells it calls over the share of simulated doublets
+# above it, is at most this. Droplet experiments hold up to about 40% doublets
+# (Xi and Li, Cell Systems 2021), and a sample whose simulated doublets look
+# like its cells has Otsu's threshold split the cells and the doublets alike.
+THRESHOLD_MAX_DOUBLET_RATE = 0.5
 # A sample scored beside others queries its index for at most this many points
 # at once, so that its query block stays small beside its index.
 _SAMPLE_QUERY_ROWS = 4_096
 # A sample of at least this many points, its cells and simulated doublets, is
-# indexed in _INDEX_PARTS parts of consecutive points, built at once on one
-# thread each. The parts depend on the sample alone, so its neighbors are the
-# same for any number of workers.
+# indexed in _INDEX_PARTS parts, point i in part i mod _INDEX_PARTS, built at
+# once on one thread each. The parts depend on the sample alone, so its
+# neighbors are the same for any number of workers.
 _INDEX_SPLIT_POINTS = 50_000
 _INDEX_PARTS = 4
 # A neighbor candidate's key holds its distance's order-preserving bits above
@@ -616,30 +622,52 @@ def otsu_threshold(
     return float(centers[int(np.argmax(between))])
 
 
-def doublet_threshold(simulated_scores: NDArray[np.floating]) -> tuple[float, str]:
+def doublet_threshold(
+    simulated_scores: NDArray[np.floating],
+    *,
+    cell_scores: NDArray[np.floating],
+) -> tuple[float, str]:
     """Choose the doublet-score threshold of one sample automatically.
 
     Simulated doublets of two cells of one type score low and those of two
     types score high, so their scores are bimodal. The threshold is the
     minimum between the two modes (:func:`histogram_minimum_threshold`) when
     at least ``THRESHOLD_SIDE_SHARE`` of the simulated doublets lie above it
-    and as many at or below it, and Otsu's threshold (:func:`otsu_threshold`)
-    otherwise, as when the histogram does not become bimodal. One or two
-    doublets that score far above the rest can keep a maximum of their own
-    after the dip between the modes has smoothed away, and the minimum then
-    lies above every other doublet; the share sends such a sample to Otsu's
-    threshold.
+    and as many at or below it. One or two doublets that score far above the
+    rest can keep a maximum of their own after the dip between the modes has
+    smoothed away, and the minimum then lies above every other doublet; such
+    a minimum gives way to Otsu's threshold (:func:`otsu_threshold`) when the
+    doublet rate that Otsu's threshold estimates, the share of the sample's
+    cells above it over the share of its simulated doublets above it, is at
+    most ``THRESHOLD_MAX_DOUBLET_RATE``. A sample whose simulated doublets
+    look like its cells has scores of one mode, which Otsu's threshold splits
+    with as many cells as doublets above it, so it keeps the minimum, which
+    calls almost no cell. When the histogram never has two maxima, the
+    threshold is Otsu's.
+
+    Args:
+        simulated_scores: The doublet scores of the sample's simulated
+            doublets.
+        cell_scores: The doublet scores of the sample's cells.
 
     Returns:
         The threshold and the method that chose it: ``"minimum"`` or ``"otsu"``.
     """
     scores = _finite_values(simulated_scores)
+    cells = _finite_values(cell_scores)
     threshold = histogram_minimum_threshold(scores)
-    if threshold is not None:
-        above = np.count_nonzero(scores > threshold) / scores.size
-        if min(above, 1 - above) >= THRESHOLD_SIDE_SHARE:
-            return threshold, "minimum"
-    return otsu_threshold(scores), "otsu"
+    if threshold is None:
+        return otsu_threshold(scores), "otsu"
+    above = np.count_nonzero(scores > threshold) / scores.size
+    if min(above, 1 - above) >= THRESHOLD_SIDE_SHARE:
+        return threshold, "minimum"
+    otsu = otsu_threshold(scores)
+    # Cells called over detectable doublets, compared without a division.
+    called = np.count_nonzero(cells > otsu) * scores.size
+    detected = np.count_nonzero(scores > otsu) * cells.size
+    if called <= THRESHOLD_MAX_DOUBLET_RATE * detected:
+        return otsu, "otsu"
+    return threshold, "minimum"
 
 
 class _ScoringRoom:
@@ -805,16 +833,17 @@ def _pair_row_bytes(pool: csr_matrix) -> int:
     return int(6 * (2 * largest * (max(8, pool.dtype.itemsize) + 8) + 16))
 
 
-def _index_parts(n_points: int) -> list[tuple[int, int]]:
-    """Return the first and last-plus-one positions of each part of a sample's index.
+def _index_parts(n_points: int) -> list[range]:
+    """Return the positions of the points of each part of a sample's index.
 
     A sample of ``_INDEX_SPLIT_POINTS`` points or more is split into
-    ``_INDEX_PARTS`` parts of consecutive points, whose sizes differ by at
-    most one; a smaller sample is one part.
+    ``_INDEX_PARTS`` parts, point ``i`` in part ``i mod _INDEX_PARTS``, so
+    every part holds cells and simulated doublets of each stretch of the
+    sample, such as each cluster of cells stored by cluster; a smaller sample
+    is one part.
     """
     parts = _INDEX_PARTS if n_points >= _INDEX_SPLIT_POINTS else 1
-    edges = [part * n_points // parts for part in range(parts + 1)]
-    return list(zip(edges[:-1], edges[1:], strict=True))
+    return [range(part, n_points, parts) for part in range(parts)]
 
 
 def _part_depth(ef: int, k: int, parts: int) -> int:
@@ -846,19 +875,27 @@ def _neighbor_count_bytes(
     k: int,
     settings: DoubletIndexSettings,
     threads: int,
-) -> tuple[int, Callable[[int], int]]:
-    """Return the bytes of one sample's indexes and those of a query block of
-    a given number of points, which ``threads`` threads build and query."""
+) -> tuple[int, int, Callable[[int], int]]:
+    """Return the bytes of one sample's indexes, those that their builds hold
+    beside them, and those of a query block of a given number of points;
+    ``threads`` threads build and query the indexes."""
     parts = _index_parts(n_points)
     ef = _part_depth(settings.ef, k, len(parts))
     index_bytes = sum(
-        ann_index_peak_bytes(stop - start, dims, settings.m, nthreads=threads)
-        for start, stop in parts
+        ann_index_peak_bytes(len(part), dims, settings.m, nthreads=threads)
+        for part in parts
+    )
+    # Each part being built holds its points' uint64 positions and hnswlib's
+    # copy of them and, when the sample is split, the contiguous copy of its
+    # rows that hnswlib reads. As many parts as threads are built at once.
+    point_bytes = 16 + (4 * dims if len(parts) > 1 else 0)
+    build_bytes = (
+        min(len(parts), threads) * max(len(part) for part in parts) * point_bytes
     )
     # Beside the memory of one part's query, each query row holds the keys of
     # every part's candidates and their partition, the keying temporaries of
     # one part's candidates, and its nearest positions with a doublet mask.
-    width = sum(min(k + 1, stop - start) for start, stop in parts)
+    width = sum(min(k + 1, len(part)) for part in parts)
     own_row_bytes = 16 * width + 33 * (k + 1) + 9 * k
 
     def block_bytes(rows: int) -> int:
@@ -867,7 +904,7 @@ def _neighbor_count_bytes(
             + rows * own_row_bytes
         )
 
-    return index_bytes, block_bytes
+    return index_bytes, build_bytes, block_bytes
 
 
 def _sample_charge(
@@ -879,11 +916,12 @@ def _sample_charge(
     """Return the bytes that one sample holds while it is scored beside others.
 
     They are its float32 points, the neighbor count of each point, the int64
-    positions of its cells, its index, and a query block of at most
-    ``_SAMPLE_QUERY_ROWS`` points.
+    positions of its cells, its index, and the larger of what the index's
+    build holds beside it and a query block of at most ``_SAMPLE_QUERY_ROWS``
+    points, since the build lets go of its copies before the queries start.
     """
     n_points = plan.cells + plan.simulated
-    index_bytes, block_bytes = _neighbor_count_bytes(
+    index_bytes, build_bytes, block_bytes = _neighbor_count_bytes(
         n_points, dims, plan.adjusted_neighbors, settings, threads
     )
     return (
@@ -891,7 +929,7 @@ def _sample_charge(
         + 8 * n_points
         + 8 * plan.cells
         + index_bytes
-        + block_bytes(min(n_points, _SAMPLE_QUERY_ROWS))
+        + max(build_bytes, block_bytes(min(n_points, _SAMPLE_QUERY_ROWS)))
     )
 
 
@@ -937,8 +975,12 @@ def count_simulated_neighbors(
     ``adjusted_neighbors`` nearest other points are found with hnswlib
     indexes of the points: one index, or for a sample of
     ``_INDEX_SPLIT_POINTS`` points or more, one index for each of
-    ``_INDEX_PARTS`` parts of consecutive points, built at once on
-    ``workers`` threads. Each index is built on one thread, with seed
+    ``_INDEX_PARTS`` parts, point ``i`` in part ``i mod _INDEX_PARTS``, built
+    at once on ``workers`` threads. Each part thus holds cells and simulated
+    doublets of every stretch of the points, as one index does; a part of
+    consecutive points would hold only cells, without the simulated doublets
+    that link separated clusters in one index, and its search could miss a
+    small cluster. Each index is built on one thread, with seed
     ``random_seed`` plus its part's number, and searched for every point on
     ``workers`` threads to the depth that the parts share, ``settings.ef``
     divided among them, at least the ``adjusted_neighbors + 1`` candidates
@@ -950,8 +992,8 @@ def count_simulated_neighbors(
     Raises:
         ValueError: If the points hold fewer than two rows or 2**32 or more,
             no simulated doublet, or ``adjusted_neighbors`` of them or fewer.
-        MemoryError: If the indexes and one query block exceed the memory
-            budget.
+        MemoryError: If the indexes and their builds, or the indexes and one
+            query block, exceed the memory budget.
     """
     values = np.ascontiguousarray(points, dtype=np.float32)
     if values.ndim != 2 or values.shape[0] < 2:
@@ -968,7 +1010,7 @@ def count_simulated_neighbors(
     threads = integer_argument(workers, "workers", minimum=1)
     parts = _index_parts(n_points)
     ef = _part_depth(settings.ef, k, len(parts))
-    index_bytes, block_bytes = _neighbor_count_bytes(
+    index_bytes, build_bytes, block_bytes = _neighbor_count_bytes(
         n_points, dims, k, settings, threads
     )
     resident = int(resident_bytes) + values.nbytes + 8 * n_points
@@ -980,6 +1022,14 @@ def count_simulated_neighbors(
         requested=1,
     )
     resident += index_bytes
+    # The builds let go of their copies before the first query block.
+    admit_stream(
+        resources,
+        nBlocks=1,
+        blockBytes=build_bytes,
+        residentBytes=resident,
+        requested=1,
+    )
     batch_rows = max(
         1,
         affordable_width(
@@ -998,19 +1048,25 @@ def count_simulated_neighbors(
         instantiate_knn_index(
             settings.metric,
             dims,
-            stop - start,
+            len(held),
             settings.ef_construction,
             settings.m,
             (random_seed + part) % 2**64,
             ef,
             1,
         )
-        for part, (start, stop) in enumerate(parts)
+        for part, held in enumerate(parts)
     ]
 
     def build(part: int) -> None:
-        start, stop = parts[part]
-        indexes[part].add_items(values[start:stop], np.arange(start, stop))
+        held = parts[part]
+        # hnswlib reads contiguous rows, so a part of every few points is
+        # copied; the rows of one part are the points themselves.
+        rows = np.ascontiguousarray(values[held.start : held.stop : held.step])
+        indexes[part].add_items(
+            rows,
+            np.arange(held.start, held.stop, held.step, dtype=np.uint64),
+        )
 
     with ThreadPoolExecutor(
         max_workers=min(len(parts), threads), thread_name_prefix="cytearc-doublet-index"
@@ -1019,7 +1075,7 @@ def count_simulated_neighbors(
             pass
     for index in indexes:
         index.set_num_threads(threads)
-    returned = [min(k + 1, stop - start) for start, stop in parts]
+    returned = [min(k + 1, len(held)) for held in parts]
     columns = np.cumsum([0, *returned])
     counts = np.empty(n_points, dtype=np.int64)
     for start in range(0, n_points, batch_rows):
@@ -1324,7 +1380,8 @@ def score_synthetic_doublets(
     by :func:`doublet_likelihood` on its neighbors in the sample
     (:func:`count_simulated_neighbors`), and a cell is called a doublet when
     its score is above the sample's threshold: ``threshold``, or the one
-    :func:`doublet_threshold` chooses from the sample's simulated doublets.
+    :func:`doublet_threshold` chooses from the scores of the sample's
+    simulated doublets and cells.
 
     Samples are scored ``resources.workers`` at a time, fewer when the memory
     budget holds fewer of the largest sample's points, index and query block
@@ -1487,7 +1544,9 @@ def score_synthetic_doublets(
         observed_scores = likelihood[: plan.cells]
         sample_simulated = likelihood[plan.cells :]
         if threshold is None:
-            cutoff, method = doublet_threshold(sample_simulated)
+            cutoff, method = doublet_threshold(
+                sample_simulated, cell_scores=observed_scores
+            )
         else:
             cutoff, method = float(threshold), "manual"
         calls = observed_scores > cutoff

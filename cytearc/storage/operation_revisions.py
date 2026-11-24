@@ -274,11 +274,12 @@ _OPERATION_REVISIONS: dict[str, tuple[OperationRevision, ...]] = {
             revision=3,
             release="1.5.0",
             change=(
-                "A sample of 50,000 points or more is indexed in 4 parts, built "
-                "at once on the workers and searched to a shared depth, and the "
-                "automatic threshold takes Otsu's threshold when fewer than 5% "
-                "of a sample's simulated doublets lie on either side of the "
-                "histogram minimum"
+                "A sample of 50,000 points or more is indexed in 4 parts of "
+                "every fourth point, built at once on the workers and searched "
+                "to a shared depth, and the automatic threshold takes Otsu's "
+                "threshold when fewer than 5% of a sample's simulated doublets "
+                "lie on either side of the histogram minimum and Otsu's "
+                "threshold estimates a doublet rate of at most 50%"
             ),
             applies=None,
         ),

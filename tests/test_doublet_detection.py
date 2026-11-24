@@ -40,6 +40,7 @@ from cytearc.matrix import ChunkedArray
 from cytearc.quality_control import doublets
 from cytearc.storage.artifacts import ArtifactRef, artifact_group, callable_identity
 from cytearc.storage.budget import ResourceBudget
+from cytearc.storage.pipeline_runs import load_pipeline_stage_records
 from cytearc.storage.selections import read_stored_selection_mask
 from cytearc.utils.logging import logger
 from tests import full_path
@@ -175,7 +176,7 @@ def test_histogram_minimum_threshold_splits_two_modes_at_their_valley():
 
     assert doublets.histogram_minimum_threshold(values, bins=len(heights)) == 3.5
     # The same values satisfy the minimum and Otsu's split differently.
-    assert doublets.doublet_threshold(values)[1] == "minimum"
+    assert doublets.doublet_threshold(values, cell_scores=values)[1] == "minimum"
 
 
 def test_histogram_minimum_threshold_counts_plateaus_and_smooths_noise():
@@ -232,7 +233,10 @@ def test_doublet_threshold_falls_back_to_otsu_without_two_modes():
     bins = doublets.THRESHOLD_BINS
     unimodal = _bin_values([min(i + 1, bins - i) for i in range(bins)], bins)
     assert doublets.histogram_minimum_threshold(unimodal) is None
-    threshold, method = doublets.doublet_threshold(unimodal)
+    # Without a minimum there is nothing else to take, so Otsu's threshold
+    # stands even with cells that score like the doublets, whose doublet
+    # rate it estimates at 100%.
+    threshold, method = doublets.doublet_threshold(unimodal, cell_scores=unimodal)
     assert method == "otsu"
     assert threshold == doublets.otsu_threshold(unimodal)
     # A symmetric peak splits at its middle.
@@ -259,13 +263,21 @@ def test_doublet_threshold_takes_otsu_when_an_outlier_forms_the_second_mode():
     values = np.concatenate([np.clip(body, 0.0, None), [0.9]])
     minimum = doublets.histogram_minimum_threshold(values)
     assert minimum is not None and np.count_nonzero(values > minimum) == 1
+    # Singlets score like the doublets of one type, and 2% of the cells are
+    # doublets of two types.
+    cells = np.concatenate(
+        [np.clip(rng.normal(0.05, 0.02, 980), 0.0, None), rng.normal(0.2, 0.03, 20)]
+    )
 
-    threshold, method = doublets.doublet_threshold(values)
+    threshold, method = doublets.doublet_threshold(values, cell_scores=cells)
 
     assert method == "otsu"
     assert threshold == doublets.otsu_threshold(values)
-    # Otsu's threshold splits the body, with its high mode above it.
-    assert 0.2 < np.mean(values > threshold) < 0.4
+    # Otsu's threshold splits the body, with its high mode above it, and
+    # estimates a doublet rate below 50%.
+    detectable = np.mean(values > threshold)
+    assert 0.2 < detectable < 0.4
+    assert np.mean(cells > threshold) / detectable < 0.2
 
 
 @pytest.mark.parametrize(
@@ -281,12 +293,77 @@ def test_doublet_threshold_needs_five_percent_of_doublets_on_each_side_of_the_mi
     minimum = doublets.histogram_minimum_threshold(values)
     assert minimum is not None and np.count_nonzero(values > minimum) == high
 
-    threshold, chosen = doublets.doublet_threshold(values)
+    # No cell scores above either threshold, so Otsu's threshold estimates a
+    # doublet rate of 0.
+    threshold, chosen = doublets.doublet_threshold(values, cell_scores=np.zeros(50))
 
     assert chosen == method
     assert threshold == (
         minimum if method == "minimum" else doublets.otsu_threshold(values)
     )
+
+
+@pytest.mark.parametrize(
+    ("low", "high", "called", "method"),
+    [
+        # 4% of the doublets lie above Otsu's threshold, so 1 cell of 50
+        # estimates a doublet rate of 50%, and 2 cells of 100%.
+        (96, 4, 1, "otsu"),
+        (96, 4, 2, "minimum"),
+        # 96% lie above it: 24 cells of 50 estimate 50%, and 25 cells 52%.
+        (4, 96, 24, "otsu"),
+        (4, 96, 25, "minimum"),
+    ],
+)
+def test_doublet_threshold_takes_otsu_only_where_its_doublet_rate_is_at_most_half(
+    low, high, called, method
+):
+    # Two blocks at the ends of the range, whose minimum leaves fewer than 5%
+    # of the doublets on one side, and cells at the same two scores.
+    values = np.repeat([0.0, 1.0], [low, high])
+    cells = np.repeat([0.0, 1.0], [50 - called, called])
+    minimum = doublets.histogram_minimum_threshold(values)
+    otsu = doublets.otsu_threshold(values)
+    assert np.mean(cells > otsu) == called / 50
+    assert np.mean(values > otsu) == high / 100
+
+    threshold, chosen = doublets.doublet_threshold(values, cell_scores=cells)
+
+    assert (threshold, chosen) == (
+        (otsu, "otsu") if method == "otsu" else (minimum, "minimum")
+    )
+
+
+def test_doublet_threshold_keeps_the_minimum_when_doublets_look_like_the_cells():
+    # Simulated doublets and cells of one population score alike, and one
+    # doublet scores far above the rest: the minimum before it leaves too
+    # few doublets above it, and Otsu's threshold splits the one mode with
+    # as many cells as doublets above it, a doublet rate of about 100%.
+    rng = np.random.default_rng(17)
+    values = np.concatenate([rng.normal(0.05, 0.01, 2_000), [0.3]])
+    cells = rng.normal(0.05, 0.01, 1_000)
+    minimum = doublets.histogram_minimum_threshold(values)
+    assert minimum is not None and np.count_nonzero(values > minimum) == 1
+    otsu = doublets.otsu_threshold(values)
+    assert np.mean(cells > otsu) / np.mean(values > otsu) > 0.8
+
+    threshold, method = doublets.doublet_threshold(values, cell_scores=cells)
+
+    # The minimum calls no cell.
+    assert (threshold, method) == (minimum, "minimum")
+    assert np.count_nonzero(cells > threshold) == 0
+
+
+@pytest.mark.parametrize(
+    ("cells", "message"),
+    [
+        (np.array([]), "non-empty one-dimensional"),
+        (np.array([0.1, np.inf]), "must be finite"),
+    ],
+)
+def test_doublet_threshold_validates_the_cell_scores(cells, message):
+    with pytest.raises(ValueError, match=message):
+        doublets.doublet_threshold(np.array([0.1, 0.2, 0.3]), cell_scores=cells)
 
 
 # The qc.doublets defaults of the settings that doublet_settings checks.
@@ -1009,7 +1086,7 @@ def test_doublet_artifact_of_an_earlier_revision_stays_readable_and_is_recompute
         for entry in operation_revisions.OPERATION_REVISIONS["run_doublet_detection"]
         if entry.revision > earlier
     )
-    assert changes.endswith("lie on either side of the histogram minimum")
+    assert changes.endswith("estimates a doublet rate of at most 50%")
     (line,) = [message for message in messages if "Recomputing" in message]
     assert line == (
         f"Recomputing run_doublet_detection: artifact {legacy.artifact_id[:12]} "
@@ -2409,7 +2486,7 @@ def test_a_threshold_that_calls_almost_no_doublet_warns_when_computed_and_reused
     monkeypatch.setattr(
         doublets,
         "doublet_threshold",
-        lambda values: (float(np.max(values)), "minimum"),
+        lambda values, *, cell_scores: (float(np.max(values)), "minimum"),
     )
     cases = (
         ({"sample_column": "sample", "random_seed": 1}, "In each of 2 samples"),
@@ -2678,34 +2755,52 @@ def test_atac_doublets_rank_planted_doublets_of_distinct_types_above_singlets(
     assert np.mean(calls[truth == 0]) <= 0.02
 
 
-@pytest.mark.slow  # A run of the 1k PBMC fixture and of a planted copy.
-def test_rna_doublets_call_planted_doublets_where_the_minimum_called_none(tmp_path):
-    # The fixture's analysis cells and their clusters, from a default run.
-    source = tmp_path / "source.zarr"
+@pytest.fixture(scope="module")
+def pbmc_analysis_cells(tmp_path_factory) -> SimpleNamespace:
+    """The counts and clusters of the 1k PBMC fixture's cells after a default run."""
+    source = tmp_path_factory.mktemp("pbmc") / "source.zarr"
     with tarfile.open(full_path("1K_pbmc_citeseq.zarr.tar.gz")) as archive:
         archive.extractall(source, filter="data")
     store = DataStore(str(source), default_assay="RNA")
     run = store.pipeline.rna(label="cells", doublets=False, umap=False, markers=False)
     rows = np.flatnonzero(run.cells.fetch_all("I"))
-    labels = np.asarray(run.cells.fetch("clusters"))
-    counts = store.RNA.rawData[rows, :].compute(nthreads=1, msg="Reading counts")
+    return SimpleNamespace(
+        counts=store.RNA.rawData[rows, :].compute(nthreads=1, msg="Reading counts"),
+        labels=np.asarray(run.cells.fetch("clusters")),
+        feature_ids=list(store.RNA.feats.fetch_all("ids")),
+        feature_names=list(store.RNA.feats.fetch_all("names")),
+    )
+
+
+def _pbmc_store(
+    cells: SimpleNamespace, counts: np.ndarray, location: Path
+) -> DataStore:
+    write_count_store(
+        str(location),
+        {"RNA": counts},
+        "uint32",
+        feature_ids={"RNA": cells.feature_ids},
+        feature_names={"RNA": cells.feature_names},
+    )
+    return DataStore(str(location), min_features_per_cell=0)
+
+
+@pytest.mark.slow  # A run of the 1k PBMC fixture and of a planted copy.
+def test_rna_doublets_call_planted_doublets_where_the_minimum_called_none(
+    pbmc_analysis_cells, tmp_path
+):
+    counts, labels = pbmc_analysis_cells.counts, pbmc_analysis_cells.labels
     # 60 doublets of two cells of different clusters: 30 hold both cells'
     # counts and 30 half of them, as many as a singlet holds.
     rng = np.random.default_rng(11)
-    first = rng.choice(len(rows), 60, replace=False)
+    first = rng.choice(len(labels), 60, replace=False)
     second = [rng.choice(np.flatnonzero(labels != labels[cell])) for cell in first]
     summed = counts[first].astype(np.int64) + counts[second]
     planted = np.vstack([summed[:30], rng.binomial(summed[30:], 0.5)])
-    truth = np.repeat([0, 1, 2], [len(rows), 30, 30])
-    location = tmp_path / "planted.zarr"
-    write_count_store(
-        str(location),
-        {"RNA": np.vstack([counts, planted])},
-        "uint32",
-        feature_ids={"RNA": list(store.RNA.feats.fetch_all("ids"))},
-        feature_names={"RNA": list(store.RNA.feats.fetch_all("names"))},
+    truth = np.repeat([0, 1, 2], [len(labels), 30, 30])
+    planted_store = _pbmc_store(
+        pbmc_analysis_cells, np.vstack([counts, planted]), tmp_path / "planted.zarr"
     )
-    planted_store = DataStore(str(location), min_features_per_cell=0)
 
     planted_run = planted_store.pipeline.rna(
         label="planted", filtering=False, umap=False, markers=False
@@ -2718,6 +2813,52 @@ def test_rna_doublets_call_planted_doublets_where_the_minimum_called_none(tmp_pa
     (sample,) = _payload(planted_store, planted_run["doublets"]).attrs["samples"]
     assert sample["thresholdMethod"] == "otsu"
     assert sample["detectableDoubletFraction"] > 0.2
+    assert sample["estimatedDoubletRate"] < 0.5
     calls = np.asarray(planted_run.cells.fetch("predicted_doublet"), dtype=bool)
     assert np.count_nonzero(calls[truth > 0]) >= 15
     assert np.mean(calls[truth == 0]) <= 0.05
+
+
+@pytest.mark.slow  # A run of the 1k PBMC fixture and of one of its clusters.
+def test_rna_doublets_of_one_cluster_call_no_cell_and_warn(
+    pbmc_analysis_cells, tmp_path
+):
+    # The cells of the fixture's largest cluster, alone: their simulated
+    # doublets look like the cells, and their scores have one mode.
+    values, sizes = np.unique(pbmc_analysis_cells.labels, return_counts=True)
+    cluster = pbmc_analysis_cells.labels == values[np.argmax(sizes)]
+    store = _pbmc_store(
+        pbmc_analysis_cells,
+        pbmc_analysis_cells.counts[cluster],
+        tmp_path / "cluster.zarr",
+    )
+
+    run = store.pipeline.rna(
+        label="cluster", filtering=False, umap=False, markers=False
+    )
+
+    payload = _payload(store, run["doublets"])
+    (sample,) = payload.attrs["samples"]
+    simulated, scores = payload["simulated_scores"][:], payload["values"][:]
+    # One or two simulated doublets above the rest form the second mode, and
+    # the minimum before them leaves fewer than 5% of the doublets above it.
+    # Otsu's threshold splits the one mode, cells and doublets alike: a
+    # doublet rate above 50%, which no droplet experiment holds.
+    otsu = doublets.otsu_threshold(simulated)
+    assert np.mean(scores > otsu) / np.mean(simulated > otsu) > 0.5
+    assert np.mean(scores > otsu) > 0.2
+    # The sample keeps the minimum, which calls no cell, and the stage warns
+    # of it.
+    assert sample["thresholdMethod"] == "minimum"
+    assert sample["detectableDoubletFraction"] < 0.01
+    assert sample["predictedDoublets"] == 0
+    assert not np.asarray(run.cells.fetch("predicted_doublet"), dtype=bool).any()
+    (stage,) = [
+        record
+        for record in load_pipeline_stage_records(store.zw, run.run_id)
+        if record.stage == "doublets"
+    ]
+    assert stage.warnings == (
+        f"In 1 sample {_FEW_DETECTABLE}. The scores still rank the cells; pass "
+        "threshold to call those that score above it",
+    )
