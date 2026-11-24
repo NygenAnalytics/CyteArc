@@ -1918,15 +1918,14 @@ def _worst_blas_profiles(case: str) -> tuple[np.ndarray, int, str]:
         profiles[0] = 0.0
         return profiles, 11, "l2"
     if case == "long":
-        # One profile of 2**20 in its first bin and 120 orderings of the same
-        # values in the other bins, all as far from it: their sums round
-        # apart, BLAS's distances tie, and the rounding of its own squared
-        # norm moves them all at once, which only its own share of the bound
-        # covers.
+        # One profile of 2**20 in its first bin, and 120 in the other bins
+        # whose squared norms are all 16: from the long profile, their sums
+        # round apart by up to 2.7e-3, each square rounded beside 2**40, while
+        # BLAS's distances tie at 2**40 + 16, rounded once. Only the long
+        # profile's own share of the bound covers that rounding.
         others = np.zeros((120, 50))
-        values = rng.random(49)
-        for row in others:
-            row[1:] = rng.permutation(values)
+        others[:, 1:] = rng.random((120, 49))
+        others *= np.sqrt(16.0 / np.einsum("ij,ij->i", others, others))[:, None]
         long = np.zeros((1, 50))
         long[0, 0] = 2.0**20
         return np.vstack([long, others]), 11, "l2"
