@@ -227,6 +227,25 @@ def write_metadata_column(
     )
 
 
+def metadata_column_write_bytes(n_rows: int, itemsize: int, *, missing: bool) -> int:
+    """Return the most that :func:`write_metadata_column` holds beside a column and its missing mask.
+
+    Zarr encodes about a copy of the column as it writes it. A column with
+    missing rows is copied first with a placeholder in each, text as its
+    present values and then as the whole column, which Zarr encodes in
+    place of the column. Zarr's objects of the new array and of its writes,
+    tens of kilobytes, are left out, as the charges of the runtime's own
+    objects are.
+
+    Args:
+        n_rows: The rows of the column.
+        itemsize: The bytes of one value, such as 4 a character of text.
+        missing: Whether some rows are missing, as a text column's blank
+            values may be.
+    """
+    return (2 if missing else 1) * int(n_rows) * int(itemsize)
+
+
 def write_categorical_column(
     group: zarr.Group,
     name: str,

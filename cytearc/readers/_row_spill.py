@@ -25,6 +25,7 @@ from ._sparse import ROW_BYTES, SparseRowStore, encoded_entry_bytes
 
 __all__ = [
     "RowSpillPlan",
+    "admitted_spill_plan",
     "checked_destinations",
     "dense_sample_rows",
     "dense_spill_estimate",
@@ -47,6 +48,9 @@ _SPILL_PROCESS_BUFFER_BYTES = 64 << 20
 # Buckets of shuffled rows are sized to read in this much, or in a
 # thirty-second of the budget when that is less, and split beyond twice it.
 _SPILL_READ_BYTES = 256 << 20
+# Reading one bucket may hold a quarter of the budget, which must hold the
+# longest row, since a row arrives whole in one bucket.
+_SPILL_BUCKET_SHARE = 4
 # The entries of the first rows whose encoding estimates the spill's disk use.
 _SPILL_SAMPLE_ENTRIES = 1 << 20
 
@@ -213,7 +217,17 @@ class RowSpillPlan:
 
     def bucket_bytes(self) -> int:
         """Return the most that reading one bucket may hold: a quarter of the budget."""
-        return max(2 * self.readBytes, self.maxBytes // 4)
+        return max(2 * self.readBytes, self.maxBytes // _SPILL_BUCKET_SHARE)
+
+    def bucket_least_bytes(self) -> int:
+        """Return the least budget whose buckets read the longest row, which arrives whole in one bucket.
+
+        A store refuses, when it is finalized, a row whose read needs more
+        than :meth:`bucket_bytes`; a row of no values reads as one entry.
+        """
+        return _SPILL_BUCKET_SHARE * SparseRowStore.whole_row_read_bytes(
+            max(1, self.longest), self.dtype.itemsize
+        )
 
     def new_store(
         self,
@@ -281,7 +295,9 @@ def row_spill_plan(
         longest: The most values of one row.
         maxBytes: Memory available to the spill.
         least: The least budget of the spill under the plan; by default, a
-            scan that spills the longest row in one process.
+            scan that spills the longest row in one process. A budget whose
+            buckets cannot read the longest row is refused too, at
+            :meth:`RowSpillPlan.bucket_least_bytes`.
 
     Raises:
         MemoryBudgetError: If ``maxBytes`` holds less than the least budget.
@@ -304,7 +320,10 @@ def row_spill_plan(
         longest=int(longest),
         maxBytes=int(maxBytes),
     )
-    needed = plan.least_bytes() if least is None else int(least(plan))
+    needed = max(
+        plan.least_bytes() if least is None else int(least(plan)),
+        plan.bucket_least_bytes(),
+    )
     if int(maxBytes) < needed:
         raise MemoryBudgetError(
             "Shuffling cells exceeds the memory limit. Reading the rows and "
@@ -338,6 +357,33 @@ def least_admitted_budget(
         else:
             high = middle
     return high
+
+
+def admitted_spill_plan(
+    planned: Callable[[int], RowSpillPlan], maxBytes: int
+) -> RowSpillPlan:
+    """Return the plan of a spill within ``maxBytes``, refusing a budget that does not admit it.
+
+    ``planned`` returns the plan of a budget, as :func:`row_spill_plan` does.
+    Its caller restates a refusal beside what it holds besides the spill.
+
+    Raises:
+        MemoryBudgetError: If ``maxBytes`` does not admit the spill, naming
+            the least budget that does, which :func:`least_admitted_budget`
+            finds: a larger budget sizes larger buckets, which need less
+            beside them.
+    """
+    try:
+        return planned(int(maxBytes))
+    except MemoryBudgetError as error:
+        needed = least_admitted_budget(planned, error)
+        raise MemoryBudgetError(
+            "Shuffling cells exceeds the memory limit. Reading the rows and "
+            f"sending them to their buckets needs at least {needed} bytes.",
+            needed_bytes=needed,
+            budget_bytes=int(maxBytes),
+            item=error.item,
+        ) from error
 
 
 def row_spill_consumer(

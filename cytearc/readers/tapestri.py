@@ -42,7 +42,6 @@ pipeline's documented layout.
 import hashlib
 import os
 import re
-import sys
 from collections.abc import Callable, Generator, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -54,6 +53,7 @@ import pandas as pd
 from scipy.sparse import coo_matrix, csr_matrix
 
 from ..utils.arrays import cumulative_nnz, max_window_nnz
+from ..utils.memory_budget import held_array_bytes
 from ..utils.count_values import (
     CountValueRange,
     dense_count_ranges,
@@ -363,6 +363,12 @@ class TapestriReader(CrReader):
                     f"assays/{present[0][0]}, or in another order"
                 )
         self._cells = cells
+        # The cells' samples, barcodes and IDs, measured once for every step
+        # of an import that charges them.
+        self._cellTextBytes = sum(
+            held_array_bytes(values)
+            for values in (cells.samples, cells.barcodes, cells.ids)
+        )
         self._layers = [
             _layer(handle, name, "read_counts", self.path) for name, _type in present
         ]
@@ -591,15 +597,9 @@ class TapestriReader(CrReader):
         shuffled = (
             0 if self._shuffledRows is None else self._shuffledRows.resident_bytes
         )
-        return shuffled + int(
-            sum(
-                sum(map(sys.getsizeof, values.tolist())) + 8 * len(values)
-                for values in (
-                    self._cells.samples,
-                    self._cells.barcodes,
-                    self._cells.ids,
-                )
-            )
+        return (
+            shuffled
+            + self._cellTextBytes
             + (self.nCells + 1) * np.dtype(np.int64).itemsize
         )
 

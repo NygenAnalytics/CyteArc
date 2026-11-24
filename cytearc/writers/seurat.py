@@ -11,7 +11,7 @@ from scipy.sparse import coo_matrix, csr_matrix, issparse
 
 from ..metadata.membership import membership_attributes
 from ..readers import SeuratReader
-from ..readers._row_spill import RowSpillPlan, row_spill_plan
+from ..readers._row_spill import RowSpillPlan, admitted_spill_plan, row_spill_plan
 from ..readers._sparse import SparseRowStore
 from ..readers.seurat import (
     SeuratAssay,
@@ -1485,10 +1485,35 @@ class SeuratToZarr:
                     scan = rows * n_features * (itemsize + 2)
                 return held + scan
 
+            def sent_bytes(spill: RowSpillPlan, rows: int) -> int:
+                return read_bytes(rows) + spill.batch_bytes(read_peaks(rows)[1])
+
+            def one_cell(spill: RowSpillPlan) -> int:
+                # A budget must read one cell and send it to its bucket. One
+                # that reads and sends every cell at once does, which spares
+                # an estimate of each cell's read.
+                if sent_bytes(spill, n_cells) <= spill.maxBytes:
+                    return 0
+                return sent_bytes(spill, 1)
+
+            def planned(budget: int) -> RowSpillPlan:
+                return self._row_spill_plan(source, budget, one_cell)
+
             # A shuffled import also sends each block to its rows' buckets.
             plan = None
             if self._destinations is not None:
-                plan = self._row_spill_plan(source, available)
+                try:
+                    plan = admitted_spill_plan(planned, available)
+                except MemoryBudgetError as error:
+                    needed = self._source_resident_bytes() + error.needed_bytes
+                    raise MemoryBudgetError(
+                        f"Assay {assay.name!r} counts cannot be read and sent to "
+                        "their shuffled rows one cell at a time within mem_budget. "
+                        f"It needs at least {needed} bytes.",
+                        needed_bytes=needed,
+                        budget_bytes=int(self.resources.memoryBytes),
+                        item=f"shuffling one cell of assay {assay.name!r}",
+                    ) from error
 
             def held_bytes(rows: int) -> int:
                 held = read_bytes(rows)
@@ -1500,24 +1525,17 @@ class SeuratToZarr:
                 return held_bytes(rows) <= available
 
             rows = affordable_width(fits, n_cells)
+            # A shuffled import's plan admits one cell, so only an import in
+            # the source's order can fail to read one.
             if rows < 1:
                 needed = self._source_resident_bytes() + held_bytes(1)
-                if plan is None:
-                    raise MemoryBudgetError(
-                        f"Assay {assay.name!r} counts cannot be read one cell at "
-                        "a time within mem_budget. It needs at least "
-                        f"{needed} bytes.",
-                        needed_bytes=needed,
-                        budget_bytes=int(self.resources.memoryBytes),
-                        item=f"reading one cell of assay {assay.name!r}",
-                    )
                 raise MemoryBudgetError(
-                    f"Assay {assay.name!r} counts cannot be read and sent to their "
-                    "shuffled rows one cell at a time within mem_budget. It needs "
-                    f"at least {needed} bytes.",
+                    f"Assay {assay.name!r} counts cannot be read one cell at "
+                    "a time within mem_budget. It needs at least "
+                    f"{needed} bytes.",
                     needed_bytes=needed,
                     budget_bytes=int(self.resources.memoryBytes),
-                    item=f"shuffling one cell of assay {assay.name!r}",
+                    item=f"reading one cell of assay {assay.name!r}",
                 )
 
             def scan(start: int, stop: int, raw: Any) -> None:
@@ -1574,12 +1592,18 @@ class SeuratToZarr:
             self.reader._release_cached_rows(assay.name)
         return storage_dtype
 
-    def _row_spill_plan(self, source: Any, available: int) -> RowSpillPlan:
+    def _row_spill_plan(
+        self,
+        source: Any,
+        available: int,
+        least: Callable[[RowSpillPlan], int],
+    ) -> RowSpillPlan:
         """Plan the row bucket store of an assay's shuffled cells within ``available``.
 
         Buckets are sized from the values that the source estimates it
-        stores, or for dense cells; whether one cell fits beside its read
-        is the scan's check.
+        stores, or for dense cells. The plan refuses a budget below
+        ``least(plan)``, what reading one cell and sending it to its bucket
+        holds, or whose buckets cannot read the longest cell.
         """
         assert self._destinations is not None
         n_features, n_cells = (int(value) for value in source.shape)
@@ -1595,7 +1619,7 @@ class SeuratToZarr:
             entries=entries,
             longest=n_features,
             maxBytes=available,
-            least=lambda _plan: 0,
+            least=least,
         )
 
     def _spill_cells(

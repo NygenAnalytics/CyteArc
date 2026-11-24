@@ -755,21 +755,80 @@ def test_a_budget_without_room_for_the_spill_is_refused_with_the_bytes_it_needs(
     assert str(shuffled).startswith(
         "Assay 'RNA' counts cannot be read and sent to their shuffled rows"
     )
-    # Beside reading one cell, the shuffle holds the order and its inverse,
-    # 16 bytes per cell; the store's row counts, 32 bytes per cell and one;
-    # the writer's count and mark of each cell and 25 bytes per bucket and
-    # one, of a cell each at so small a budget; and what sending the cell of
-    # the most stored values holds, 96 bytes each.
-    values = int(np.count_nonzero(_gene_counts(n_cells), axis=0).max())
-    spill = (
-        16 * n_cells
-        + 32 * (n_cells + 1)
-        + 9 * n_cells
-        + 25 * (n_cells + 1)
-        + 96 * values
+    # Each bucket of the shuffled cells reads in a quarter of what the import
+    # leaves, and holds the longest cell whole: every gene of RNA, float64
+    # values of 3 * 8 + 32 bytes each as they are read, and 112 bytes for the
+    # cell's piece and pointers. Beside them, the import holds ADT's source,
+    # whose protein and cell names count their UTF-8 bytes and 8 more and
+    # whose layer maps each protein and member cell by an int64 index; RNA's
+    # prefix sums of each cell's stored values, 8 bytes a cell and one; and
+    # the order and its inverse, 16 bytes a cell.
+    bucket = 4 * (len(_GENES) * (3 * 8 + 32) + 112)
+    names = [*_PROTEINS, *_cells(n_cells)]
+    adt = (
+        sum(len(name.encode()) + 8 for name in names)
+        + 8 * len(_PROTEINS)
+        + 8 * len(_members(n_cells))
     )
-    assert shuffled.needed_bytes - plain.needed_bytes == spill
+    held = adt + 8 * (n_cells + 1) + 16 * n_cells
+    assert shuffled.needed_bytes == held + bucket
     assert not (tmp_path / "refused.zarr").exists()
+    assert not list(tmp_path.glob("cytearc-sparse-*"))
+
+
+@pytest.mark.parametrize("n_cells", [40, 3000])
+def test_a_shuffled_import_names_one_budget_for_a_bucket_and_one_cell(
+    tmp_path, n_cells
+) -> None:
+    source = _write_object(tmp_path / "object.rds", n_cells=n_cells)
+    attempts = iter(range(100))
+
+    def refusal(budget: int) -> MemoryBudgetError | None:
+        with SeuratReader(source, temp_dir=tmp_path) as reader:
+            try:
+                SeuratToZarr(
+                    reader,
+                    str(tmp_path / f"store-{next(attempts)}.zarr"),
+                    mem_budget=budget,
+                    nthreads=1,
+                    shuffle_cells=True,
+                )
+            except MemoryBudgetError as error:
+                return error
+        return None
+
+    # The refusals of the earlier steps lead from 900 bytes to the shuffle's.
+    refused = refusal(900)
+    while refused is not None and refused.item != "shuffling one cell of assay 'RNA'":
+        refused = refusal(refused.needed_bytes)
+    assert refused is not None
+    named = refused.needed_bytes
+    # Beside ADT's source, RNA's prefix sums and the order and its inverse, as
+    # the three-cell import holds them, a bucket reads the longest cell: every
+    # gene of RNA, float64 values of 3 * 8 + 32 bytes each as they are read,
+    # and 112 bytes for the cell's piece and pointers. Forty cells and more
+    # need more to read one cell and send it, and the first refusal names
+    # that budget: the least, though a larger budget sizes larger buckets,
+    # which need less beside them.
+    names = [*_PROTEINS, *_cells(n_cells)]
+    adt = (
+        sum(len(name.encode()) + 8 for name in names)
+        + 8 * len(_PROTEINS)
+        + 8 * len(_members(n_cells))
+    )
+    held = adt + 8 * (n_cells + 1) + 16 * n_cells
+    assert named > held + 4 * (len(_GENES) * (3 * 8 + 32) + 112)
+    # With the budget it names, the import reads and spills one cell, and a
+    # later step refuses for itself; one byte less is refused again, naming
+    # the same budget.
+    later = refusal(named)
+    assert later is None or "one cell of assay" not in later.item
+    below = refusal(named - 1)
+    assert below is not None
+    assert (below.item, below.needed_bytes) == (
+        "shuffling one cell of assay 'RNA'",
+        named,
+    )
     assert not list(tmp_path.glob("cytearc-sparse-*"))
 
 

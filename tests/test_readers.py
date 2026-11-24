@@ -1706,6 +1706,38 @@ def test_csv_reader_resolves_dtypes_from_every_chunk(tmp_path):
     assert reader.cellDataDtypes == [np.dtype(np.float64), np.dtype(object)]
 
 
+def test_csv_reader_records_the_widest_text_of_each_cell_column_in_every_chunk(
+    tmp_path,
+):
+    from cytearc.readers import CSVReader
+
+    path = tmp_path / "counts.csv"
+    # In chunks of two rows, code and depth hold integers in the first and
+    # text in the second, which makes them text columns; flag holds booleans,
+    # score floats, and label text with a blank.
+    path.write_text(
+        "cell,g1,code,depth,flag,score,label\n"
+        "c1,1,-12345,3,True,0.5,a\n"
+        "c2,0,7,1234567,False,1.25,\n"
+        "c3,2,abc,x,True,2.5,abcd\n"
+    )
+
+    reader = CSVReader(
+        str(path),
+        id_column=0,
+        batch_size=2,
+        cell_data_cols=["code", "depth", "flag", "score", "label"],
+    )
+
+    text, number = np.dtype(object), np.dtype(np.float64)
+    assert reader.cellDataDtypes == [text, text, np.dtype(bool), number, text]
+    # A text column writes each value as str gives it: -12345 takes 6
+    # characters, beside abc's 3, and 1234567 takes 7. A boolean takes at
+    # most 5, as False does, a float64 at most 24, as -2.2250738585072014e-308
+    # does, and the label abcd 4, its blank left out.
+    assert reader.cellDataWidths == [6, 7, 5, 24, 4]
+
+
 @pytest.mark.parametrize(
     ("row", "message"),
     [("c3,,7", "missing or non-finite"), ("c3,-1,7", "must not be negative")],

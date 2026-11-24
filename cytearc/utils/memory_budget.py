@@ -14,6 +14,7 @@ build: Python strings, fixed-width text, object arrays, sorts and hash
 tables.
 """
 
+import sys
 from typing import Any
 
 import numpy as np
@@ -23,6 +24,7 @@ __all__ = [
     "MemoryLedger",
     "fixed_text_bytes",
     "hash_table_bytes",
+    "held_array_bytes",
     "memory_refusal",
     "object_array_bytes",
     "python_text_bytes",
@@ -285,6 +287,25 @@ def fixed_text_bytes(n_values: int, width: int) -> int:
 def object_array_bytes(n_values: int) -> int:
     """Return the bytes of an object array's references to ``n_values`` values, beside the values."""
     return 8 * int(n_values)
+
+
+def held_array_bytes(values: np.ndarray) -> int:
+    """Return the bytes of an array, with those of the objects that an object array holds.
+
+    Each object counts once, as ``sys.getsizeof`` measures it, however many
+    elements refer to it, as the rows of a column share the strings that
+    pandas reads once. A reader measures the text it keeps once, rather
+    than at every step that charges it.
+    """
+    held = int(values.nbytes)
+    if values.dtype.kind == "O":
+        flat = values.ravel()
+        _ids, first = np.unique(
+            np.fromiter(map(id, flat), dtype=np.intp, count=flat.size),
+            return_index=True,
+        )
+        held += sum(map(sys.getsizeof, flat[first]))
+    return held
 
 
 def sort_bytes(

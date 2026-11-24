@@ -44,7 +44,14 @@ from ..utils.count_values import (
 )
 from ..utils.memory_budget import MemoryBudgetError
 from ..utils.arguments import bool_argument
-from ._row_spill import checked_destinations, row_spill_plan, sample_rows, spill_rows
+from ._row_spill import (
+    RowSpillPlan,
+    admitted_spill_plan,
+    checked_destinations,
+    row_spill_plan,
+    sample_rows,
+    spill_rows,
+)
 from ._sparse import SparseRowStore, encoded_entry_bytes
 
 # What refusals call the values of each dataset of a 10x HDF5 file, by its
@@ -141,7 +148,9 @@ class CrReader(ABC):
         holds.
 
         Args:
-            maxBytes: Memory available to the scan.
+            maxBytes: Memory available to the scan, beside the arrays that
+                ``_sparse_import_resident_bytes`` reports, which an import
+                charges itself.
             featureGroups: Group, numbered from zero, of each feature, such as
                 the assay that stores it. None puts every feature in one
                 group.
@@ -200,19 +209,23 @@ class CrReader(ABC):
         Raises:
             ValueError: If ``destinationRows`` is not a permutation of the cells.
             MemoryBudgetError: If ``maxBytes`` cannot hold the spill of the
-                longest cell.
+                longest cell, naming the least budget that holds it.
             OSError: If the temporary disk lacks room for the rows.
         """
         self._release_shuffled_rows()
         destinations = checked_destinations(destinationRows, self.nCells)
-        plan = row_spill_plan(
-            destinations,
-            (self.nCells, self.nFeatures),
-            self.matrix_dtype,
-            entries=entries,
-            longest=longest,
-            maxBytes=int(maxBytes),
-        )
+
+        def planned(budget: int) -> RowSpillPlan:
+            return row_spill_plan(
+                destinations,
+                (self.nCells, self.nFeatures),
+                self.matrix_dtype,
+                entries=entries,
+                longest=longest,
+                maxBytes=budget,
+            )
+
+        plan = admitted_spill_plan(planned, maxBytes)
         share = plan.maxBytes - plan.ownerBytes
         store, result = spill_rows(
             plan,

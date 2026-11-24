@@ -214,27 +214,36 @@ class CrToZarr:
             # rows as it reads its cells for the shuffle, beside its arrays and
             # the order of the cells and its inverse.
             self._admit_reader_preparation(self._reader_resident_bytes() + held)
-        else:
-            # Another import of the reader may hold its shuffled cells, which
-            # this import, in the reader's order, never reads.
-            self._release_other_shuffled_cells()
+        # Another import of the reader may hold its shuffled cells, which this
+        # import never reads: in the reader's order it reads the file, and a
+        # shuffle sends the cells to its own.
+        self._release_other_shuffled_cells()
+        # The scan and its spill run beside the reader's arrays, and a
+        # shuffled import's order of the cells and its inverse.
+        arrays = self._reader_resident_bytes()
         # The cells on local disk before the scan; cells there after a
         # failure are this import's, which no later import may read.
         rows_before = getattr(self.cr, "_shuffledRows", None)
         try:
             try:
                 scanned = self.cr.count_value_ranges(
-                    self.resources.memoryBytes - held, groups, **scan_options
+                    self.resources.memoryBytes - held - arrays,
+                    groups,
+                    **scan_options,
                 )
             except MemoryBudgetError as error:
-                if not held:
+                if not held + arrays:
                     raise
-                # The scan and its spill run beside the order of the cells and
-                # its inverse, so the budget that passes them holds those too.
+                # The budget that passes the scan holds those too.
+                beside = []
+                if held:
+                    beside.append(f"the {held} bytes of its cell order")
+                if arrays:
+                    beside.append(f"the {arrays} bytes of the reader's arrays")
                 raise memory_refusal(
                     f"Importing the counts of {self.cr.nCells} cells",
-                    f"{error.item} beside the {held} bytes of its cell order",
-                    held + error.needed_bytes,
+                    f"{error.item} beside {' and '.join(beside)}",
+                    held + arrays + error.needed_bytes,
                     int(self.resources.memoryBytes),
                 ) from error
             value_ranges = dict(zip(ranges, scanned, strict=True))
@@ -365,6 +374,20 @@ class CrToZarr:
             + (0 if self._cellOrder is None else int(self._cellOrder.nbytes))
         )
 
+    def _counts_t_resident_bytes(self) -> int:
+        """Return what the import holds beside its ``countsT`` write.
+
+        The reader's arrays and a shuffled import's order of the cells stay
+        held; the counts write releases the shuffled cells and the count
+        summaries first.
+        """
+        store = self._shuffledStore
+        return int(
+            self._reader_resident_bytes()
+            - (0 if store is None else int(store.resident_bytes))
+            + (0 if self._cellOrder is None else int(self._cellOrder.nbytes))
+        )
+
     def _admit_reader_preparation(self, held: int) -> None:
         """Refuse a budget that cannot hold the reader's sorting of its entries into rows.
 
@@ -465,6 +488,7 @@ class CrToZarr:
                 alignedBatches=True,
             ),
             requested=requested,
+            countsTResidentBytes=self._counts_t_resident_bytes(),
         )
 
     def _write_reader_metadata(
@@ -755,8 +779,9 @@ class CrToZarr:
                 f"{sum(buffer.nColumns for buffer in buffers.values())} features "
                 f"from {self.source_name} to {len(stores)} assay(s)"
             )
-            for assay, summary in summaries.items():
-                finalize_counts(stores[assay], summary=summary)
+            # countsT runs beside none of the count summaries.
+            for assay in tuple(summaries):
+                finalize_counts(stores[assay], summary=summaries.pop(assay))
             if self.shuffleCells:
                 # The shuffled cells were read once; countsT reads counts.
                 self.cr._release_shuffled_rows()
@@ -771,6 +796,7 @@ class CrToZarr:
                 resources=self.resources,
                 profile=self.profile,
                 io=self.io,
+                resident_bytes=self._counts_t_resident_bytes(),
             )
         finally:
             if callable(release):

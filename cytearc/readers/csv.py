@@ -101,6 +101,31 @@ def _metadata_dtype(series: pd.Series) -> np.dtype[Any]:
     return resolved
 
 
+# The most characters of a float64's text, such as -2.2250738585072014e-308.
+_FLOAT_TEXT_WIDTH = 24
+
+
+def _text_width(series: pd.Series) -> int:
+    """Return the most characters of a chunk's values as the text of a text column, missing values left out.
+
+    A text column, one whose chunks hold text, writes each value as
+    ``str`` gives it. Numbers are measured without converting each:
+    integers by their least and greatest, floats at the most characters of
+    a float64's text, and booleans at those of ``False``.
+    """
+    present = series[series.notna()]
+    if present.empty:
+        return 0
+    kind = present.dtype.kind
+    if kind in "iu":
+        return max(len(str(present.min())), len(str(present.max())))
+    if kind == "f":
+        return _FLOAT_TEXT_WIDTH
+    if kind == "b":
+        return len(str(False))
+    return max(map(len, map(str, present.to_numpy(dtype=object))))
+
+
 def _merged_dtype(current: np.dtype[Any] | None, dtype: np.dtype[Any]) -> np.dtype[Any]:
     if current is None:
         return dtype
@@ -346,6 +371,9 @@ class CSVReader:
                     their storage dtype.
         cellDataDtypes: Dtype of each ``cell_data_cols`` column across every
                         row; ``object`` marks a text column.
+        cellDataWidths: Characters of the widest value of each
+                        ``cell_data_cols`` column as text, missing values
+                        left out, which an import holds a text column at.
         tempDir: Parent directory of the temporary files of an import that
                  shuffles cells, or None for the system temporary directory.
     """
@@ -478,6 +506,7 @@ class CSVReader:
             self.cellDataIdx,
             self.countDtype,
             self.countRange,
+            self.cellDataWidths,
         ) = self._read_text(lambda: self._consistency_check(converter_keys, id_names))
 
     def _compression(self) -> str | None:
@@ -661,11 +690,14 @@ class CSVReader:
         list[int] | None,
         np.dtype,
         CountValueRange,
+        list[int] | None,
     ]:
         """Stream every row once to fix the shape, names, dtypes, and count range.
 
         ``converter_keys`` are the keys of the caller's converters, and
-        ``id_names`` the names that the caller gives the ID column.
+        ``id_names`` the names that the caller gives the ID column. The pass
+        also finds the characters of the widest value of each cell data
+        column as text, which an import of a text column holds.
         """
         stream = self._get_streamer()
         n_cells = 0
@@ -673,6 +705,7 @@ class CSVReader:
         feature_ids: np.ndarray | None = None
         keep_cols: list[int] | None = None
         cell_data_dtypes: list[np.dtype] | None = None
+        cell_data_widths: list[int] | None = None
         cell_data_idx: list[int] | None = None
         count_dtype: np.dtype | None = None
         count_range = CountValueRange()
@@ -717,6 +750,19 @@ class CSVReader:
                         )
                     ]
                 )
+                chunk_widths = [
+                    _text_width(df.iloc[:, index]) for index in cell_data_idx
+                ]
+                cell_data_widths = (
+                    chunk_widths
+                    if cell_data_widths is None
+                    else [
+                        max(current, width)
+                        for current, width in zip(
+                            cell_data_widths, chunk_widths, strict=True
+                        )
+                    ]
+                )
         if count_dtype is None:
             raise ValueError("CSV file contains no data rows")
         cell_ids: np.ndarray | None = None
@@ -736,6 +782,7 @@ class CSVReader:
             cell_data_idx,
             count_dtype,
             count_range,
+            cell_data_widths,
         )
 
     def _pop_id_column(self, frame: pd.DataFrame) -> pd.Series | None:

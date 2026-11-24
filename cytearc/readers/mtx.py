@@ -23,7 +23,7 @@ from ..utils.count_values import (
     scan_window_values,
 )
 from ..utils.files import is_gzip, open_text
-from ..utils.memory_budget import MemoryBudgetError
+from ..utils.memory_budget import held_array_bytes
 from ._matrix_market import (
     matrix_market_entries,
     matrix_market_header,
@@ -33,8 +33,8 @@ from ._matrix_market import (
 from .cellranger import CrReader
 from ._row_spill import (
     RowSpillPlan,
+    admitted_spill_plan,
     checked_destinations,
-    least_admitted_budget,
     row_spill_plan,
     spill_rows,
 )
@@ -767,6 +767,11 @@ class _MtxEngine:
             require_unique_identifiers(
                 self._rawCellNames, _CELL_IDS, place=cell_id_place
             )
+            # The file's barcodes and cell columns, measured once for every
+            # step of an import that charges them.
+            self._rawCellBytes = held_array_bytes(self._rawCellNames) + sum(
+                held_array_bytes(values) for values in self._rawCellColumns.values()
+            )
 
             (
                 row_nnz,
@@ -879,6 +884,11 @@ class _MtxEngine:
         self._cellColumns = {
             name: values[valid] for name, values in self._rawCellColumns.items()
         }
+        # The kept cells' copies refer to the file's text, which is measured
+        # already, and copy its numbers.
+        self._keptCellBytes = int(self._cellNames.nbytes) + sum(
+            int(values.nbytes) for values in self._cellColumns.values()
+        )
 
     def _set_row_counts(self, pointers: np.ndarray, count_maximum: int) -> None:
         """Keep the row pointers and the largest count of the kept cells."""
@@ -1760,9 +1770,19 @@ class _MtxEngine:
             self._archivePaths.clear()
 
     def resident_bytes(self) -> int:
+        """Return the bytes of the arrays that the engine keeps for every import.
+
+        They are the kept cells' indexes, cumulative values and, for an
+        unordered matrix, slots, and the barcodes and cell columns of the file
+        and of the kept cells.
+        """
         slot_bytes = 0 if self._slotPointers is None else self._slotPointers.nbytes
         return int(
-            self.validCellIndexes.nbytes + self._cumulativeRowNnz.nbytes + slot_bytes
+            self.validCellIndexes.nbytes
+            + self._cumulativeRowNnz.nbytes
+            + slot_bytes
+            + self._rawCellBytes
+            + self._keptCellBytes
         )
 
     def max_window_nnz(self, window_rows: int) -> int:
@@ -2151,7 +2171,8 @@ class MtxReader(CrReader):
         that :meth:`consume` would yield them, and each is sent to its
         destination row in temporary files; ``consume`` then yields them
         once in destination order, from those files. The pass holds what one batch of about a
-        million counts holds as it is read and sent, within ``maxBytes``.
+        million counts holds as it is read and sent, within ``maxBytes``,
+        which an import gives beside the reader's arrays.
 
         Raises:
             MemoryBudgetError: With ``destinationRows``, if ``maxBytes``
@@ -2175,8 +2196,7 @@ class MtxReader(CrReader):
         """Read the kept cells in batches and send each to its destination row.
 
         A batch holds about a million counts, or as many cells as the budget
-        holds beside the reader's arrays, the parse buffer and what sending a
-        batch holds.
+        holds beside the parse buffer and what sending a batch holds.
         """
         self._release_shuffled_rows()
         destinations = checked_destinations(destinationRows, self.nCells)
@@ -2184,8 +2204,6 @@ class MtxReader(CrReader):
         lines = engine._importLinesInMem
         pointers = engine._cumulativeRowNnz
         longest = int(np.diff(pointers).max(initial=0))
-        resident = engine.resident_bytes()
-        available = maxBytes - resident
 
         def held(plan: RowSpillPlan, rows: int) -> int:
             return int(plan.batch_bytes(engine.max_window_nnz(rows))) + int(
@@ -2203,22 +2221,7 @@ class MtxReader(CrReader):
                 least=lambda plan: held(plan, 1),
             )
 
-        try:
-            plan = planned(available)
-        except MemoryBudgetError as error:
-            # The spill runs beside the reader's arrays, so the budget that
-            # passes it holds them too, beside the least budget at which the
-            # spill's plan admits it: a larger budget sizes larger buckets,
-            # which need less beside them.
-            needed = resident + least_admitted_budget(planned, error)
-            raise MemoryBudgetError(
-                "Shuffling cells exceeds the memory limit. Beside the "
-                f"{resident} bytes of the reader's arrays, reading the rows and "
-                f"sending them to their buckets needs at least {needed} bytes.",
-                needed_bytes=needed,
-                budget_bytes=int(maxBytes),
-                item=error.item,
-            ) from error
+        plan = admitted_spill_plan(planned, maxBytes)
         # Batches start at the cells of a million counts on average and
         # halve until their widest window fits.
         window = scan_window_values(longest)
@@ -2226,11 +2229,11 @@ class MtxReader(CrReader):
             1, min(self.nCells, window * self.nCells // max(1, plan.entries or 0))
         )
         while rows > 1 and (
-            engine.max_window_nnz(rows) > window or held(plan, rows) > available
+            engine.max_window_nnz(rows) > window or held(plan, rows) > maxBytes
         ):
             rows //= 2
         buffer_bytes = plan.batch_buffer_bytes(
-            available - plan.ownerBytes - engine.producer_staging_bytes(rows, lines),
+            maxBytes - plan.ownerBytes - engine.producer_staging_bytes(rows, lines),
             engine.max_window_nnz(rows),
         )
         batches = engine.consume(rows, lines)
