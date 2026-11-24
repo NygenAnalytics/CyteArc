@@ -1917,6 +1917,19 @@ def _worst_blas_profiles(case: str) -> tuple[np.ndarray, int, str]:
         profiles = 2.0**20 + rng.random((120, 50))
         profiles[0] = 0.0
         return profiles, 11, "l2"
+    if case == "long":
+        # One profile of 2**20 in its first bin and 120 orderings of the same
+        # values in the other bins, all as far from it: their sums round
+        # apart, BLAS's distances tie, and the rounding of its own squared
+        # norm moves them all at once, which only its own share of the bound
+        # covers.
+        others = np.zeros((120, 50))
+        values = rng.random(49)
+        for row in others:
+            row[1:] = rng.permutation(values)
+        long = np.zeros((1, 50))
+        long[0, 0] = 2.0**20
+        return np.vstack([long, others]), 11, "l2"
     # Inner products near 2**-54, where 1 - a.b rounds to 1 or to 1 - u:
     # the nearest profile's product, 2**-54 + 2**-106, lies just above u / 2,
     # and a product moved down by its bound, 1.5 * 2**-106, rounds 1 - a.b
@@ -1932,7 +1945,13 @@ def _worst_blas_profiles(case: str) -> tuple[np.ndarray, int, str]:
 # four times their bound, which the limit's margin of four still covers.
 @pytest.mark.parametrize(
     ("case", "scale"),
-    [("pairs", 1.0), ("offset", 1.0), ("offset", 4.0), ("tiny inner products", 1.0)],
+    [
+        ("pairs", 1.0),
+        ("offset", 1.0),
+        ("offset", 4.0),
+        ("long", 1.0),
+        ("tiny inner products", 1.0),
+    ],
 )
 def test_nearest_feature_profiles_stay_exact_where_blas_rounds_its_worst(
     monkeypatch, case, scale
