@@ -8,6 +8,7 @@ changed on copies under new identities, so the session results stay intact.
 """
 
 import dataclasses
+import warnings
 from typing import Any
 
 import numpy as np
@@ -982,23 +983,32 @@ def test_lineage_aggregation_takes_n_neighbors_under_the_aggregation_key(
         aggregate(lineage_fate, features=mark_hvgs, n_neighbors=True)
 
 
-def test_lineage_aggregation_records_the_distance_and_refuses_search_settings(
+def test_lineage_aggregation_records_the_distance_and_leaves_out_search_settings(
     datastore, lineage_fate, mark_hvgs, lineage_aggregation
 ):
     # Three lineages of 12 bins: each profile has 36 values.
     parameters = inspect_artifact(datastore.zw, lineage_aggregation).parameters
     assert parameters["ann_params"] == {"space": "l2", "dim": 36}
-    before = set(datastore.artifacts.list(kind="lineage_aggregation", from_assay="RNA"))
+    arguments = {"features": mark_hvgs, "n_bins": 12, "n_clusters": 5}
 
-    with pytest.raises(ValueError, match=r"drop 'M', 'ef'\. It takes only 'space'"):
-        datastore.trajectory.lineage_aggregation(
-            lineage_fate,
-            features=mark_hvgs,
-            n_bins=12,
-            n_clusters=5,
-            ann_params={"ef": 40.5, "M": 16},
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        searched = datastore.trajectory.lineage_aggregation(
+            lineage_fate, **arguments, ann_params={"ef": 40.5, "M": 16}
         )
 
+    # The settings have no effect, so the call asks for the stored modules.
+    assert searched == lineage_aggregation
+    ignored = [str(item.message) for item in caught if "no effect" in str(item.message)]
+    assert len(ignored) == 1
+    assert ignored[0].endswith("can be dropped: 'M', 'ef'")
+    before = set(datastore.artifacts.list(kind="lineage_aggregation", from_assay="RNA"))
+    with pytest.raises(
+        ValueError, match="ann_params contains unsupported parameters: 'n_trees'"
+    ):
+        datastore.trajectory.lineage_aggregation(
+            lineage_fate, **arguments, ann_params={"n_trees": 10}
+        )
     after = set(datastore.artifacts.list(kind="lineage_aggregation", from_assay="RNA"))
     assert after == before
 

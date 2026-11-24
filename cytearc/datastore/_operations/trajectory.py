@@ -5795,7 +5795,8 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             ann_params: The distance between profiles, as ``{"space": "l2"}``,
                 the squared Euclidean distance and the default; ``"ip"``,
                 one minus the inner product; or ``"cosine"``, one minus the
-                cosine similarity.
+                cosine similarity. The settings of an approximate search,
+                such as ``ef``, have no effect and are left out with a warning.
             nan_cluster_value: Value assigned to features excluded from clustering.
             **norm_params: Extra keyword arguments forwarded to normalized expression.
 
@@ -6960,7 +6961,8 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             ann_params: The distance between profiles, as ``{"space": "l2"}``,
                 the squared Euclidean distance and the default; ``"ip"``,
                 one minus the inner product; or ``"cosine"``, one minus the
-                cosine similarity.
+                cosine similarity. The settings of an approximate search,
+                such as ``ef``, have no effect and are left out with a warning.
             nan_cluster_value: Value assigned to features excluded from clustering.
             invalidate_cache: Compute a new result even when one matches.
             **norm_params: Extra keyword arguments forwarded to normalized

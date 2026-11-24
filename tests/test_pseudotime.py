@@ -1,4 +1,5 @@
 import re
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -849,11 +850,17 @@ def test_aggregation_provenance_records_resolved_ann_defaults(
     ) == (default)
 
 
+def _ignored_settings_warnings(caught: list) -> list[str]:
+    return [
+        str(item.message) for item in caught if "have no effect" in str(item.message)
+    ]
+
+
 @pytest.mark.parametrize(
     "ann_params",
     [
         {"ef": 40},
-        # The refusal comes before any check of the setting's value.
+        # A setting that has no effect is left out before any check of its value.
         {"ef": 1.5},
         {"M": 16, "space": "l2"},
         {"random_seed": 445, "ef_construction": 100},
@@ -861,26 +868,73 @@ def test_aggregation_provenance_records_resolved_ann_defaults(
         {"max_elements": 10_000},
     ],
 )
-def test_aggregation_refuses_the_settings_of_an_approximate_search(
+def test_aggregation_leaves_out_the_settings_of_an_approximate_search(
     datastore,
     pseudotime_scoring,
     few_features,
     ann_params,
 ):
-    before = _aggregation_artifacts(datastore)
+    arguments = {
+        "features": few_features,
+        "n_clusters": 3,
+        "window_size": 50,
+        "chunk_size": 10,
+    }
+    default = datastore.trajectory.aggregation(pseudotime_scoring, **arguments)
     names = ", ".join(repr(name) for name in sorted(ann_params) if name != "space")
 
-    with pytest.raises(
-        ValueError, match=re.escape(f"drop {names}. It takes only 'space'")
-    ):
-        datastore.trajectory.aggregation(
-            pseudotime_scoring,
-            features=few_features,
-            window_size=50,
-            chunk_size=10,
-            ann_params=ann_params,
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        ref = datastore.trajectory.aggregation(
+            pseudotime_scoring, **arguments, ann_params=ann_params
         )
 
+    # One warning names the settings that were left out.
+    assert _ignored_settings_warnings(caught) == [
+        "Feature modules find each feature's nearest features exactly, so these "
+        "settings of an approximate search in ann_params have no effect and can "
+        f"be dropped: {names}"
+    ]
+    # The call asks for the modules of the distance alone, which the store holds.
+    assert ref == default
+    assert (datastore.artifacts.inspect(ref).parameters or {})["ann_params"] == {
+        "space": "l2",
+        "dim": 10,
+    }
+
+
+@pytest.mark.parametrize(
+    ("ann_params", "names"),
+    [
+        ({"n_trees": 10}, "'n_trees'"),
+        # A parameter that no release took is refused before any warning.
+        ({"ef": 40, "n_trees": 10, "metric": "l2"}, "'metric', 'n_trees'"),
+    ],
+)
+def test_aggregation_refuses_parameters_that_ann_params_never_took(
+    datastore,
+    pseudotime_scoring,
+    few_features,
+    ann_params,
+    names,
+):
+    before = _aggregation_artifacts(datastore)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pytest.raises(
+            ValueError,
+            match=re.escape(f"ann_params contains unsupported parameters: {names}; it"),
+        ):
+            datastore.trajectory.aggregation(
+                pseudotime_scoring,
+                features=few_features,
+                window_size=50,
+                chunk_size=10,
+                ann_params=ann_params,
+            )
+
+    assert _ignored_settings_warnings(caught) == []
     assert _aggregation_artifacts(datastore) == before
 
 
@@ -1391,14 +1445,13 @@ def test_knn_clustering_rejects_infeasible_parameters():
             1,
             {"dim": 2},
         )
-    # The neighbors are exact, so the settings of an HNSW search are refused.
-    with pytest.raises(ValueError, match="drop 'max_elements'"):
+    with pytest.raises(ValueError, match="unsupported parameters: 'n_trees'"):
         knn_clustering(
             _ShapeOnlyArray((3, 3)),
             1,
             2,
             1,
-            {"max_elements": 2},
+            {"n_trees": 2},
         )
 
 
@@ -1708,6 +1761,29 @@ def test_knn_clustering_measures_the_distance_that_ann_params_names():
 
     assert len(set(zip(ray.tolist(), by_angle.tolist(), strict=True))) == 2
     assert len(set(zip(far.tolist(), by_position.tolist(), strict=True))) == 2
+
+
+def test_knn_clustering_leaves_out_the_settings_of_an_approximate_search():
+    from cytearc.matrix import ChunkedArray
+
+    rng = np.random.default_rng(4)
+    profiles = np.repeat(rng.normal(scale=3.0, size=(4, 6)), 10, axis=0)
+    profiles += rng.normal(size=profiles.shape)
+    exact = knn_clustering(ChunkedArray.from_numpy(profiles), 5, 4, 1)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        searched = knn_clustering(
+            ChunkedArray.from_numpy(profiles),
+            5,
+            4,
+            1,
+            {"ef": 40, "M": 16, "max_elements": 2, "space": "l2"},
+        )
+
+    np.testing.assert_array_equal(searched, exact)
+    (message,) = _ignored_settings_warnings(caught)
+    assert message.endswith("can be dropped: 'M', 'ef', 'max_elements'")
 
 
 def test_knn_clustering_gives_the_same_modules_on_any_thread_count():
