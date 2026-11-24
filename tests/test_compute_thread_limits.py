@@ -790,7 +790,7 @@ def _feature_neighbors_call(_tmp_path: Path) -> Callable[[], object]:
     from cytearc.trajectory.feature_dynamics import nearest_feature_profiles
 
     # Sixty profiles leave some out of each one's 3 + 8 candidates, which
-    # BLAS's products pick.
+    # BLAS's products pick, each thread's share on one BLAS thread.
     profiles = np.random.default_rng(10).normal(size=(60, 5))
     return lambda: nearest_feature_profiles(profiles, 3, nthreads=2)
 
@@ -966,7 +966,7 @@ _FAMILIES = {
     "feature neighbors": _Family(
         _feature_neighbors_call,
         ("cytearc.trajectory.feature_dynamics", "_nearest_candidates"),
-        blas=2,
+        blas=1,
         openmp=False,
     ),
 }

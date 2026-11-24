@@ -1,3 +1,7 @@
+from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
+
 import numpy as np
 from numba import prange
 
@@ -293,13 +297,19 @@ def _fast_distance(
     own: float,
     other: int,
     inner_product: bool,
+    rounding: float,
 ) -> float:
-    """Return a distance from a product that BLAS computed: ``|a|^2 + |b|^2 - 2 a.b``, or ``1 - a.b``."""
+    """Return a distance from a product that BLAS computed, less the other profile's share of its rounding.
+
+    The distance is ``|a|^2 + |b|^2 - 2 a.b``, or ``1 - a.b``, and the share
+    ``rounding * |b|^2``.
+    """
+    share: float = rounding * norms[other]
     if inner_product:
         distance: float = 1.0 - products[other]
     else:
         distance = (own + norms[other]) - 2.0 * products[other]
-    return distance
+    return distance - share
 
 
 @njit(cache=True, nogil=True, parallel=True)
@@ -311,7 +321,6 @@ def _nearest_candidates(
     n_candidates: int,
     inner_product: bool,
     rounding: float,
-    reference: float,
     floor: float,
     neighbors: np.ndarray,
 ) -> None:
@@ -319,12 +328,13 @@ def _nearest_candidates(
 
     Row ``i`` of ``products`` holds the products of profile ``first + i``
     with every profile, which BLAS computed, and ``norms`` the profiles'
-    squared norms. The profile's ``n_candidates`` nearest by the distances of
+    squared norms. The profile's ``n_candidates`` nearest by
     :func:`_fast_distance` are ranked by their distances summed over the bins
     in order, the earlier of equal sums first. A fast distance lies within
-    ``rounding * (norms[row] + reference) + floor`` of the sum of the same two
-    profiles, so when the nearest profile left out lies within that of the
-    ``n_neighbors``-th sum, every profile that does is ranked, which holds
+    ``rounding * (|a|^2 + |b|^2 + c) + floor`` of the sum of the same two
+    profiles, with ``c`` 1 for an inner product and 0 otherwise, so when the
+    nearest profile left out lies within the profile's own share of that of
+    the ``n_neighbors``-th sum, every profile that does is ranked, which holds
     every profile that can be among the nearest.
     """
     n_profiles = profiles.shape[0]
@@ -338,7 +348,9 @@ def _nearest_candidates(
         for other in range(n_profiles):
             if other != row:
                 found = _keep_nearest(
-                    _fast_distance(products[index], norms, own, other, inner_product),
+                    _fast_distance(
+                        products[index], norms, own, other, inner_product, rounding
+                    ),
                     other,
                     nearest,
                     positions,
@@ -357,14 +369,16 @@ def _nearest_candidates(
                 ranked,
                 count,
             )
-        limit = sums[n_neighbors - 1] + (rounding * (own + reference) + floor)
+        limit = sums[n_neighbors - 1] + (
+            rounding * (own + (1.0 if inner_product else 0.0)) + floor
+        )
         if not nearest[n_candidates] > limit:
             count = 0
             for other in range(n_profiles):
                 if (
                     other != row
                     and _fast_distance(
-                        products[index], norms, own, other, inner_product
+                        products[index], norms, own, other, inner_product, rounding
                     )
                     <= limit
                 ):
@@ -377,6 +391,21 @@ def _nearest_candidates(
                     )
 
 
+def _row_blocks(n_profiles: int, block: int, workers: int) -> Iterator[int]:
+    """Yield the first row of each block of ``block`` rows, with Numba on ``workers`` threads.
+
+    Between blocks the search reports progress and honors a shutdown request.
+    """
+    starts = range(0, n_profiles, block)
+    with numba_threads(workers):
+        for first in iter_progress(
+            starts, desc="Finding feature neighbors", total=len(starts)
+        ):
+            shutdown_checkpoint()
+            yield first
+    shutdown_checkpoint()
+
+
 def _rank_every_profile(
     values: np.ndarray, inner_product: bool, workers: int, neighbors: np.ndarray
 ) -> None:
@@ -385,28 +414,28 @@ def _rank_every_profile(
     columns = np.ascontiguousarray(values.T)
     distances = np.empty((workers, n_profiles), dtype=np.float64)
     block = max(workers, _BLOCK_OPERATIONS // max(1, n_profiles * n_bins))
-    starts = range(0, n_profiles, block)
-    with numba_threads(workers):
-        for first in iter_progress(
-            starts, desc="Finding feature neighbors", total=len(starts)
-        ):
-            shutdown_checkpoint()
-            _nearest_profiles(
-                values,
-                columns,
-                first,
-                min(first + block, n_profiles),
-                inner_product,
-                distances,
-                neighbors,
-            )
-    shutdown_checkpoint()
+    for first in _row_blocks(n_profiles, block, workers):
+        _nearest_profiles(
+            values,
+            columns,
+            first,
+            min(first + block, n_profiles),
+            inner_product,
+            distances,
+            neighbors,
+        )
+
+
+def _multiply_columns(
+    rows: np.ndarray, values: np.ndarray, products: np.ndarray, start: int, stop: int
+) -> None:
+    """Write the products of ``rows`` with the profiles ``start`` to ``stop`` into those columns of ``products``."""
+    np.matmul(rows, values[start:stop].T, out=products[:, start:stop])
 
 
 def _rank_candidates(
     values: np.ndarray,
     norms: np.ndarray,
-    largest: float,
     n_candidates: int,
     inner_product: bool,
     workers: int,
@@ -417,31 +446,38 @@ def _rank_candidates(
     Each block of rows takes its products with every profile from BLAS. It
     holds as many whole rows for each thread as there are bins, at least one,
     so its products take no more bytes than the transposed copy and the rows
-    of distances of a search of every distance.
+    of distances of a search of every distance. Each of ``workers`` threads
+    multiplies its share of the columns on one BLAS thread, and the kernel
+    then runs on as many, so BLAS's threads never spin beside the kernel's,
+    as OpenBLAS's do for a while after each call.
     """
     n_profiles, n_bins = values.shape
     # In any order, a sum of n products lies within n eps / 2 of the exact
     # sum, relative to the sum of their magnitudes (Jeannerod and Rump 2013,
-    # https://doi.org/10.1137/120894488). A fast distance and a sum over the
-    # bins in order therefore each lie within (bins + 2) eps (|a|^2 + |b|^2)
-    # of the exact distance, and one minus an inner product within eps more,
-    # which the 1 added to the norms covers. As perturbation/signature.py's
-    # nearest_controls does, both bounds together are taken four times over,
-    # and the smallest normal number for each of those roundings covers sums
-    # that underflow, where the bound does not hold.
+    # https://doi.org/10.1137/120894488). BLAS kernels use fused
+    # multiply-adds, which round once where a product and a sum round twice,
+    # so the classical bound n u / (1 - n u) with u = eps / 2 (Higham 2002)
+    # holds for them, within O(n^2 u^2) of n u. A fast distance and a sum over
+    # the bins in order therefore each lie within (bins + 2) eps (|a|^2 +
+    # |b|^2) of the exact distance, and one minus an inner product within eps
+    # more. As perturbation/signature.py's nearest_controls does, both bounds
+    # together are taken four times over, and the smallest normal number for
+    # each of those roundings covers sums that underflow, where the bound
+    # does not hold.
     rounding = 8.0 * (n_bins + 2) * np.finfo(np.float64).eps
     floor = 8.0 * (n_bins + 2) * np.finfo(np.float64).tiny
-    reference = largest + (1.0 if inner_product else 0.0)
     block = -(-max(workers, n_bins) // workers) * workers
     products = np.empty((min(block, n_profiles), n_profiles), dtype=np.float64)
-    starts = range(0, n_profiles, block)
-    with numba_threads(workers), process_thread_limit(workers, user_api="blas"):
-        for first in iter_progress(
-            starts, desc="Finding feature neighbors", total=len(starts)
-        ):
-            shutdown_checkpoint()
+    edges = np.linspace(0, n_profiles, workers + 1).astype(np.int64)
+    with (
+        process_thread_limit(1, user_api="blas"),
+        ThreadPoolExecutor(workers, thread_name_prefix="cytearc-products") as pool,
+    ):
+        for first in _row_blocks(n_profiles, block, workers):
             rows = products[: min(block, n_profiles - first)]
-            np.matmul(values[first : first + len(rows)], values.T, out=rows)
+            left = values[first : first + len(rows)]
+            multiply = partial(_multiply_columns, left, values, rows)
+            list(pool.map(multiply, edges[:-1], edges[1:]))
             _nearest_candidates(
                 values,
                 norms,
@@ -450,11 +486,9 @@ def _rank_candidates(
                 n_candidates,
                 inner_product,
                 rounding,
-                reference,
                 floor,
                 neighbors,
             )
-    shutdown_checkpoint()
 
 
 def nearest_feature_profiles(
@@ -522,11 +556,10 @@ def nearest_feature_profiles(
     n_candidates = n_neighbors + max(n_neighbors, _EXTRA_CANDIDATES)
     if n_candidates < n_profiles - 1:
         norms = np.einsum("ij,ij->i", values, values)
-        largest = float(norms.max())
         # Below this, no sum or product of two profiles overflows.
-        if np.isfinite(8.0 * largest):
+        if np.isfinite(8.0 * float(norms.max())):
             _rank_candidates(
-                values, norms, largest, n_candidates, inner_product, workers, neighbors
+                values, norms, n_candidates, inner_product, workers, neighbors
             )
             return neighbors
         del norms

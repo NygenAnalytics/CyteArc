@@ -1,3 +1,4 @@
+import math
 import re
 import warnings
 
@@ -1797,6 +1798,153 @@ def test_nearest_feature_profiles_rank_profiles_whose_squares_overflow(value):
 
     np.testing.assert_array_equal(neighbors[-1], [0, 1, 2, 3, 4])
     np.testing.assert_array_equal(neighbors, _summed_neighbors(profiles, 5))
+
+
+def test_nearest_feature_profiles_rank_two_profiles_whose_norms_overflow_together():
+    # Profiles of 6e153 and 6e153 (1 + 2**-40) have finite squared norms,
+    # 1.4e308 each, whose sum overflows, so BLAS's distance between them
+    # would be infinity minus infinity; each is the other's nearest.
+    profiles = np.random.default_rng(19).normal(size=(60, 4))
+    profiles[-2] = 6e153
+    profiles[-1] = 6e153 * (1 + 2.0**-40)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        neighbors = nearest_feature_profiles(profiles, 5, nthreads=2)
+
+    assert neighbors[-2, 0] == 59
+    assert neighbors[-1, 0] == 58
+    np.testing.assert_array_equal(neighbors, _summed_neighbors(profiles, 5))
+
+
+def _two_product(a: np.ndarray, b: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Products a * b as p + e exactly, by Dekker's splitting."""
+    product = a * b
+    split = 2.0**27 + 1
+    a_high = a * split - (a * split - a)
+    b_high = b * split - (b * split - b)
+    a_low, b_low = a - a_high, b - b_high
+    error = ((a_high * b_high - product) + a_high * b_low + a_low * b_high) + (
+        a_low * b_low
+    )
+    return product, error
+
+
+def _within(target: float, center: float, radius: float) -> float:
+    """``target`` rounded, then moved toward ``center`` until within ``radius`` of it."""
+    value = float(target)
+    while abs(value - center) > radius:
+        value = math.nextafter(value, center)
+    return value
+
+
+def _worst_blas_neighbors(monkeypatch, profiles, n_neighbors, space, expected, scale):
+    """The search's neighbors when BLAS rounds each product as far as ``scale`` times its bound allows.
+
+    Every inner product of n terms, in any order, lies within n u of the
+    exact one relative to the sum of their magnitudes (Jeannerod and Rump
+    2013), and every squared norm within n u of itself. Here the products of
+    each profile with its ``expected`` neighbors move down by ``scale`` times
+    that bound, so those neighbors look farther, the products with every
+    other profile move up, and the squared norms move up.
+    """
+    from cytearc.trajectory import feature_dynamics
+
+    kernel = feature_dynamics._nearest_candidates
+    unit = 2.0**-53
+    moved: dict[str, np.ndarray] = {}
+
+    def worst_case(values, norms, products, first, *rest):
+        n_profiles, n_bins = values.shape
+        if not moved:
+            exact = np.empty((n_profiles, n_profiles))
+            bound = np.empty((n_profiles, n_profiles))
+            for row in range(n_profiles):
+                product, error = _two_product(values[row][None, :], values)
+                for other in range(n_profiles):
+                    exact[row, other] = math.fsum([*product[other], *error[other]])
+                    bound[row, other] = (
+                        n_bins
+                        * unit
+                        * math.fsum(np.abs(product[other]))
+                        * (1 - 4 * unit)
+                    )
+            moved["exact"], moved["bound"] = exact, bound
+            squares = np.diag(exact)
+            moved["norms"] = np.array(
+                [
+                    _within(
+                        square * (1 + scale * n_bins * unit),
+                        square,
+                        scale * n_bins * unit * square * (1 - 4 * unit),
+                    )
+                    for square in squares
+                ]
+            )
+        exact, bound = moved["exact"], moved["bound"]
+        for index in range(products.shape[0]):
+            row = first + index
+            near = set(expected[row].tolist())
+            for other in range(n_profiles):
+                reach = scale * bound[row, other]
+                sign = -1.0 if other in near else 1.0
+                products[index, other] = _within(
+                    exact[row, other] + sign * reach, exact[row, other], reach
+                )
+        squared = norms if space != "l2" else moved["norms"]
+        return kernel(values, squared, products, first, *rest)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(feature_dynamics, "_nearest_candidates", worst_case)
+        neighbors = nearest_feature_profiles(
+            profiles, n_neighbors, space=space, nthreads=2
+        )
+    assert moved, "the search ranked every distance without candidates"
+    return neighbors
+
+
+def _worst_blas_profiles(case: str) -> tuple[np.ndarray, int, str]:
+    rng = np.random.default_rng(20)
+    if case == "pairs":
+        # Pairs of profiles 1e-3 apart near 2**19, whose nearest sum lies far
+        # below the n_neighbors-th.
+        pairs = 2.0**19 + rng.random((60, 50))
+        spread = np.tile([[0.0], [1e-3]], (60, 1)) * rng.random((120, 50))
+        return np.repeat(pairs, 2, axis=0) + spread, 11, "l2"
+    if case == "offset":
+        # Profiles near 2**20, and one of zeros, whose distances round with
+        # the others' norms, not its own.
+        profiles = 2.0**20 + rng.random((120, 50))
+        profiles[0] = 0.0
+        return profiles, 11, "l2"
+    # Inner products near 2**-54, where 1 - a.b rounds to 1 or to 1 - u:
+    # the nearest profile's product, 2**-54 + 2**-106, lies just above u / 2,
+    # and a product moved down by its bound, 1.5 * 2**-106, rounds 1 - a.b
+    # to 1, as for the farther profiles. Only the 1 that the bound adds for
+    # an inner product covers that rounding: the norms lie near 2**-48.
+    query = [2.0**-30, 0.0, 0.0]
+    near = [2.0**-24 + 2.0**-76, 0.0, 0.0]
+    far = [-(2.0**-20), 0.0, 0.0]
+    return np.array([query] + [near] * 10 + [far] * 10), 1, "ip"
+
+
+# Products moved by their whole bound, which any BLAS could return, and by
+# four times their bound, which the limit's margin of four still covers.
+@pytest.mark.parametrize(
+    ("case", "scale"),
+    [("pairs", 1.0), ("offset", 1.0), ("offset", 4.0), ("tiny inner products", 1.0)],
+)
+def test_nearest_feature_profiles_stay_exact_where_blas_rounds_its_worst(
+    monkeypatch, case, scale
+):
+    profiles, n_neighbors, space = _worst_blas_profiles(case)
+    expected = _summed_neighbors(profiles, n_neighbors, space)
+
+    neighbors = _worst_blas_neighbors(
+        monkeypatch, profiles, n_neighbors, space, expected, scale
+    )
+
+    np.testing.assert_array_equal(neighbors, expected)
 
 
 def test_nearest_feature_profiles_put_the_earlier_of_equally_near_profiles_first():
