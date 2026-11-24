@@ -1018,7 +1018,7 @@ cannot be computed is logged as a warning and left out. For example:
 | `leiden` | `candidates`, with each candidate's `resolution`, `clusters`, `largestCluster`, `smallestCluster`, and `artifact`, its artifact ID, in resolution order |
 | `cluster_selection` | `selected`, the selected resolution, and `candidates`, with each candidate's `resolution`, silhouette `score`, and `artifact` |
 | `membership_strength` | `mean`, and `belowHalf`, the number of cells whose membership strength is below 0.5 |
-| `doublets` | `predictedDoublets`, `rate`, and `samples`, with each sample's threshold and calls |
+| `doublets` | `predictedDoublets`, `rate`, and `samples`, with each sample's threshold, its method and calls |
 | `integration` | `assays` and `meanWeights`, the mean modality weight of each assay |
 | `guide_calling` | `guide_calls` (`cells`; `negative`, `single`, and `multiple`, the cells with no, one, and several calls; `calledGuides`, the guides called in some cell; and for imported calls `fileBarcodes`, `unmatchedBarcodes`, the file's barcodes that match no cell of the store, and `unselectedBarcodes`, those of cells outside the analysis cells, such as the cells that filtering removed), and for fitted calls `guide_thresholds` (`samples`, 1 without a `sample_column`, `guides`, and `statuses`, the fits of each status) |
 | `perturbation_labels` | `cells`, `controls`, `negative`, `multipleTargets` (cells whose guides target several genes), `targets` (the targets that are not controls), `targetCells` (the `min`, `median`, and `max` of each target's cells that carry it alone), `fewCellTargets` (the targets with fewer than 25 such cells and their cells, fewest first, at most 50), and `fewCellTargetCount` |

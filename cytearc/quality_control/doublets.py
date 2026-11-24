@@ -85,11 +85,12 @@ THRESHOLD_SMOOTHING_STEPS = 10_000
 # at least this share of them on each side, or Otsu's threshold is taken: a
 # minimum that leaves fewer cuts a few outlying doublets from the rest.
 THRESHOLD_SIDE_SHARE = 0.05
-# Otsu's threshold replaces such a minimum only when the doublet rate that it
+# An automatic threshold is taken only when the doublet rate that it
 # estimates, the share of cells it calls over the share of simulated doublets
-# above it, is at most this. Droplet experiments hold up to about 40% doublets
+# above it, is at most this: the minimum, else Otsu's threshold, else none, and
+# the sample calls no cell. Droplet experiments hold up to about 40% doublets
 # (Xi and Li, Cell Systems 2021), and a sample whose simulated doublets look
-# like its cells has Otsu's threshold split the cells and the doublets alike.
+# like its cells has any threshold split the cells and the doublets alike.
 THRESHOLD_MAX_DOUBLET_RATE = 0.5
 # A sample scored beside others queries its index for at most this many points
 # at once, so that its query block stays small beside its index.
@@ -269,16 +270,19 @@ class DoubletSampleResult:
         plan: The sizes that the sample used.
         heterotypic_fraction: The share of simulated doublets forced to pair
             two clusters; 0 when the sample's parents hold one cluster.
-        threshold: The doublet score above which a cell is called a doublet.
+        threshold: The doublet score above which a cell is called a doublet,
+            or None for a sample without a threshold, which calls no cell.
         threshold_method: ``"minimum"`` or ``"otsu"`` for an automatic
-            threshold, ``"manual"`` for a given one.
+            threshold, ``"none"`` with a threshold of None when neither
+            estimates a doublet rate of at most ``THRESHOLD_MAX_DOUBLET_RATE``,
+            and ``"manual"`` for a given one.
         predicted: Cells called doublets.
         detectable_fraction: Simulated doublets scored above the threshold.
     """
 
     plan: DoubletSamplePlan
     heterotypic_fraction: float
-    threshold: float
+    threshold: float | None
     threshold_method: str
     predicted: int
     detectable_fraction: float
@@ -627,25 +631,25 @@ def doublet_threshold(
     simulated_scores: NDArray[np.floating],
     *,
     cell_scores: NDArray[np.floating],
-) -> tuple[float, str]:
+) -> tuple[float | None, str]:
     """Choose the doublet-score threshold of one sample automatically.
 
     Simulated doublets of two cells of one type score low and those of two
-    types score high, so their scores are bimodal. The threshold is the
-    minimum between the two modes (:func:`histogram_minimum_threshold`) when
-    at least ``THRESHOLD_SIDE_SHARE`` of the simulated doublets lie above it
-    and as many at or below it. One or two doublets that score far above the
-    rest can keep a maximum of their own after the dip between the modes has
-    smoothed away, and the minimum then lies above every other doublet; such
-    a minimum gives way to Otsu's threshold (:func:`otsu_threshold`) when the
-    doublet rate that Otsu's threshold estimates, the share of the sample's
-    cells above it over the share of its simulated doublets above it, is at
-    most ``THRESHOLD_MAX_DOUBLET_RATE``. A sample whose simulated doublets
-    look like its cells has scores of one mode, which Otsu's threshold splits
-    with as many cells as doublets above it, so it keeps the minimum, which
-    calls almost no cell when the outlying doublets score above the rest and
-    almost every cell when they score below it. When the histogram never has
-    two maxima, the threshold is Otsu's.
+    types score high, so their scores are bimodal. A threshold is taken only
+    when the doublet rate that it estimates, the share of the sample's cells
+    above it over the share of its simulated doublets above it, is at most
+    ``THRESHOLD_MAX_DOUBLET_RATE``. The threshold is the minimum between the
+    two modes (:func:`histogram_minimum_threshold`) when at least
+    ``THRESHOLD_SIDE_SHARE`` of the simulated doublets lie above it and as
+    many at or below it, and when its estimate is at most the bound. One or
+    two doublets that score far from the rest can keep a maximum of their own
+    after the dip between the modes has smoothed away, and the minimum then
+    lies beyond every other doublet. Otherwise, and when the histogram never
+    has two maxima, the threshold is Otsu's (:func:`otsu_threshold`) when its
+    estimate is at most the bound. A sample whose simulated doublets look like
+    its cells has scores of one mode, which any threshold splits with as many
+    cells as doublets above it, an estimate near 100%; such a sample has no
+    threshold, as Scrublet calls no doublet when it finds none.
 
     Args:
         simulated_scores: The doublet scores of the sample's simulated
@@ -653,23 +657,30 @@ def doublet_threshold(
         cell_scores: The doublet scores of the sample's cells.
 
     Returns:
-        The threshold and the method that chose it: ``"minimum"`` or ``"otsu"``.
+        The threshold and the method that chose it, ``"minimum"`` or
+        ``"otsu"``, or None and ``"none"`` when the sample has no threshold.
     """
     scores = _finite_values(simulated_scores)
     cells = _finite_values(cell_scores)
-    threshold = histogram_minimum_threshold(scores)
-    if threshold is None:
-        return otsu_threshold(scores), "otsu"
-    above = np.count_nonzero(scores > threshold) / scores.size
-    if min(above, 1 - above) >= THRESHOLD_SIDE_SHARE:
-        return threshold, "minimum"
+
+    def within_rate_bound(threshold: float) -> bool:
+        # Cells called over detectable doublets, compared without a division:
+        # a threshold above every simulated doublet and below a cell estimates
+        # an unbounded rate.
+        called = np.count_nonzero(cells > threshold) * scores.size
+        detected = np.count_nonzero(scores > threshold) * cells.size
+        return bool(called <= THRESHOLD_MAX_DOUBLET_RATE * detected)
+
+    minimum = histogram_minimum_threshold(scores)
+    if minimum is not None:
+        above = np.count_nonzero(scores > minimum) / scores.size
+        holds_both_sides = min(above, 1 - above) >= THRESHOLD_SIDE_SHARE
+        if holds_both_sides and within_rate_bound(minimum):
+            return minimum, "minimum"
     otsu = otsu_threshold(scores)
-    # Cells called over detectable doublets, compared without a division.
-    called = np.count_nonzero(cells > otsu) * scores.size
-    detected = np.count_nonzero(scores > otsu) * cells.size
-    if called <= THRESHOLD_MAX_DOUBLET_RATE * detected:
+    if within_rate_bound(otsu):
         return otsu, "otsu"
-    return threshold, "minimum"
+    return None, "none"
 
 
 class _ScoringRoom:
@@ -1406,7 +1417,8 @@ def score_synthetic_doublets(
     (:func:`count_simulated_neighbors`), and a cell is called a doublet when
     its score is above the sample's threshold: ``threshold``, or the one
     :func:`doublet_threshold` chooses from the scores of the sample's
-    simulated doublets and cells.
+    simulated doublets and cells. A sample for which it chooses none calls
+    no cell and records no threshold.
 
     Samples are scored ``resources.workers`` at a time, fewer when the memory
     budget holds fewer of the largest sample's points, index and query block
@@ -1568,13 +1580,21 @@ def score_synthetic_doublets(
         )
         observed_scores = likelihood[: plan.cells]
         sample_simulated = likelihood[plan.cells :]
+        cutoff: float | None
         if threshold is None:
             cutoff, method = doublet_threshold(
                 sample_simulated, cell_scores=observed_scores
             )
         else:
             cutoff, method = float(threshold), "manual"
-        calls = observed_scores > cutoff
+        if cutoff is None:
+            # A sample without a threshold calls no cell and detects no
+            # simulated doublet, whatever its scores.
+            calls = np.zeros(plan.cells, dtype=bool)
+            detectable = 0.0
+        else:
+            calls = observed_scores > cutoff
+            detectable = float(np.mean(sample_simulated > cutoff))
         scores[members] = observed_scores
         raw_scores[members] = counts[: plan.cells] / plan.adjusted_neighbors
         predicted[members] = calls
@@ -1586,7 +1606,7 @@ def score_synthetic_doublets(
             threshold=cutoff,
             threshold_method=method,
             predicted=int(np.count_nonzero(calls)),
-            detectable_fraction=float(np.mean(sample_simulated > cutoff)),
+            detectable_fraction=detectable,
         )
 
     samples_at_once, threads = _samples_in_flight(

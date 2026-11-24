@@ -131,3 +131,43 @@ def test_summaries_leave_out_attributes_and_arrays_that_an_artifact_lacks() -> N
     assert summaries._doublets(doublets) == {}
     doublets.create_array("predicted_doublets", data=np.asarray([1, 0, 0, 0], bool))
     assert summaries._doublets(doublets) == {"predictedDoublets": 1, "rate": 0.25}
+
+
+def test_doublet_summary_shows_each_samples_threshold_and_its_method() -> None:
+    doublets = zarr.open_group(store=MemoryStore(), mode="w")
+    doublets.create_array("predicted_doublets", data=np.asarray([1, 0, 0, 0], bool))
+    shown = {"labels": {"sample": "A"}, "cells": 2, "predictedDoublets": 1}
+    doublets.attrs["samples"] = [
+        {
+            **shown,
+            "threshold": 0.31,
+            "thresholdMethod": "minimum",
+            "simulatedDoublets": 4,
+            "estimatedDoubletRate": 0.5,
+        },
+        # A sample without a threshold shows its method beside no threshold.
+        {
+            **shown,
+            "labels": {"sample": "B"},
+            "predictedDoublets": 0,
+            "threshold": None,
+            "thresholdMethod": "none",
+            "detectableDoubletFraction": 0.0,
+        },
+    ]
+
+    summary = summaries._doublets(doublets)
+
+    assert summary["samples"] == [
+        {**shown, "threshold": 0.31, "thresholdMethod": "minimum"},
+        {
+            **shown,
+            "labels": {"sample": "B"},
+            "predictedDoublets": 0,
+            "threshold": None,
+            "thresholdMethod": "none",
+        },
+    ]
+    # A record without a key shows the keys it holds.
+    doublets.attrs["samples"] = [shown]
+    assert summaries._doublets(doublets)["samples"] == [shown]

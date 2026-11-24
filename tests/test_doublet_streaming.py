@@ -514,7 +514,13 @@ def test_streamed_doublets_match_materialized_doublets(
         rtol=1e-12,
     )
     (sample,) = actual.samples
-    np.testing.assert_array_equal(actual.predicted, actual.scores > sample.threshold)
+    # A sample calls the cells above its threshold, and none without one.
+    np.testing.assert_array_equal(
+        actual.predicted,
+        np.zeros(n_cells, dtype=bool)
+        if sample.threshold is None
+        else actual.scores > sample.threshold,
+    )
 
     # Smaller batches stream the same doublets.
     original = doublets._doublet_batch_rows

@@ -303,59 +303,82 @@ def _warn_doublet_scores(
 
     The diagnostics name the samples that formed none of the heterotypic
     doublets asked for. The ``samples`` attribute gives each sample's
-    threshold, and a sample whose automatic threshold leaves fewer than
+    threshold: a sample without one, whose method is ``"none"``, calls no
+    cell, and its warning reports their number as ``noThresholdSamples``; a
+    sample whose automatic threshold leaves fewer than
     ``_FEW_DETECTABLE_DOUBLETS`` of its simulated doublets above it calls
-    almost no cell. Both are read from the saved artifact, so scores saved
-    before this check warn when they are reused, and nothing stored changes.
+    almost no cell, and its warning reports their detectable fractions. All
+    are read from the saved artifact, so scores saved before these checks
+    warn when they are reused, and nothing stored changes.
     """
+    from ...quality_control.doublets import THRESHOLD_MAX_DOUBLET_RATE
+
     samples: Any = artifact_group(root, ref).attrs["samples"]
+    unthresholded = [
+        sample for sample in samples if sample["thresholdMethod"] == "none"
+    ]
     undetectable = [
         sample
         for sample in samples
-        if sample["thresholdMethod"] != "manual"
+        if sample["thresholdMethod"] not in {"manual", "none"}
         and sample["detectableDoubletFraction"] < _FEW_DETECTABLE_DOUBLETS
     ]
+    # A given threshold sets the calls of every sample, not only those named.
+    set_threshold = (
+        "The scores still rank the cells; pass threshold, which applies to every "
+        "sample, to call those that score above it"
+    )
+
+    def where(count: int) -> str:
+        return "In 1 sample" if count == 1 else f"In each of {count} samples"
+
+    def listed(flagged: list[Any], count: int) -> str:
+        """Name up to ``EXAMPLES`` of the flagged samples that have labels."""
+        named = [
+            _doublet_sample_text(sample["labels"])
+            for sample in flagged
+            if sample["labels"]
+        ][:EXAMPLES]
+        if not named:
+            return ""
+        return f": {', '.join(named)}{', among others' if len(named) < count else ''}"
 
     def one_cluster(numbers: Mapping[str, Any]) -> str:
         count = numbers["oneClusterSamples"]
         examples = list(numbers["oneClusterSampleExamples"])
         others = "" if len(examples) == count else ", among others"
-        where, their = (
-            ("In 1 sample", "its")
-            if count == 1
-            else (f"In each of {count} samples", "their")
-        )
+        their = "its" if count == 1 else "their"
         return (
-            f"{where} every cell has the same cluster label, so {their} doublets "
-            f"pair any two of {their} cells instead of forcing heterotypic_fraction="
-            f"{arguments.heterotypic_fraction:g} of them to pair two clusters: "
-            f"{', '.join(examples)}{others}"
+            f"{where(count)} every cell has the same cluster label, so {their} "
+            f"doublets pair any two of {their} cells instead of forcing "
+            f"heterotypic_fraction={arguments.heterotypic_fraction:g} of them to "
+            f"pair two clusters: {', '.join(examples)}{others}"
+        )
+
+    def no_threshold(numbers: Mapping[str, Any]) -> str:
+        count = numbers["noThresholdSamples"]
+        return (
+            f"{where(count)} every automatic threshold would estimate a doublet "
+            f"rate above {THRESHOLD_MAX_DOUBLET_RATE:.0%}, as in a sample of one "
+            "cell type, whose doublets look like its cells, so the sample has no "
+            f"threshold and calls no cell{listed(unthresholded, count)}. "
+            f"{set_threshold}"
         )
 
     def few_detectable(numbers: Mapping[str, Any]) -> str:
         count = len(numbers["detectableDoubletFraction"])
-        named = [
-            _doublet_sample_text(sample["labels"])
-            for sample in undetectable
-            if sample["labels"]
-        ][:EXAMPLES]
-        listed = (
-            f": {', '.join(named)}{', among others' if len(named) < count else ''}"
-            if named
-            else ""
-        )
-        where = "In 1 sample" if count == 1 else f"In each of {count} samples"
         return (
-            f"{where} the automatic threshold leaves fewer than "
+            f"{where(count)} the automatic threshold leaves fewer than "
             f"{_FEW_DETECTABLE_DOUBLETS:.0%} of the simulated doublets above it, "
-            f"so it calls almost no cell{listed}. The scores still rank the "
-            "cells; pass threshold to call those that score above it"
+            f"so it calls almost no cell{listed(undetectable, count)}. "
+            f"{set_threshold}"
         )
 
     warn_diagnostics(
         arguments,
         {
             **inspect_artifact(root, ref).diagnostics,
+            "noThresholdSamples": len(unthresholded),
             "detectableDoubletFraction": [
                 sample["detectableDoubletFraction"] for sample in undetectable
             ],
@@ -365,6 +388,11 @@ def _warn_doublet_scores(
                 "oneClusterSamples",
                 applies=lambda numbers: bool(numbers["oneClusterSamples"]),
                 message=one_cluster,
+            ),
+            DiagnosticRule(
+                "noThresholdSamples",
+                applies=lambda numbers: bool(numbers["noThresholdSamples"]),
+                message=no_threshold,
             ),
             DiagnosticRule(
                 "detectableDoubletFraction",
@@ -2405,12 +2433,14 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         ``expected_doublet_rate``, Scrublet's doublet score (Wolock, Lopez
         and Klein, 2019). A cell is a predicted doublet when its score is
         above its sample's threshold: ``threshold``, or one chosen from the
-        sample's simulated-doublet scores, the minimum between their two
-        modes when it leaves at least 5% of them on each side, and Otsu's
-        threshold otherwise. A minimum that leaves fewer is kept when Otsu's
-        threshold would estimate a doublet rate above 50%, as when a sample's
-        simulated doublets look like its cells, and it then calls almost no
-        cell.
+        sample's simulated-doublet scores. An automatic threshold is taken
+        only when the doublet rate that it estimates, the share of cells above
+        it over the share of simulated doublets above it, is at most 50%: the
+        minimum between their two modes when it leaves at least 5% of them on
+        each side, else Otsu's threshold. A sample where neither is taken, as
+        in a sample of one cell type, whose doublets look like its cells, has
+        no threshold and calls no cell, as Scrublet calls none when it finds
+        no threshold.
 
         Each sample's index takes the settings of the graph's ANN index and
         its metric, except that an ATAC assay's cells are always scored by
@@ -2436,7 +2466,9 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         attribute lists each sample's labels, cells, simulated doublets,
         neighbors, threshold and its method, calls, the fraction of simulated
         doublets above the threshold, and Scrublet's estimate of the doublet
-        rate.
+        rate. The method is ``"minimum"``, ``"otsu"``, ``"manual"`` for a
+        given ``threshold``, or ``"none"`` for a sample without a threshold,
+        whose threshold and estimate are None.
 
         A sample whose cells share one cluster label cannot pair two clusters,
         so with ``heterotypic_fraction`` above 0 its doublets pair any two of
@@ -2446,9 +2478,11 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         doublets asked for, and ``oneClusterSampleExamples``, up to five of
         them, such as ``(sample='A')``. Such samples give a
         ``DiagnosticWarning`` each time the scores are computed or reused, and
-        so does a sample whose automatic threshold leaves fewer than 1% of its
-        simulated doublets above it, which calls almost no cell, as its
-        ``detectableDoubletFraction`` in the ``samples`` attribute says.
+        so do samples without a threshold, whose ``thresholdMethod`` in the
+        ``samples`` attribute is ``"none"`` and which the warning counts as
+        ``noThresholdSamples``, and samples whose automatic threshold leaves
+        fewer than 1% of their simulated doublets above it, which call almost
+        no cell, as their ``detectableDoubletFraction`` says.
 
         Args:
             clusters: Cluster labels over the graph's cell selection. They

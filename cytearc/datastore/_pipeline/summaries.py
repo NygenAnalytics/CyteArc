@@ -314,7 +314,13 @@ def _doublets(group: Any) -> dict[str, Any]:
         summary["samples"] = [
             {
                 key: sample[key]
-                for key in ("labels", "cells", "threshold", "predictedDoublets")
+                for key in (
+                    "labels",
+                    "cells",
+                    "threshold",
+                    "thresholdMethod",
+                    "predictedDoublets",
+                )
                 if isinstance(sample, Mapping) and key in sample
             }
             for sample in samples[:SUMMARY_ITEM_LIMIT]
