@@ -18,7 +18,7 @@ from ..utils.files import (
     is_tar,
 )
 from ..utils.progress import iter_progress
-from ._text import as_text, require_unique_identifiers
+from ._text import FieldText, as_text, field_texts, require_unique_identifiers
 from ..utils.arguments import bool_argument, quoted_value
 
 # read_csv settings that, besides the separator and ``quoting``, decide how
@@ -52,21 +52,6 @@ _TAR_COMPRESSIONS = (None, "gzip", "bz2", "xz")
 # text. pandas looks a converter's key up as a column name, then as a
 # position, so only a name of text reaches the ID column alone.
 _ID_COLUMN_LABEL = "__cytearc_cell_ids__"
-
-
-class _FieldText:
-    """One field of the ID column, as the file holds it.
-
-    read_csv reads text such as ``NA`` or ``null`` as a missing value, and
-    its python engine does so for what a converter returns too, unless that
-    is not text. The ID column's converter wraps each field in this class,
-    so that every field stays an ID.
-    """
-
-    __slots__ = ("text",)
-
-    def __init__(self, text: str) -> None:
-        self.text = text
 
 
 def _count_dtype(frame: pd.DataFrame, value_range: CountValueRange) -> np.dtype[Any]:
@@ -461,7 +446,7 @@ class CSVReader:
             labels = self.pandas_kwargs.get("names")
             key = self._idColumn if labels is None else labels[self._idColumn]
             converters = dict(self.pandas_kwargs.get("converters") or {})
-            converters[key] = _FieldText
+            converters[key] = FieldText
             self.pandas_kwargs["converters"] = converters
         (
             self.nCells,
@@ -647,7 +632,7 @@ class CSVReader:
         cell_data_idx: list[int] | None = None
         count_dtype: np.dtype | None = None
         count_range = CountValueRange()
-        id_fields: list[_FieldText] = []
+        id_fields: list[FieldText] = []
         for df in iter_progress(
             stream,
             desc="Checking CSV consistency",
@@ -693,7 +678,7 @@ class CSVReader:
         cell_ids: np.ndarray | None = None
         if self._idColumn is not None:
             # Every field is an ID, an empty one too, which is refused as blank.
-            cell_ids = np.asarray([field.text for field in id_fields], dtype=str)
+            cell_ids = field_texts(id_fields).astype(str)
             require_unique_identifiers(cell_ids, "CSV cell IDs")
         if keep_cols is not None:
             n_features = len(keep_cols)

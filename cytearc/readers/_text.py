@@ -1,4 +1,5 @@
 import math
+from collections.abc import Iterable
 from typing import Any, Literal
 
 import numpy as np
@@ -24,6 +25,27 @@ def as_text(value: Any) -> str:
     if isinstance(value, bytes | np.bytes_):
         return bytes(value).decode("utf-8")
     return str(value)
+
+
+class FieldText:
+    """One field of a delimited file, as the file holds it.
+
+    read_csv reads text such as ``NA`` or ``null`` as a missing value, also
+    in what a converter returns, unless that is not text: its python engine
+    always has, and its C engine has from pandas 3.1 on. A converter that
+    wraps each field of a column of IDs in this class keeps every field as
+    its text.
+    """
+
+    __slots__ = ("text",)
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
+def field_texts(fields: Iterable[FieldText]) -> np.ndarray:
+    """Return the text of each field, as an object array."""
+    return np.asarray([field.text for field in fields], dtype=object)
 
 
 def dataset_place(path: str, dataset: str) -> str:

@@ -827,6 +827,74 @@ def test_parse_imports_keep_the_text_of_their_ids_and_names(tmp_path) -> None:
     assert np.isnan(root["cellData/count"][1])
 
 
+# The text that read_csv reads as missing by default, pandas' STR_NA_VALUES
+# from pandas 2.2 to 3.1, but the empty field, which an import refuses as a
+# blank ID.
+_MISSING_VALUE_TEXT = (
+    "#N/A",
+    "#N/A N/A",
+    "#NA",
+    "-1.#IND",
+    "-1.#QNAN",
+    "-NaN",
+    "-nan",
+    "1.#IND",
+    "1.#QNAN",
+    "<NA>",
+    "N/A",
+    "NA",
+    "NULL",
+    "NaN",
+    "None",
+    "n/a",
+    "nan",
+    "null",
+)
+
+
+def test_matrix_market_ids_keep_every_text_that_pandas_reads_as_missing(
+    tmp_path,
+) -> None:
+    # From pandas 3.1 on, read_csv reads such text as missing in what a
+    # converter returns too (pandas-dev/pandas#13302), so the IDs that a
+    # converter returned as text were refused as missing.
+    rows = [f"{text},{text}\n" for text in _MISSING_VALUE_TEXT]
+    parse = _write_parse(
+        tmp_path / "parse",
+        genes=b"gene_id,gene_name\ng1,A\n",
+        cells=("bc_wells,sample\n" + "".join(rows)).encode(),
+    )
+    features = "".join(
+        f"{text}\tN{n}\tGene Expression\n" for n, text in enumerate(_MISSING_VALUE_TEXT)
+    )
+    mex = _write_mex(
+        tmp_path / "mex",
+        features=features.encode(),
+        reference=(
+            "id,sequence\n"
+            + "".join(f"{text},S{n}\n" for n, text in enumerate(_MISSING_VALUE_TEXT))
+        ).encode(),
+    )
+
+    root = _imported(
+        lambda: MtxReader(inspect_mtx(parse)[0]), MtxToZarr, tmp_path / "parse.zarr"
+    )
+    reader = MtxReader(inspect_mtx(mex)[0])
+    try:
+        columns = dict(reader.get_feature_columns())
+    finally:
+        reader.close()
+
+    assert _texts(root["cellData/ids"][:]) == list(_MISSING_VALUE_TEXT)
+    # The metadata column of the same text reads it as missing, as pandas
+    # does: a column of numbers, each of them NaN.
+    assert np.isnan(root["cellData/sample"][:]).all()
+    # Each reference ID names the feature of that ID.
+    assert list(columns["sequence"]) == [
+        f"S{n}" for n in range(len(_MISSING_VALUE_TEXT))
+    ]
+
+
 # Tapestri files.
 
 

@@ -41,7 +41,9 @@ from ._row_spill import (
 from ._sparse import encoded_entry_bytes
 from ._text import (
     DuplicateFeatureIds,
+    FieldText,
     duplicate_feature_ids_option,
+    field_texts,
     require_unique_identifiers,
     unique_feature_identifiers,
     utf8_refusal,
@@ -1006,7 +1008,7 @@ class _MtxEngine:
                 _SIDECAR_VALUES,
                 sep=",",
                 header=True,
-                converters=dict.fromkeys(id_keys, str),
+                converters=dict.fromkeys(id_keys, FieldText),
             )
             aliases = [key for key in ("bc_wells", "bc_index") if key in frame.columns]
             if cell_id_key is None:
@@ -1021,7 +1023,7 @@ class _MtxEngine:
                 selected_key = cell_id_key
                 if selected_key not in frame.columns:
                     raise KeyError(f"Cell ID column {selected_key!r} was not found")
-            names = frame[selected_key].astype(str).to_numpy()
+            names = field_texts(frame[selected_key])
             columns = {
                 str(name): frame[name].to_numpy()
                 for name in frame.columns
@@ -1087,9 +1089,9 @@ class _MtxEngine:
             _REFERENCE_VALUES,
             sep=",",
             header=True,
-            converters={id_column: str},
+            converters={id_column: FieldText},
         )
-        reference_ids = frame[id_column].astype(str).to_numpy()
+        reference_ids = field_texts(frame[id_column])
         require_unique_identifiers(
             reference_ids, _REFERENCE_IDS, place=_column_place(id_column, sidecar)
         )
