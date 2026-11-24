@@ -646,6 +646,71 @@ def test_assay_read_block_facade_remains_patchable(monkeypatch):
     np.testing.assert_allclose(means["pair"], expected)
 
 
+def test_feature_means_charge_each_block_the_shards_of_its_cells(tmp_path, monkeypatch):
+    import cytearc.assay.rna as rna_module
+    from cytearc.storage.budget import ResourceBudget
+    from cytearc.storage.geometry import array_geometry
+    from cytearc.storage.partition import row_read_parts
+    from tests.memory_helpers import traced_selection_read
+
+    # 30,000 cells by 20 features of random counts in shards of 100 cells,
+    # and the means of one feature over one cell from each of 300 shards in a
+    # shuffled order, which the means read from counts in blocks of a row
+    # chunk, 100 cells, each in 100 shards.
+    rng = np.random.default_rng(5)
+    values = rng.integers(1, 1 << 16, size=(30_000, 20), dtype=np.uint16)
+    root = zarr.open_group(str(tmp_path / "store.zarr"), mode="w")
+    counts = root.create_array(
+        "counts",
+        shape=values.shape,
+        chunks=(100, 10),
+        shards=(100, 20),
+        dtype=np.uint16,
+    )
+    counts[:] = values
+    totals = values.sum(axis=1, dtype=np.float64)
+    rna = RNAassay.__new__(RNAassay)
+    rna.name = "RNA"
+    rna.normMethod = norm_lib_size
+    rna.sf = 10
+    rna.cells = SimpleNamespace(_get_array=lambda _column: totals)
+    rna.rawData = SimpleNamespace(_backing=counts)
+    # Shuffled cells are read from counts, never from countsT.
+    rna.rawDataT = counts
+    rna.resources = ResourceBudget(memoryBytes=1 << 30, workers=1)
+    cells = rng.permutation(np.arange(300) * 100 + 7)
+    feature = np.array([4])
+    charged: list[tuple[int, tuple[int, int]]] = []
+    blocks: list[np.ndarray] = []
+
+    def recorded_parts(*args, **kwargs):
+        parts = row_read_parts(*args, **kwargs)
+        charged.append((kwargs.get("shards", 1), parts))
+        return parts
+
+    def recorded_read(array, rows, columns):
+        blocks.append(np.array(rows))
+        return assay_module._read_block(array, rows, columns)
+
+    monkeypatch.setattr(rna_module, "row_read_parts", recorded_parts)
+    monkeypatch.setattr(rna_module, "_read_facade_block", recorded_read)
+    means = rna._mean_normed_feature_groups(cells, {"one": feature})
+    expected = 10 * values[cells, 4].astype(np.float64) / totals[cells]
+    np.testing.assert_allclose(means["one"], expected, rtol=1e-12)
+    # Each block's cells fall in 100 shards, as many as the plan charges.
+    assert [block.size for block in blocks] == [100, 100, 100]
+    assert {len(set((block // 100).tolist())) for block in blocks} == {100}
+    shards, (fixed, per_row) = charged[-1]
+    assert shards == 100
+    read, peak = traced_selection_read(counts, blocks[0], feature)
+    assert peak <= read.nbytes + fixed + blocks[0].size * per_row
+    # A charge of one shard's task falls short of the read.
+    one_fixed, one_per_row = row_read_parts(
+        array_geometry(counts), feature, rows_contiguous=False
+    )
+    assert peak > read.nbytes + one_fixed + blocks[0].size * one_per_row
+
+
 def test_base_assay_defaults_validation_and_representation():
     cells = SimpleNamespace(
         active_index=lambda _key: np.array([0, 1]),

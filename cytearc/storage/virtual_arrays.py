@@ -346,7 +346,9 @@ def _read_bands(
     stops = np.r_[starts[1:], values.size]
     slab = max(1, math.prod(operator.index(extent) for extent in array.chunks))
     result: np.ndarray | None = None
-    for first, last in zip(starts.tolist(), stops.tolist(), strict=True):
+    # The arrays give the bounds one band at a time, where lists of them would
+    # hold two Python integers for each band while the bands are read.
+    for first, last in zip(starts, stops, strict=True):
         start, stop = int(values[first]), int(values[last - 1]) + 1
         positions = order[first:last]
         local = values[first:last] - start

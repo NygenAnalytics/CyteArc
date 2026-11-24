@@ -286,17 +286,28 @@ class ArrayGeometry:
     def bandsLeftoverBytes(self, bands: int) -> int:
         """Return what the reads of ``bands`` bands of chunks leave of their objects once they return.
 
-        They are counted as :meth:`objectBytes` counts the objects of a read
-        and of each chunk that it takes while it runs, for every chunk of the
-        bands, whether one read takes them or a read of each band does, up to
-        192 KiB, where what the reads leave levels off as CPython reuses the
-        objects it freed.
+        The reads take every chunk of the bands, as :meth:`chunksLeftoverBytes`
+        counts them.
         """
-        chunks = max(0, int(bands)) * self.bandChunks()
+        return self.chunksLeftoverBytes(max(0, int(bands)) * self.bandChunks())
+
+    def chunksLeftoverBytes(
+        self, chunks: int, *, limit: int = _READ_LEFTOVER_LIMIT_BYTES
+    ) -> int:
+        """Return what reads that took ``chunks`` chunks in all leave of their objects once they return.
+
+        They are counted as :meth:`objectBytes` counts the objects of a read
+        and of each chunk that it takes while it runs, for every chunk,
+        whether one read takes them or a read of each band does, up to
+        ``limit``, where what the reads leave levels off as CPython reuses
+        the objects it freed: 192 KiB unless given, which whole reads of
+        one-dimensional arrays stay within.
+        """
+        chunks = max(0, int(chunks))
         if chunks == 0:
             return 0
         return min(
-            _READ_LEFTOVER_LIMIT_BYTES,
+            max(0, int(limit)),
             _READ_OBJECT_BYTES + chunks * _READ_CHUNK_OBJECT_BYTES,
         )
 
@@ -505,7 +516,10 @@ class ArrayGeometry:
         Zarr reads as many at once as :meth:`readsAtOnce` gives: each holds
         the compressed bytes of the chunks it touches, its decodes, what
         :meth:`heldDecodeBytes` counts, scratch and gap, while their
-        shard-level copies together hold the selection once. The chunks that
+        shard-level copies together hold the selection once. Zarr makes a
+        task for every shard before it reads any, as it does for every chunk
+        of an unsharded read, so the shards it does not read at once hold
+        the objects of a chunk each meanwhile. The chunks that
         a read decodes at once, in the array or in each shard, also follow
         :meth:`readsAtOnce`. A read that takes ``indexes`` positions by index
         arrays rather than slices, on any of its axes, also holds Zarr's
@@ -518,7 +532,8 @@ class ArrayGeometry:
         them on its pool's threads, one for each chunk it decodes at once.
         """
         touched = max(1, int(chunks))
-        decoding, reading = self.readsAtOnce(touched, decodes, shards)
+        touched_shards = max(1, int(shards))
+        decoding, reading = self.readsAtOnce(touched, decodes, touched_shards)
         result = max(0, int(resultBytes))
         held = self.heldDecodeBytes(touched, decoding)
         copies = reading * decoding if self.fusedPoolWorkers else 1
@@ -538,7 +553,8 @@ class ArrayGeometry:
             + self.readScratchBytes
             + max(0, int(gapBytes))
         )
-        return 2 * result + reading * shard + indexed
+        waiting = (touched_shards - reading) * _READ_CHUNK_OBJECT_BYTES
+        return 2 * result + reading * shard + waiting + indexed
 
     def binOf(self, axis: int, indices: np.ndarray) -> np.ndarray:
         """Map indices along one axis to the chunk they live in."""

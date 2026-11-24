@@ -174,6 +174,7 @@ def subset_assay_zarr(
                     rows_contiguous=contiguous,
                     concurrency=concurrency,
                     shards=shards,
+                    band_rows=rows,
                 )
                 return fixed + int(rows) * per_row
 

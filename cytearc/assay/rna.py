@@ -12,6 +12,7 @@ from ..storage.execution import admit_stream
 from ..storage.geometry import array_geometry
 from ..storage.partition import (
     affordable_width,
+    band_shards,
     is_contiguous,
     row_band,
     row_read_parts,
@@ -686,26 +687,38 @@ class RNAassay(Assay):
             return out
 
         geometry = array_geometry(zarr_arr)
-        decode_bytes, read_row_bytes = row_read_parts(
-            geometry, union, rows_contiguous=is_contiguous(cell_idx)
-        )
+        contiguous = is_contiguous(cell_idx)
         resident_bytes += sum(value.nbytes for value in out.values())
         float_row_bytes = max(1, len(union)) * 2 * np.dtype(np.float64).itemsize
-        row_bytes = (
-            max(1, len(union)) * np.dtype(zarr_arr.dtype).itemsize
-            + float_row_bytes
-            + read_row_bytes
+        value_row_bytes = (
+            max(1, len(union)) * np.dtype(zarr_arr.dtype).itemsize + float_row_bytes
         )
+
+        def block_bytes(rows: int) -> tuple[int, int]:
+            """The decode bytes of a block of ``rows`` cells, and the bytes of each of its cells."""
+            # A block's read holds the tasks of the shards that its cells fall in.
+            decode, read_row = row_read_parts(
+                geometry,
+                union,
+                rows_contiguous=contiguous,
+                shards=band_shards(geometry, cell_idx, rows),
+                band_rows=rows,
+            )
+            return decode, value_row_bytes + read_row
+
+        def fits(rows: int) -> bool:
+            decode, row_bytes = block_bytes(rows)
+            return (
+                resident_bytes + rows * row_bytes + decode <= self.resources.memoryBytes
+            )
+
         block_rows = max(
             1,
             affordable_width(
-                lambda rows: (
-                    resident_bytes + rows * row_bytes + decode_bytes
-                    <= self.resources.memoryBytes
-                ),
-                min(n_cells, row_band(geometry, unit="chunk", fallback=n_cells)),
+                fits, min(n_cells, row_band(geometry, unit="chunk", fallback=n_cells))
             ),
         )
+        decode_bytes, row_bytes = block_bytes(block_rows)
 
         counts_t = self.rawDataT
         # An RNA assay opens only with a complete countsT.

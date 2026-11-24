@@ -1794,11 +1794,21 @@ def test_copying_a_sharded_array_reserves_its_shard_read(tmp_path, monkeypatch):
     # at most 256 + 256 // 128 + 1,024 bytes, and decodes one chunk at a time
     # beside the buffer of the shard's file and the objects of Zarr's read:
     # 32 KiB, 4 KiB for each of the four chunks and 16 KiB for the decode.
+    # The band spans the source's two shards, read one at a time, and the
+    # task that Zarr makes for the second holds the objects of a chunk, 4 KiB,
+    # while it reads the first.
     from tests.storage_helpers import local_read_buffer
 
     buffer = local_read_buffer(tmp_path / "source.zarr/data/zarr.json", ranged=True)
     assert recorded == [
-        2_048 + 4 * (256 + 2 + 1_024) + 256 + buffer + 32_768 + 4 * 4_096 + 16_384
+        2_048
+        + 4 * (256 + 2 + 1_024)
+        + 256
+        + buffer
+        + 32_768
+        + 4 * 4_096
+        + 16_384
+        + 4_096
     ]
     np.testing.assert_array_equal(target[:], expected)
 

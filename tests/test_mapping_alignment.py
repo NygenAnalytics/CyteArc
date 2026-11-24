@@ -93,6 +93,7 @@ def _query_assay(
     feature_ids: list[str],
     *,
     chunks: tuple[int, int] = (3, 2),
+    shards: tuple[int, int] | None = None,
     size_factor: int = 997,
     read_only: bool = False,
     feature_names: list[str] | None = None,
@@ -103,6 +104,7 @@ def _query_assay(
         "counts",
         shape=values.shape,
         chunks=chunks,
+        shards=shards,
         dtype=values.dtype,
     )
     writable_counts[:] = values
@@ -377,15 +379,17 @@ def test_aligned_blocks_flag_rows_without_overlap_counts(
 
 
 def test_aligned_feature_stream_bounds_rows_under_tiny_budget() -> None:
+    # One row chunk, so a block of any number of cells reads the same chunk.
     counts = np.arange(1, 29, dtype=np.uint32).reshape(7, 4)
     assay, _, _ = _query_assay(
         counts,
         ["a", "b", "extra", "other"],
-        chunks=(5, 2),
+        chunks=(7, 2),
     )
     roomy = _stream(assay)
+    decode, read_row = roomy._read_parts(2)
     two_row_budget = ResourceBudget(
-        roomy._resident_bytes + roomy._decode_bytes + 2 * roomy._stream_row_bytes,
+        roomy._resident_bytes + decode + 2 * (roomy._stream_row_bytes + read_row),
         8,
     )
     bounded = _stream(assay, resources=two_row_budget)
@@ -397,6 +401,59 @@ def test_aligned_feature_stream_bounds_rows_under_tiny_budget() -> None:
     assert bounded.row_geometry.boundaries == ((0, 2), (2, 4), (4, 6), (6, 7))
 
 
+def test_aligned_feature_stream_charges_each_block_the_shards_of_its_cells(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cytearc.mapping.features as mapping_features
+    from cytearc.storage.geometry import array_geometry
+    from cytearc.storage.partition import row_read_parts
+    from tests.memory_helpers import traced_selection_read
+
+    # 30,000 cells by 20 features of random counts in shards of 100 cells,
+    # and the reference's one feature of a cell from each of 300 shards in a
+    # shuffled order, read in blocks of a row chunk, 100 cells, each in 100
+    # shards.
+    rng = np.random.default_rng(8)
+    counts = rng.integers(1, 1 << 16, size=(30_000, 20), dtype=np.uint16)
+    names = [f"g{index}" for index in range(20)]
+    assay, _, stored = _query_assay(counts, names, chunks=(100, 10), shards=(100, 20))
+    cells = rng.permutation(np.arange(300) * 100 + 7)
+    charged: list[tuple[int, tuple[int, int]]] = []
+
+    def recorded_parts(*args: Any, **kwargs: Any) -> tuple[int, int]:
+        parts = row_read_parts(*args, **kwargs)
+        charged.append((kwargs.get("shards", 1), parts))
+        return parts
+
+    monkeypatch.setattr(mapping_features, "row_read_parts", recorded_parts)
+    stream = _stream(
+        assay,
+        cells=cells,
+        reference_ids=np.array(["g4"]),
+        means=np.array([0.0]),
+        resources=ResourceBudget(1 << 30, 1),
+    )
+    boundaries = stream.row_geometry.boundaries
+    assert boundaries == ((0, 100), (100, 200), (200, 300))
+    values = np.concatenate([block.values for block in stream.iter_blocks()])
+    library = counts[cells].sum(axis=1, dtype=np.float64)
+    np.testing.assert_allclose(
+        values[:, 0], 10 * counts[cells, 4].astype(np.float64) / library, rtol=1e-12
+    )
+    # Each block's cells fall in 100 shards, as many as its charge counts.
+    assert {len(set((cells[a:b] // 100).tolist())) for a, b in boundaries} == {100}
+    shards, (fixed, per_row) = charged[-1]
+    assert shards == 100
+    feature = stream.query_feature_indices
+    read, peak = traced_selection_read(stored, cells[:100], feature)
+    assert peak <= read.nbytes + fixed + 100 * per_row
+    # A charge of one shard's task falls short of the read.
+    one_fixed, one_per_row = row_read_parts(
+        array_geometry(stored), feature, rows_contiguous=False
+    )
+    assert peak > read.nbytes + one_fixed + 100 * one_per_row
+
+
 def test_aligned_feature_stream_reserves_downstream_mapping_memory() -> None:
     counts = np.arange(1, 29, dtype=np.uint32).reshape(7, 4)
     assay, _, _ = _query_assay(
@@ -405,10 +462,9 @@ def test_aligned_feature_stream_reserves_downstream_mapping_memory() -> None:
         chunks=(5, 2),
     )
     baseline = _stream(assay)
+    decode, read_row = baseline._read_parts(1)
     budget = ResourceBudget(
-        baseline._resident_bytes
-        + baseline._decode_bytes
-        + 4 * baseline._stream_row_bytes,
+        baseline._resident_bytes + decode + 4 * (baseline._stream_row_bytes + read_row),
         2,
     )
     reserved = _stream(

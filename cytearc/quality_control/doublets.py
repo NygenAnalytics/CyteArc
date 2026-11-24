@@ -43,6 +43,7 @@ from ..storage.geometry import array_geometry
 from ..storage.parallel import stream_shards
 from ..storage.partition import (
     affordable_width,
+    band_shards,
     is_contiguous,
     row_band,
     row_read_parts,
@@ -740,22 +741,27 @@ def _admit(
 def _doublet_batch_rows(
     resources: ResourceBudget,
     preferred: int,
-    row_bytes: int,
+    batch_bytes: Callable[[int], tuple[int, int]],
     resident_bytes: int,
-    decode_bytes: int = 0,
     room: _ScoringRoom | None = None,
 ) -> int:
-    rows = affordable_width(
-        lambda n: (
-            resident_bytes + n * row_bytes + decode_bytes <= resources.memoryBytes
-        ),
-        preferred,
-    )
+    """Return the rows of the next batch, up to ``preferred``, admitted beside ``resident_bytes``.
+
+    ``batch_bytes(rows)`` gives what a batch of ``rows`` rows holds and the
+    bytes that its read decodes beside them.
+    """
+
+    def fits(rows: int) -> bool:
+        held, decode = batch_bytes(rows)
+        return resident_bytes + held + decode <= resources.memoryBytes
+
+    rows = affordable_width(fits, preferred)
+    held, decode = batch_bytes(max(1, rows))
     _admit(
         resources,
-        block_bytes=max(1, rows) * row_bytes,
+        block_bytes=held,
         resident_bytes=resident_bytes,
-        decode_bytes=decode_bytes,
+        decode_bytes=decode,
         room=room,
     )
     return rows
@@ -777,13 +783,28 @@ def _load_parent_counts(
     geometry = array_geometry(backing)
     preferred = row_band(geometry, unit="chunk", fallback=1_000)
     columns = np.asarray(feature_indices, dtype=np.int64)
-    decode_bytes, read_row_bytes = row_read_parts(
-        geometry, columns, rows_contiguous=is_contiguous(cell_indices)
-    )
+    contiguous = is_contiguous(cell_indices)
     parts: list[csr_matrix] = []
     retained = 0
     # Dense read, sparse conversion scratch, and the eventual concatenation copy.
-    row_bytes = len(columns) * (4 * (raw.dtype.itemsize + 8)) + 32 + read_row_bytes
+    value_row_bytes = len(columns) * (4 * (raw.dtype.itemsize + 8)) + 32
+
+    def block_bytes(start: int) -> Callable[[int], tuple[int, int]]:
+        """What a block of the parents from ``start`` holds, for each of its sizes."""
+
+        def held(rows: int) -> tuple[int, int]:
+            # The block's read holds the tasks of the shards that its rows
+            # fall in.
+            decode, read_row = row_read_parts(
+                geometry,
+                columns,
+                rows_contiguous=contiguous,
+                shards=band_shards(geometry, cell_indices[start : start + rows], rows),
+                band_rows=rows,
+            )
+            return rows * (value_row_bytes + read_row), decode
+
+        return held
 
     def boundaries() -> Iterator[tuple[int, int]]:
         start = 0
@@ -791,9 +812,8 @@ def _load_parent_counts(
             rows = _doublet_batch_rows(
                 resources,
                 min(preferred, len(cell_indices) - start),
-                row_bytes,
+                block_bytes(start),
                 resident_bytes + columns.nbytes + 2 * retained,
-                decode_bytes,
                 room,
             )
             yield start, start + rows
@@ -1331,7 +1351,11 @@ def _simulate_sample(
         array_geometry(assay.rawData._backing), unit="chunk", fallback=1_000
     )
     batch_rows = _doublet_batch_rows(
-        resources, min(preferred, plan.simulated), row_bytes, resident, room=room
+        resources,
+        min(preferred, plan.simulated),
+        lambda rows: (rows * row_bytes, 0),
+        resident,
+        room=room,
     )
     with process_thread_limit(resources.workers):
         for start in range(0, plan.simulated, batch_rows):
