@@ -43,6 +43,7 @@ from cytearc.trajectory.states import (
     state_cells,
     state_labels,
     state_names,
+    trial_limit,
 )
 from cytearc.utils.memory_budget import MemoryBudgetError
 
@@ -150,9 +151,12 @@ def test_two_joined_blocks_give_their_indicators_and_the_coarse_walk_worked_by_h
 
     values, vectors = leading_eigenvectors(walk, 3)
     basis = invariant_basis(walk, values, vectors, 2)
-    memberships = basis @ optimize_rotation(basis)
+    rotation, converged = optimize_rotation(basis)
+    memberships = basis @ rotation
     coarse, walk_share = coarse_grain(walk, memberships)
 
+    # Two states have nothing to optimize, so their search counts as converged.
+    assert converged is True
     assert values[1].real == pytest.approx(1.0 - e1 - e2, abs=1e-12)
     first = np.r_[np.ones(size), np.zeros(size)]
     order = np.argsort(-memberships[0])
@@ -568,6 +572,71 @@ def test_the_search_is_the_same_twice_and_for_cells_in_another_order() -> None:
     assert shuffled.roles == found.roles
 
 
+def _counted_trials(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Count the trials whose crispness Nelder-Mead evaluates, leaving each one's value as it is."""
+    calls = [0]
+    original = states_module._trial_gap
+
+    def counted(*args: Any) -> float:
+        calls[0] += 1
+        return original(*args)
+
+    monkeypatch.setattr(states_module, "_trial_gap", counted)
+    return calls
+
+
+@pytest.mark.parametrize(
+    ("n_states", "limit", "converged"), [(6, 5_000, True), (8, 9_800, False)]
+)
+def test_a_search_says_whether_nelder_mead_converged_within_its_limit_of_trials(
+    monkeypatch: pytest.MonkeyPatch, n_states: int, limit: int, converged: bool
+) -> None:
+    # SciPy's fmin evaluates at most 200 trials per free entry of the
+    # rotation, 200 * (n_states - 1)**2. On the saved walk, 6 states converge
+    # after 1,967 trials, while 8 states would need 14,583, far past their
+    # limit, with Accelerate's and OpenBLAS's rounding alike.
+    reference = _reference()
+    trials = _counted_trials(monkeypatch)
+
+    found = find_states(_reference_graph(reference), reference["direction"], n_states)
+
+    assert trial_limit(n_states) == limit
+    assert found.optimization_converged is converged
+    if converged:
+        # The converged search stops well short of its limit.
+        assert trials[0] < 0.5 * limit
+    else:
+        assert trials[0] == limit
+
+
+def test_nelder_mead_stopped_by_its_iterations_has_not_converged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scipy.optimize import fmin
+
+    # The search allows fmin as many iterations as evaluations, and every
+    # iteration evaluates at least one trial, so the evaluations reach their
+    # limit first. A limit of 2 iterations stops 4 states of the saved walk
+    # long before the 232 trials in which they converge.
+    reference = _reference()
+    graph, direction = _reference_graph(reference), reference["direction"]
+    assert find_states(graph, direction, 4).optimization_converged is True
+    trials = _counted_trials(monkeypatch)
+    monkeypatch.setattr(
+        states_module,
+        "fmin",
+        lambda objective, start, **options: fmin(
+            objective, start, **{**options, "maxiter": 2}
+        ),
+    )
+
+    found = find_states(graph, direction, 4)
+
+    assert found.optimization_converged is False
+    # The evaluations stayed far below their limit of 1,800.
+    assert 0 < trials[0] < 100
+
+
 # The operation -----------------------------------------------------------------
 
 #: The saved process with an island of 12 cells, a component of its own.
@@ -859,6 +928,102 @@ def test_eigenvalues_that_tie_at_the_last_state_are_named_in_a_warning() -> None
     assert trajectory.store.artifacts.inspect(four).diagnostics["boundaryGap"] > 0.1
 
 
+def _optimization_warnings(warned: Any) -> list[DiagnosticWarning]:
+    return [
+        warning.message
+        for warning in warned
+        if isinstance(warning.message, DiagnosticWarning)
+        and warning.message.diagnostic == "crispnessOptimization"
+    ]
+
+
+def test_a_search_that_stops_at_its_limit_of_trials_records_it_and_warns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The saved process's searched cells are the saved walk's: 8 states stop
+    # Nelder-Mead at its limit of 200 * 7**2 trials, while 5 converge.
+    trajectory, direction, _labels = _process_store()
+    trials = _counted_trials(monkeypatch)
+
+    with pytest.warns(DiagnosticWarning) as warned:
+        stopped = _states(trajectory, direction, n_states=8)
+
+    assert trials[0] == 9_800
+    [warning] = _optimization_warnings(warned)
+    message = str(warning)
+    assert message.startswith(
+        "The optimization of the memberships of 8 states stopped at its limit of "
+        "9,800 trials before their crispness converged"
+    )
+    assert "a small change to the graph can give other terminal states" in message
+    assert message.endswith(
+        "Compare the terminal states with those of n_states=7 and n_states=9, or "
+        "check each terminal state with markers"
+    )
+    assert warning.operation == "find_trajectory_states"
+    assert warning.value == "stopped_at_limit"
+    diagnostics = trajectory.store.artifacts.inspect(stopped).diagnostics
+    assert diagnostics["crispnessOptimization"] == "stopped_at_limit"
+    assert list(diagnostics) == [
+        "searchedCells",
+        "cellsLeftOut",
+        "terminalStates",
+        "statesShortOfCells",
+        "crispness",
+        "crispnessOptimization",
+        "boundaryGap",
+    ]
+
+    # The reused search warns again, from its saved diagnostics.
+    trials[0] = 0
+    with pytest.warns(DiagnosticWarning) as warned:
+        assert _states(trajectory, direction, n_states=8) == stopped
+    assert trials[0] == 0
+    assert len(_optimization_warnings(warned)) == 1
+
+    # A search that converges records it, and says nothing of its trials.
+    with pytest.warns(DiagnosticWarning) as warned:
+        converged = _states(trajectory, direction, n_states=5)
+    assert 0 < trials[0] < 0.5 * 3_200
+    assert _optimization_warnings(warned) == []
+    assert (
+        trajectory.store.artifacts.inspect(converged).diagnostics[
+            "crispnessOptimization"
+        ]
+        == "converged"
+    )
+
+
+def test_a_search_saved_without_its_optimization_record_is_computed_anew() -> None:
+    # A search saved before the artifact recorded how its optimization ended
+    # lacks the diagnostic: no call reuses it, and loading it names the call
+    # that saves it anew.
+    trajectory, direction, _labels = _process_store()
+    with pytest.warns(DiagnosticWarning):
+        earlier = _states(trajectory, direction)
+    group = artifact_group(trajectory.store.zw, earlier)
+    saved = dict(group.attrs["diagnostics"])
+    del saved["crispnessOptimization"]
+    group.attrs["diagnostics"] = saved
+
+    with pytest.raises(ValueError, match="call ds.trajectory.states again"):
+        trajectory.store.trajectory.load_states(earlier)
+    with pytest.warns(DiagnosticWarning):
+        again = _states(trajectory, direction)
+
+    assert again != earlier
+    assert len(_state_artifacts(trajectory)) == 2
+    # The search computed anew finds the same memberships.
+    np.testing.assert_array_equal(
+        trajectory.store.trajectory.load_states(again).memberships,
+        group["memberships"][:],
+    )
+    assert (
+        trajectory.store.artifacts.inspect(again).diagnostics["crispnessOptimization"]
+        == "converged"
+    )
+
+
 def test_loading_a_search_is_charged_to_the_memory_budget() -> None:
     trajectory, direction, _labels = _process_store()
     with pytest.warns(DiagnosticWarning):
@@ -915,7 +1080,13 @@ def test_the_budget_that_a_refusal_names_runs_the_search() -> None:
         _states(trajectory, direction, n_states=_PATH_STATES)
 
     _set_budget(trajectory.store, refused.value.needed_bytes)
-    _states(trajectory, direction, n_states=_PATH_STATES)
+    # Sixteen states of the path stop Nelder-Mead at its limit of 45,000
+    # trials, while they would need 99,402 to converge with Accelerate's
+    # rounding and 122,897 with OpenBLAS's.
+    with pytest.warns(
+        DiagnosticWarning, match="16 states stopped at its limit of 45,000 trials"
+    ):
+        _states(trajectory, direction, n_states=_PATH_STATES)
 
     assert len(_state_artifacts(trajectory)) == 1
 
@@ -1420,7 +1591,9 @@ def test_the_simplex_of_many_states_stays_within_the_estimate(
     monkeypatch.setattr(
         states_module,
         "fmin",
-        lambda objective, start, disp: fmin(objective, start, disp=disp, maxiter=2),
+        lambda objective, start, **options: fmin(
+            objective, start, **{**options, "maxiter": 2}
+        ),
     )
     optimize_rotation(basis)
     tracemalloc.start()
