@@ -13,7 +13,11 @@ from zarr.storage import LocalStore
 from cytearc.matrix.chunked import ChunkedArray
 from cytearc.storage.budget import ResourceBudget
 from cytearc.storage.execution import execution_report_scope
-from cytearc.storage.geometry import ArrayGeometry, array_geometry
+from cytearc.storage.geometry import (
+    _BAND_LEFTOVER_LIMIT_BYTES,
+    ArrayGeometry,
+    array_geometry,
+)
 from cytearc.storage.partition import row_read_parts
 from tests.memory_helpers import decodes_held_together
 from tests.thread_helpers import blas_threads, raised_threads
@@ -807,10 +811,16 @@ def test_a_read_of_cells_spread_over_shards_holds_a_task_for_each_shard(
     ("chunk", "touched", "left", "short"),
     [
         # Two chunks a band, 100 bands: the reads of the 99 bands before the
-        # last took 198 chunks, whose objects pass the 640 KiB at which what
+        # last took 198 chunks, whose objects pass the limit at which what
         # reads in bands leave levels off, where as many cells of one shard
         # are one band and leave none; a charge without them falls short.
-        pytest.param(10, 100, 640 * 1024, 640 * 1024, id="two-chunks-100-bands"),
+        pytest.param(
+            10,
+            100,
+            _BAND_LEFTOVER_LIMIT_BYTES,
+            _BAND_LEFTOVER_LIMIT_BYTES,
+            id="two-chunks-100-bands",
+        ),
         # Five chunks a band, 1,000 bands, against as many cells of the first
         # ten shards, whose nine bands before the last leave the objects of a
         # read, 32 KiB, and of their 45 chunks, 4 KiB each; a charge of what
@@ -819,8 +829,8 @@ def test_a_read_of_cells_spread_over_shards_holds_a_task_for_each_shard(
         pytest.param(
             4,
             1_000,
-            640 * 1024 - (32 * 1024 + 45 * 4_096),
-            (640 - 192) * 1024,
+            _BAND_LEFTOVER_LIMIT_BYTES - (32 * 1024 + 45 * 4_096),
+            _BAND_LEFTOVER_LIMIT_BYTES - 192 * 1024,
             id="five-chunks-1000-bands",
             marks=pytest.mark.slow,
         ),
@@ -859,8 +869,8 @@ def test_a_read_in_bands_of_cells_spread_over_shards_holds_what_the_bands_before
     monkeypatch.setattr(virtual_arrays, "_read_bands", recording)
     spread = np.arange(touched) * 100 + 7
     block = ChunkedArray(stored, rows=spread, cols=columns, block_size=touched)
-    # Each traced read starts after a full collection, so the objects that
-    # the earlier bands leave stay until the collector next runs.
+    # Each traced read starts after a full collection, which empties CPython's
+    # free lists, so the reads of the earlier bands fill them again.
     read, peak = traced_selection_read(stored, spread, columns)
     np.testing.assert_array_equal(
         read.view(np.uint32), values[np.ix_(spread, columns)].view(np.uint32)

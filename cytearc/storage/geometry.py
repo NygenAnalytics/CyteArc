@@ -48,24 +48,51 @@ ROW_BLOCK_BYTES = 512
 #: decode at once 12.5 KB, on Zarr 3.4 after a full collection had emptied
 #: CPython's free lists, so that each object was allocated anew; reads of
 #: tiny chunks are held between half of these charges and the whole of them.
-#: Once a read returns, the objects of the read and of its chunks stay held
-#: until its caller lets go of them, CPython reuses them from its free lists
-#: or Python's next collection frees the reference cycles of Zarr's event
-#: loop among them: a read of one chunk left up to 23 KB, and each further
-#: chunk up to 2.4 KB more, traced after reads of 1 to 100 chunks, in shards
-#: and not, on Python 3.13 to 3.15.
+#: Once a read returns, what its caller keeps stays held, and CPython keeps
+#: the objects of a few kinds that the read freed on its free lists for
+#: reuse, which only a collection of the oldest generation empties
+#: (https://github.com/python/cpython/blob/v3.13.18/Python/gc.c#L1464-L1468);
+#: no reference cycle holds them. A read of one chunk left up to 23 KB, and
+#: each further chunk up to 2.4 KB more, traced after reads of 1 to 100
+#: chunks, in shards and not, on Python 3.13 to 3.15.
 _READ_OBJECT_BYTES = 32 * 1024
 _READ_CHUNK_OBJECT_BYTES = 4 * 1024
 _READ_DECODE_OBJECT_BYTES = 16 * 1024
-#: What the reads of a band each leave of their objects levels off as CPython
-#: reuses the objects it freed for the next reads: 140 to 150 KB after 100 to
-#: 2,000 reads of a band of a one-dimensional array, on Python 3.13 and 3.14.
+#: What reads in bands leave levels off once the free lists that they fill
+#: are full. On Python 3.13, tuple() of an iterator without a length
+#: allocates ten items and shrinks the tuple to those it got
+#: (https://github.com/python/cpython/blob/v3.13.18/Objects/abstract.c#L2039-L2120),
+#: so each tuple that Zarr builds so, once freed, joins the free list of its
+#: final length without having come from it, until that list holds 2,000
+#: tuples; each length from 1 to 20 items has a list
+#: (https://github.com/python/cpython/blob/v3.13.18/Include/internal/pycore_freelist.h#L16-L18).
+#: A read of a one-dimensional array fills the list of tuples of 1 item,
+#: 96,000 bytes, and what 100 to 4,000 reads of a band of flags left, the
+#: other free lists and the objects that the reads keep among it, levelled
+#: off at 140 to 154 KB on Python 3.13.
 _READ_LEFTOVER_LIMIT_BYTES = 192 * 1024
-#: Reads of rows of an array of more axes leave more of their objects: on
-#: Python 3.13, 1,000 to 4,000 Zarr reads of one row of a two-dimensional
-#: sharded array, of 2, 4 and 16 chunks each, left 265, 422 and 613 KB, by
-#: slices and index arrays alike, and on Python 3.14 17 to 23 KB.
-_BAND_LEFTOVER_LIMIT_BYTES = 640 * 1024
+#: A read of a band of an array of more axes also fills the lists of tuples
+#: of one item an axis and of one item a chunk that it takes along an axis
+#: of a shard, up to 20 chunks, the longest tuple a list keeps. For arrays of
+#: up to three axes, those lists hold 2,000 tuples of 1, 3 and 20 items, 40
+#: bytes and 8 an item each on Python 3.13. Beside them, the other free lists
+#: that the reads use hold up to 80 lists, 80 dicts and their key tables of
+#: 128 bytes, 100 floats and 255 contexts, and a whole read of 1,000 bands
+#: of 20 chunks left up to 82 KB more once it returned, what a full
+#: collection does not free and the objects of its last band's read, which
+#: 96 KiB covers: it left 715 KB beside its result for rows of 20 chunks and
+#: 734 KB for 1 by 20 chunks of an array of three axes. Python 3.14 builds a
+#: tuple from an iterator at its final length
+#: (https://github.com/python/cpython/pull/127758), so the same reads leave
+#: 30 to 57 KB there, against the same limit.
+_BAND_LEFTOVER_LIMIT_BYTES = (
+    2_000 * ((40 + 8) + (40 + 3 * 8) + (40 + 20 * 8))
+    + 80 * 56
+    + 80 * (64 + 128)
+    + 100 * 24
+    + 255 * 64
+    + 96 * 1024
+)
 
 #: Zarr's orthogonal indexer orders the positions of an index array by chunk
 #: in arrays of int64. While it builds them it holds each position's chunk,
@@ -292,8 +319,9 @@ class ArrayGeometry:
         """Return what the reads of ``bands`` bands of chunks leave of their objects once they return.
 
         The reads take every chunk of the bands, as :meth:`chunksLeftoverBytes`
-        counts them, up to 192 KiB for a one-dimensional array and up to 640
-        KiB for an array of more axes, whose reads of rows leave more.
+        counts them, up to 192 KiB for a one-dimensional array and up to 743
+        KiB for an array of more axes, whose reads fill more of CPython's free
+        lists of tuples.
         """
         limit = (
             _READ_LEFTOVER_LIMIT_BYTES
@@ -312,8 +340,8 @@ class ArrayGeometry:
         They are counted as :meth:`objectBytes` counts the objects of a read
         and of each chunk that it takes while it runs, for every chunk,
         whether one read takes them or a read of each band does, up to
-        ``limit``, where what the reads leave levels off as CPython reuses
-        the objects it freed: 192 KiB unless given, which whole reads of
+        ``limit``, where what the reads leave levels off once the free lists
+        that they fill are full: 192 KiB unless given, which reads of
         one-dimensional arrays stay within.
         """
         chunks = max(0, int(chunks))
