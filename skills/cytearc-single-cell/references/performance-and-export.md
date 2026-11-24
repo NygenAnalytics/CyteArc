@@ -218,15 +218,7 @@ normed = ds.to_anndata(run=run, matrix="normed")      # run["normalized"]: float
 cytearc.to_h5ad(ds.RNA, "baseline_normed.h5ad", run=run, matrix="normed")   # same, streamed
 ```
 
-`feature_names` (exact, unique, ordered) and `feature_indexes` are mutually exclusive and are
-rejected together with `run=`. Without `run`, `cell_key` (default `"I"`) selects cells, and
-`obs_names` are the cell `ids`: a panel export is the cheapest per-cell marker table.
-With `run=`, `matrix="normed"` exports the run's stored `normalized` artifact, exactly what its PCA
-or LSI read, so `X` and `var` cover only the run's selected features (highly variable genes,
-prevalent peaks or the ADT panel); `layers` align to them. It raises `ValueError` when the run has
-no normalized output (a multimodal run) or its artifact does not cover the run's cells and
-selected features. Without `run=`, `to_anndata(matrix="normed")` normalizes now with the
-assay's `normed` (`norm_lib_size`: 1000 per cell over all genes, no log), and `to_h5ad` rejects it.
+`feature_names` (exact, unique, ordered) and `feature_indexes` are mutually exclusive and are rejected together with `run=`. Without `run`, `cell_key` (default `"I"`) selects cells, and `obs_names` are the cell `ids`: a panel export is the cheapest per-cell marker table. With `run=`, `matrix="normed"` exports the run's stored `normalized` artifact, exactly what its PCA or LSI read, so `X` and `var` cover only the run's selected features (highly variable genes, prevalent peaks or the ADT panel); `layers` align to them. It raises `ValueError` when the run has no normalized output (a multimodal run) or its artifact does not cover the run's cells and selected features. Without `run=`, `to_anndata(matrix="normed")` normalizes now with the assay's `normed` (`norm_lib_size`: 1000 per cell over all genes, no log), and `to_h5ad` rejects it. On a merged store, `to_anndata(matrix="normed")` refuses a feature that the dataset of some exported cell did not measure (`measured_in_<dataset>` feature columns): pass `feature_names` that every dataset measured, or a `cell_key` of the datasets that measured them.
 
 ### Export markers and metadata tables
 

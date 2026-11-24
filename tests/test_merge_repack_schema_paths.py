@@ -1353,12 +1353,13 @@ def _zeros_read_as_counts(first: str = "left", *, adt: bool = False) -> str:
         " The merge writes zero counts for the features a source lacks; columns "
         f"such as 'measured_in_{first}' record what each source measured, so "
         + (
-            "plots, marker search, compare.test and the ADT recipe leave those "
-            "zeros out, while normalization and scores still read them as counts."
+            "analyses leave those zeros out or refuse them, except some that "
+            "still read them as counts, such as features.detected and "
+            "add_grouped_assay."
             if adt
-            else "plots, marker search and compare.test leave those zeros out, "
-            "while normalization, feature selection and scores still read them "
-            "as counts."
+            else "analyses leave those zeros out or refuse them, except some that "
+            "still read them as counts, such as cell-cycle and chromVAR scores, "
+            "features.detected, add_grouped_assay and mapping."
         )
     )
 
@@ -2253,7 +2254,7 @@ def _merged_panel_store(tmp_path: Path) -> str:
 
 
 def test_a_merge_records_each_source_of_a_merged_source_in_every_assay(tmp_path):
-    from cytearc.metadata.membership import features_measured_by_cells
+    from cytearc.metadata.membership import cells_measured_features
 
     inner = str(tmp_path / "inner.zarr")
     # The first source holds no ADT, so the inner store records the panels of
@@ -2323,20 +2324,20 @@ def test_a_merge_records_each_source_of_a_merged_source_in_every_assay(tmp_path)
     )
     for source, panel in (("left", _LEFT_PANEL), ("right", _RIGHT_PANEL)):
         rows = np.flatnonzero(np.char.startswith(ids, f"inner__{source}__"))
-        measured = features_measured_by_cells(
+        measured = cells_measured_features(
             store.cells, store.ADT.feats, rows, assay="ADT"
         )
         assert measured is not None
-        assert np.asarray(adt)[measured].tolist() == [
+        assert np.asarray(adt)[measured.measured].tolist() == [
             name for name in adt if name in panel
         ]
-    measured = features_measured_by_cells(
+    measured = cells_measured_features(
         store.cells,
         store.RNA.feats,
         np.flatnonzero(np.char.startswith(ids, "inner__")),
         assay="RNA",
     )
-    assert measured is not None and measured.tolist() == inner_genes
+    assert measured is not None and measured.measured.tolist() == inner_genes
 
 
 def test_a_merge_records_an_assay_only_for_the_sources_of_a_merged_store_that_hold_it(
@@ -2406,9 +2407,9 @@ def test_a_merged_store_that_alone_holds_an_assay_keeps_its_zero_counts(tmp_path
         "'CD16', 'CD19'. Source 'inner__right' lacks 2: 'CD45RA', 'CD27'. Merged "
         "source 'inner' holds zero counts for the features its sources lack, "
         "which the merge keeps; columns such as 'measured_in_inner__left' record "
-        "what each source measured, so plots, marker search, compare.test and the "
-        "ADT recipe leave those zeros out, while normalization and scores still "
-        "read them as counts."
+        "what each source measured, so analyses leave those zeros out or refuse "
+        "them, except some that still read them as counts, such as "
+        "features.detected and add_grouped_assay."
     ]
     assert set(_measured_columns(str(tmp_path / "outer.zarr"))) == {
         "measured_in_inner__left",

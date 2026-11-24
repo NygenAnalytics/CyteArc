@@ -57,6 +57,7 @@ from ...graph.feature_projection import (
 )
 from ...graph.kinds import require_graph_kind
 from ...matrix import ChunkedArray
+from ...metadata.membership import require_features_measured_by_cells
 from ...metadata.rows import apply_missing_mask
 from ...neighbors.graph import (
     GraphLoadMemory,
@@ -1080,6 +1081,9 @@ class _GraphOperationsMixin(_GraphOperationsBase):
 
         Raises:
             UnmeasuredCellsError: If the assay did not measure a selected cell.
+            ValueError: If the assay records that the source of a selected
+                cell did not measure a selected feature, as the feature
+                columns ``measured_in_<source>`` of a merged store record.
         """
         from ...assay.normalization import normalization_settings
 
@@ -1130,6 +1134,22 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         dataset_fingerprint = self._ensure_dataset_fingerprint(assay_name)
         selections = load_normalization_selections(
             self.zw, assay_name, cell_selection, features
+        )
+        # Only a store whose record leaves out a selected feature reads the
+        # selected cells here.
+        require_features_measured_by_cells(
+            assay.cells,
+            assay.feats,
+            lambda: np.flatnonzero(np.asarray(selections.cells.values[:], dtype=bool)),
+            selections.featureMask,
+            assay=assay_name,
+            of_cells="the selected cells",
+            of_features="selected features",
+            remedy=(
+                "Normalize the cells of the sources that measured them, or a "
+                "feature selection of only the features that every source of the "
+                "selected cells measured."
+            ),
         )
         n_cells = selections.cells.selected_count
         n_features = int(selections.featureMask.sum())

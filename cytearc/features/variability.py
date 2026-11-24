@@ -1428,10 +1428,12 @@ def select_batch_highly_variable_features(
     max_mean: float,
     blacklist: str,
     keep_bounds: bool,
+    active_features: np.ndarray | None = None,
 ) -> BatchRanking:
     """Select highly variable features from the scores of each batch.
 
-    Each batch's candidates pass the blacklist, the detection bounds over
+    Each batch's candidates are ``active_features``, every feature when
+    None, that pass the blacklist, the detection bounds over
     every selected cell, and the log2 bounds on that batch's mean over
     detected cells and on its score (see :func:`hvg_candidates`);
     :func:`combine_batch_rankings` then ranks them. With one batch this is
@@ -1452,6 +1454,8 @@ def select_batch_highly_variable_features(
         max_mean: The log2 upper bound of the mean over detected cells.
         blacklist: A case-insensitive regular expression of excluded names.
         keep_bounds: Whether bounds keep equal values.
+        active_features: The features that may be selected, or None for
+            every feature.
 
     Returns:
         The selection with each feature's batch count and median rank.
@@ -1461,7 +1465,11 @@ def select_batch_highly_variable_features(
             filters.
     """
     scores = np.asarray(scores, dtype=np.float64)
-    allowed = np.ones(scores.shape[1], dtype=bool)
+    allowed = (
+        np.ones(scores.shape[1], dtype=bool)
+        if active_features is None
+        else np.array(active_features, dtype=bool)
+    )
     if blacklist:
         allowed &= ~regex_match_mask(np.asarray(feature_names), blacklist)
     candidates = np.stack(

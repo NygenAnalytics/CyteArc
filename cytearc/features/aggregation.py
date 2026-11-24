@@ -615,6 +615,7 @@ def bulk_profiles(
     remove_empty_features: bool,
     remove_empty_columns: bool,
     feature_label: str,
+    measured: NDArray[np.bool_] | None = None,
 ) -> BulkProfiles:
     """Return the bulk profiles, labeled by feature and by bulk column, as a record.
 
@@ -623,8 +624,10 @@ def bulk_profiles(
     the profiles and detected counts of the columns with cells, in that
     order. Columns without cells are left out, or with
     ``remove_empty_columns=False`` kept, with NaN profiles and no detecting
-    cells. ``remove_empty_features`` leaves out the features whose profile
-    sums to zero over the returned columns, in ``detected`` too.
+    cells. ``measured``, when given, keeps only the features it marks, those
+    that every source of the aggregated cells measured, and
+    ``remove_empty_features`` leaves out the features whose profile sums to
+    zero over the returned columns, both in ``detected`` too.
     """
     counts = np.asarray(n_cells, dtype=np.int64)
     if counts.shape != (len(columns),):
@@ -650,6 +653,10 @@ def bulk_profiles(
         if detected is None
         else frame(detected, np.zeros(features.N, dtype=np.int64))
     )
+    if measured is not None:
+        profile_frame = profile_frame.loc[measured]
+        if detected_frame is not None:
+            detected_frame = detected_frame.loc[measured]
     if remove_empty_features:
         expressed = profile_frame.sum(axis=1) != 0
         profile_frame = profile_frame.loc[expressed]

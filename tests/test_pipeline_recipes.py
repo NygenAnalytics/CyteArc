@@ -1362,9 +1362,10 @@ def test_multimodal_markers_rank_the_antibodies_every_source_of_its_cells_measur
     with pytest.warns(UserWarning) as caught:
         wnn = store.pipeline.multimodal([rna, adt], umap=False)
     assert (
-        "The marker search leaves out the features that some source of the "
-        "selected cells did not measure, since their zero counts in its cells "
-        "are not measurements: 'CD45RA', 'CD19'."
+        "markers.search leaves out 2 features that some source of the selected "
+        "cells did not measure, since their zero counts in its cells are not "
+        "measurements. Source 'left' lacks 1: 'CD19'. Source 'right' lacks 1: "
+        "'CD45RA'."
     ) in [str(warning.message) for warning in caught]
     names = store.ADT.feats.fetch_all("names").astype(str)
     ranked = store.artifacts.inspect(wnn["markers_ADT"]).input_ref("feature_selection")

@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 
 from ....assay import ADTassay
-from ....metadata.membership import features_measured_by_cells
+from ....metadata.membership import cells_measured_features
 from ....utils.arguments import integer_argument, quoted_examples
 from ....utils.logging import logger
 from ..executor import FEATURE_NAMES, PlannedStage, RecipePlan, RunState
@@ -139,8 +139,10 @@ def _resolve_panel(
     features = store._get_assay(assay).feats
     names = np.asarray(features.fetch_all("names")).astype(str)
     excluded = _excluded(names, pattern)
-    by_cells = features_measured_by_cells(store.cells, features, cells, assay=assay)
-    measured = np.ones(len(names), dtype=bool) if by_cells is None else by_cells
+    by_cells = cells_measured_features(store.cells, features, cells, assay=assay)
+    measured = (
+        np.ones(len(names), dtype=bool) if by_cells is None else by_cells.measured
+    )
     unmeasured = ~measured & ~excluded
     kept = int(np.count_nonzero(~excluded & measured))
     if kept < 2:
