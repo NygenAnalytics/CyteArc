@@ -562,9 +562,13 @@ _CONTRACTS = (
             # target features fingerprint records.
             **_classified("transformed", "id_column"),
         },
-        model_only=_classified(
-            "resolved_input", "dataset_fingerprint", "target_features_fingerprint"
-        ),
+        model_only={
+            **_classified(
+                "resolved_input", "dataset_fingerprint", "target_features_fingerprint"
+            ),
+            # The genes that every source of a merged store's cells measured.
+            **_classified("derived", "measured_features_fingerprint"),
+        },
     ),
     OperationContract(
         PerturbationAccessor.edistance,
@@ -574,9 +578,15 @@ _CONTRACTS = (
         PerturbationAccessor.signature,
         metadata_arguments.PerturbationSignatureArguments,
         aliases={"features": "feature_selection", "sample_column": "sample_columns"},
-        model_only=_classified(
-            "resolved_input", "dataset_fingerprint", "sample_assignments_fingerprint"
-        ),
+        model_only={
+            **_classified(
+                "resolved_input",
+                "dataset_fingerprint",
+                "sample_assignments_fingerprint",
+            ),
+            # The genes that every source of a merged store's cells measured.
+            **_classified("derived", "measured_features_fingerprint"),
+        },
     ),
     OperationContract(
         PerturbationAccessor.mixscape,
@@ -600,14 +610,18 @@ _CONTRACTS = (
             # them become fingerprints of target and feature IDs.
             **_classified("transformed", "pairs", "positive_controls", "id_column"),
         },
-        model_only=_classified(
-            "resolved_input",
-            "dataset_fingerprint",
-            "pairs_fingerprint",
-            "positive_controls_fingerprint",
-            "sample_assignments_fingerprint",
-            "covariates_fingerprint",
-        ),
+        model_only={
+            **_classified(
+                "resolved_input",
+                "dataset_fingerprint",
+                "pairs_fingerprint",
+                "positive_controls_fingerprint",
+                "sample_assignments_fingerprint",
+                "covariates_fingerprint",
+            ),
+            # The genes that every source of a merged store's cells measured.
+            **_classified("derived", "measured_features_fingerprint"),
+        },
     ),
     OperationContract(
         PerturbationAccessor.profiles,
@@ -616,12 +630,16 @@ _CONTRACTS = (
         # The ID column matches each target to the feature that masking sets
         # to 0, which the target features fingerprint records.
         signature_only=_classified("transformed", "id_column"),
-        model_only=_classified(
-            "resolved_input",
-            "dataset_fingerprint",
-            "sample_assignments_fingerprint",
-            "target_features_fingerprint",
-        ),
+        model_only={
+            **_classified(
+                "resolved_input",
+                "dataset_fingerprint",
+                "sample_assignments_fingerprint",
+                "target_features_fingerprint",
+            ),
+            # The genes that every source of a merged store's cells measured.
+            **_classified("derived", "measured_features_fingerprint"),
+        },
     ),
     OperationContract(
         PerturbationAccessor.cluster,

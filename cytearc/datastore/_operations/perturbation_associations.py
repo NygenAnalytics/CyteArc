@@ -1,15 +1,23 @@
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import pandas as pd
 import zarr
 
+from ...assay.hvg_statistics import cell_totals
 from ...metadata.arguments import (
     PerturbationAssociationArguments,
     PerturbationLabelArguments,
 )
 from ...metadata.artifacts import write_cell_data_artifact
+from ...metadata.membership import (
+    cells_measured_features,
+    measured_mask,
+    measured_positions,
+    require_measured,
+    warn_left_out,
+)
 from ...metadata.rows import (
     apply_missing_mask,
     array_row_selection_parts,
@@ -100,6 +108,32 @@ _ASSOCIATION_VALUES = (
     "skew_scale",
     "skew_shape",
 )
+
+
+def _cell_depths(
+    expression: Any, cells: np.ndarray, measured: np.ndarray | None, *, held_bytes: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return each cell's UMIs and detected features in ``expression``, in the order of the distinct ``cells``.
+
+    On a store merged from sources that measured different features, both
+    cover the features of the Boolean mask ``measured``, those that every
+    source of the cells measured, as a store of those features alone holds
+    them, so that sceptre's depth covariates compare the cells of every
+    source alike; every feature when it is None.
+    """
+    order = np.argsort(cells, kind="stable")
+    in_order = cells[order]
+    umis = np.empty(len(cells), dtype=np.float64)
+    detected = np.empty(len(cells), dtype=np.float64)
+    umis[order] = cell_totals(expression, in_order, measured, held_bytes=held_bytes)
+    detected[order] = cell_totals(
+        expression,
+        in_order,
+        measured,
+        held_bytes=held_bytes + umis.nbytes,
+        detected=True,
+    )
+    return umis, detected
 
 
 def _chunk_rows(codes: zarr.Array) -> int:
@@ -418,6 +452,20 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         With ``positive_controls="targets"``, a warning names the targets or
         guides whose target matches no feature each time the tests are called.
 
+        On a store merged from sources that measured different features, as
+        its feature columns ``measured_in_<source>`` record, the tests read
+        only the features that every source of the compared cells measured.
+        The compared cells are the control cells and the cells that carry one
+        target or guide alone, or at high MOI every labeled cell. Trans pairs
+        leave the other features of ``features`` out, through a feature
+        selection of the rest, and the positive controls of the targets leave
+        out the targets' genes among them, each with a warning that names
+        them; the calibration pairs draw from those features alone; and each
+        cell's UMIs and detected features, the covariates, cover them alone,
+        as a store of those features holds them. A table of pairs or of
+        positive controls that names another feature is refused. The tests
+        then record those features as ``measured_features_fingerprint``.
+
         Args:
             labels: A ``perturbation_labels`` artifact.
             from_assay: The expression assay, whose counts are tested.
@@ -472,7 +520,9 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
                 below the smallest first-round p-value,
                 ``resampling="conditional"`` goes with ``moi="low"``, trans
                 pairs have no ``features``, a table
-                of pairs is malformed, at low MOI no labeled cell carries
+                of pairs is malformed or names a feature that some source of
+                the compared cells did not measure, every feature of
+                ``features`` was left out, at low MOI no labeled cell carries
                 control guides only, or a tested cell has no sample label, a
                 covariate value that is missing or not finite, or at high MOI
                 no guide UMIs.
@@ -557,20 +607,18 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             return _pairs_fingerprint(rows.names[pair_rows], feature_ids[pair_features])
 
         pairs_fingerprint = None
+        # The features of trans pairs, or None for a table of pairs.
+        chosen: np.ndarray | None = None
         if isinstance(pairs, str):
             assert features is not None
             if str(features.assay) != expression.name:
                 raise ValueError(
                     f"features must be a feature selection of assay {expression.name!r}"
                 )
-            selected = np.asarray(
-                read_feature_selection_indices(self.zw, expression.name, features),
-                dtype=np.int64,
-            )
-            discovery = (
-                np.repeat(np.arange(n_rows, dtype=np.int64), len(selected)),
-                np.tile(selected, n_rows),
-            )
+            chosen = np.zeros(int(expression.feats.N), dtype=bool)
+            chosen[
+                read_feature_selection_indices(self.zw, expression.name, features)
+            ] = True
         else:
             discovery = pair_table_rows(
                 pairs, "pairs", row_targets, feature_ids, feature_names
@@ -578,20 +626,16 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             pairs_fingerprint = pair_fingerprint(*discovery)
         positive_fingerprint = None
         unmatched = np.empty(0, dtype=str)
-        if positive_controls is None:
-            positive = (np.empty(0, np.int64), np.empty(0, np.int64))
-        elif isinstance(positive_controls, str):
+        # Each row's own gene, or -1, for the positive controls of the
+        # targets.
+        row_features: np.ndarray | None = None
+        positive = (np.empty(0, np.int64), np.empty(0, np.int64))
+        if isinstance(positive_controls, str):
             row_features = _row_features(
                 self, labels, rows, id_column, feature_ids, feature_names
             )
-            matched = np.flatnonzero(row_features >= 0)
-            positive = (
-                matched.astype(np.int64),
-                row_features[matched].astype(np.int64),
-            )
             unmatched = rows.names[row_features < 0].astype(str)
-            positive_fingerprint = pair_fingerprint(*positive)
-        else:
+        elif positive_controls is not None:
             positive = pair_table_rows(
                 positive_controls,
                 "positive_controls",
@@ -600,12 +644,94 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
                 feature_names,
             )
             positive_fingerprint = pair_fingerprint(*positive)
+        cell_index = cell_selection_indices(self.zw, cell_selection)
+        n_labeled = len(cell_index)
+        # The compared cells, whose sources must have measured every tested
+        # feature: at high MOI every labeled cell, and otherwise the control
+        # cells and the cells that carry one row alone, read only for a
+        # merge's record of what each source measured.
+        label_groups: tuple[np.ndarray, np.ndarray] | None = None
+
+        def compared_cells() -> np.ndarray:
+            nonlocal label_groups
+            if high:
+                return cell_index
+            label_groups = _label_groups(self, labels, rows, by)
+            row_of, control = label_groups
+            return cell_index[np.flatnonzero(control | (row_of >= 0))]
+
+        cells_measured = cells_measured_features(
+            expression.cells, expression.feats, compared_cells, assay=expression.name
+        )
+        # A table names its features, which every source of the compared cells
+        # must have measured.
+        named: list[tuple[str, np.ndarray]] = []
+        if chosen is None:
+            named.append(("pairs", discovery[1]))
+        if row_features is None and positive_controls is not None:
+            named.append(("positive_controls", positive[1]))
+        for name, named_features in named:
+            asked = np.zeros(int(expression.feats.N), dtype=bool)
+            asked[named_features] = True
+            require_measured(
+                cells_measured,
+                expression.feats,
+                asked,
+                assay=expression.name,
+                of_cells="the compared cells",
+                of_features=f"features of {name}",
+                remedy=(
+                    "Test the cells of the sources that measured them: call the "
+                    "guides of those cells, with a cell_selection that leaves the "
+                    "others out, and label those calls; or leave those pairs out."
+                ),
+            )
+        # Trans pairs and the positive controls of the targets leave out the
+        # features that some source of the compared cells did not measure.
+        if chosen is not None:
+            if cells_measured is not None:
+                features, chosen = cast(Any, self)._measured_feature_selection(
+                    expression,
+                    features,
+                    chosen,
+                    cell_index,
+                    analysis="perturbation.associations",
+                    remedy=(
+                        "Test the cells of the sources that measured them, or "
+                        "features that every source measured."
+                    ),
+                    measured=cells_measured,
+                    of_cells="the compared cells",
+                )
+            selected = np.flatnonzero(chosen).astype(np.int64)
+            discovery = (
+                np.repeat(np.arange(n_rows, dtype=np.int64), len(selected)),
+                np.tile(selected, n_rows),
+            )
+        if row_features is not None:
+            matched = np.flatnonzero(row_features >= 0)
+            if cells_measured is not None:
+                lacked = ~cells_measured.measured[row_features[matched]]
+                if lacked.any():
+                    genes = np.unique(row_features[matched[lacked]])
+                    warn_left_out(
+                        "perturbation.associations",
+                        "positive-control feature",
+                        "the compared cells",
+                        len(genes),
+                        cells_measured.lacking(genes, feature_names),
+                    )
+                    matched = matched[~lacked]
+            positive = (
+                matched.astype(np.int64),
+                row_features[matched].astype(np.int64),
+            )
+            positive_fingerprint = pair_fingerprint(*positive)
         if not len(discovery[0]) and not len(positive[0]):
             raise ValueError(
                 "There is no pair to test; pass pairs or positive controls"
             )
-        cell_index = cell_selection_indices(self.zw, cell_selection)
-        n_labeled = len(cell_index)
+        measured = measured_mask(cells_measured)
         used = np.unique(np.concatenate([discovery[0], positive[0]]))
         compact = np.full(n_rows, -1, dtype=np.int64)
         compact[used] = np.arange(len(used))
@@ -618,7 +744,11 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             # The tested cells: the control cells, then the cells of each
             # tested row, row by row. Only their samples and covariates enter
             # the tests.
-            row_of, control = _label_groups(self, labels, rows, by)
+            row_of, control = (
+                _label_groups(self, labels, rows, by)
+                if label_groups is None
+                else label_groups
+            )
             controls = np.flatnonzero(control)
             target_row = np.where(row_of >= 0, compact[np.maximum(row_of, 0)], -1)
             targets_cells = np.flatnonzero(~control & (target_row >= 0))
@@ -677,6 +807,9 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             sample_columns=cell_samples.columns,
             covariate_columns=covariate_names,
             invalidate_cache=invalidate_cache,
+            measured_features_fingerprint=(
+                None if measured is None else fingerprint_array(measured)
+            ),
         )
         # The tests' identity records the positive pairs, which a table of the
         # same pairs shares, so the targets without a feature are the call's
@@ -735,6 +868,7 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
                 n_calibration_pairs=requested,
                 seed=resolved_seed,
                 resampling=resolved_resampling,
+                measured=measured,
                 operation=arguments.operation,
             )
         else:
@@ -760,6 +894,7 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
                 min_nonzero=floor,
                 n_calibration_pairs=requested,
                 seed=resolved_seed,
+                measured=measured,
                 operation=arguments.operation,
             )
         self._save_association_tables(
@@ -799,6 +934,7 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         min_nonzero: int,
         n_calibration_pairs: int | None,
         seed: int,
+        measured: np.ndarray | None,
         operation: str,
     ) -> AssociationTables:
         """Test each tested row against the control cells, and each calibration group.
@@ -809,10 +945,12 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         row, as ``target_row`` gives each labeled cell's tested row, or -1.
         A calibration group's treatment cells are the control cells whose one
         guide is in the group, compared with the other control cells. The
-        counts are read once for the QC, every feature of the assay when a
-        calibration check runs, and held for the tests when they fit a share
-        of the memory left. The store must be writable for ``operation`` once
-        the memory budget is checked.
+        counts are read once for the QC, every feature of the Boolean mask
+        ``measured``, or of the assay when it is None, when a calibration
+        check runs, and held for the tests when they fit a share of the
+        memory left; each cell's UMIs and detected features cover the same
+        features. The store must be writable for ``operation`` once the
+        memory budget is checked.
         """
         from ...perturbation.associations import (
             CALIBRATION_GROUPS,
@@ -896,9 +1034,11 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         )
         del nt_members
         design = association_covariates(
-            expression._cell_count_totals(tested_cells),
-            read_metadata_rows_chunkwise(
-                self.cells, f"{expression.name}_nFeatures", tested_cells
+            *_cell_depths(
+                expression,
+                tested_cells,
+                measured,
+                held_bytes=len(cell_index) * 48 + groups.members.nbytes,
             ),
             samples,
             extra,
@@ -907,7 +1047,8 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         n_covariates = design.shape[1]
         # The units of the QC counts: each tested row, each control guide, and
         # the control cells without one control guide. Calibration pairs may
-        # take any feature, so the QC reads every feature then.
+        # take any feature that every source measured, so the QC reads every
+        # such feature then.
         n_units = len(used) + n_control_guides + 1
         unit = np.concatenate(
             [
@@ -917,11 +1058,8 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             ]
         ).astype(np.int64)
         target_features_checked = np.unique(np.concatenate([discovery[1], positive[1]]))
-        checked = (
-            np.arange(int(expression.feats.N), dtype=np.int64)
-            if n_groups_nt
-            else target_features_checked
-        )
+        candidates = measured_positions(measured, int(expression.feats.N))
+        checked = candidates if n_groups_nt else target_features_checked
         largest = int(np.diff(groups.offsets).max(initial=0))
         # Every discovery and positive-control pair, and the most calibration
         # pairs that the check can draw.
@@ -930,7 +1068,7 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             + len(positive[0])
             + most_calibration_pairs(
                 n_groups_nt,
-                int(expression.feats.N),
+                len(candidates),
                 len(discovery[0]),
                 n_calibration_pairs,
             )
@@ -1197,6 +1335,7 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         n_calibration_pairs: int | None,
         seed: int,
         resampling: str,
+        measured: np.ndarray | None,
         operation: str,
     ) -> AssociationTables:
         """Test each tested row and calibration group against all other labeled cells.
@@ -1205,10 +1344,13 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         or with ``by="guide"`` that carry the guide, and a calibration group's
         those that carry any of its control guides; ``cells`` are every
         labeled cell's positions in the store. The counts are read once for
-        the QC, every feature of the assay when a calibration check runs, and
-        held for the tests when they fit half the memory left; the tests take
-        bands of genes, each gene fitted once on all cells. The store must be
-        writable for ``operation`` once the memory budget is checked.
+        the QC, every feature of the Boolean mask ``measured``, or of the
+        assay when it is None, when a calibration check runs, and held for
+        the tests when they fit half the memory left; the tests take bands of
+        genes, each gene fitted once on all cells. Each cell's UMIs and
+        detected features in the expression assay cover the same features.
+        The store must be writable for ``operation`` once the memory budget
+        is checked.
         """
         from ...perturbation.associations import (
             CALIBRATION_GROUPS,
@@ -1313,9 +1455,8 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         codes = np.concatenate([used, n_rows + np.arange(n_groups_nt)]).astype(np.int64)
         guide_assay = self._get_assay(str(labels.assay))
         design = association_covariates(
-            expression._cell_count_totals(cells),
-            read_metadata_rows_chunkwise(
-                self.cells, f"{expression.name}_nFeatures", cells
+            *_cell_depths(
+                expression, cells, measured, held_bytes=n_cells * 48 + code_count_bytes
             ),
             samples,
             extra,
@@ -1327,20 +1468,19 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         )
         n_covariates = design.shape[1]
         # The QC counts each row's expressing cells in the features of its
-        # pairs and each calibration group's in every feature, which its pairs
-        # may take.
+        # pairs and each calibration group's in every feature that every
+        # source measured, which its pairs may take.
         n_features = int(expression.feats.N)
         target_features = np.unique(np.concatenate([discovery[1], positive[1]]))
-        checked = (
-            np.arange(n_features, dtype=np.int64) if n_groups_nt else target_features
-        )
+        candidates = measured_positions(measured, int(expression.feats.N))
+        checked = candidates if n_groups_nt else target_features
         target_column = np.full(n_features, -1, dtype=np.int64)
         target_column[target_features] = np.arange(len(target_features))
         n_pairs_most = (
             n_discovery
             + len(positive[0])
             + most_calibration_pairs(
-                n_groups_nt, n_features, n_discovery, n_calibration_pairs
+                n_groups_nt, len(candidates), n_discovery, n_calibration_pairs
             )
         )
         # Each labeled cell's positions, sample, totals and covariates as read

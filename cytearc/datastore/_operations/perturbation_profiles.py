@@ -1,10 +1,11 @@
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import pandas as pd
 
+from ...assay.hvg_statistics import cell_totals
 from ...metadata.arguments import (
     MixscapeArguments,
     PerturbationClusterArguments,
@@ -12,6 +13,7 @@ from ...metadata.arguments import (
     PerturbationProfileArguments,
 )
 from ...metadata.artifacts import write_cell_data_artifact
+from ...metadata.membership import cells_measured_features, measured_mask
 from ...metadata.selection import cell_selection_indices
 from ...perturbation.clusters import PerturbationClusters, cluster_settings
 from ...perturbation.profiles import PerturbationProfiles, profile_settings
@@ -19,6 +21,7 @@ from ...storage.artifact_writer import ArrayRequirement, AttributeRequirement
 from ...storage.artifacts import (
     ArtifactRef,
     artifact_group,
+    fingerprint_array,
     fingerprint_strings,
     inspect_artifact,
     require_complete_artifact,
@@ -248,6 +251,16 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
         the profiled perturbations, in bands of features that fit the memory
         budget, and the profiles do not depend on the bands or the threads.
 
+        On a store merged from sources that measured different features, as
+        its feature columns ``measured_in_<source>`` record, the features of
+        ``features`` that some source of the profiled cells, the control cells
+        and the cells of the profiled perturbations, did not measure are left
+        out, through a feature selection of the others, with a warning that
+        names them, and each cell's total is its total over the features that
+        every such source measured, as a store of those features alone holds
+        it. The profiles then record those features as
+        ``measured_features_fingerprint``.
+
         The profiles save their diagnostics, which
         ``ds.artifacts.inspect(profiles).diagnostics`` returns:
         ``leftOutPerturbations``, the perturbations with fewer than
@@ -289,7 +302,8 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
                 control cell or a cell of a profiled perturbation without a
                 sample, a sample has fewer than 2 control cells, ``id_column``
                 is not a feature column of the guide assay, the labels have no
-                control cell, or no perturbation has ``min_cells`` cells.
+                control cell, no perturbation has ``min_cells`` cells, or every
+                feature of ``features`` was left out.
             PermissionError: If the store is read-only and the profiles are
                 not saved yet.
             MemoryError: If the profiles and one feature's sums, beside the
@@ -322,11 +336,10 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
             cells.cell_selection,
             operation=PerturbationProfileArguments.operation,
         )
-        feature_index = np.asarray(
-            read_feature_selection_indices(self.zw, expression.name, features),
-            dtype=np.int64,
+        selected = np.zeros(int(expression.feats.N), dtype=bool)
+        selected[read_feature_selection_indices(self.zw, expression.name, features)] = (
+            True
         )
-        n_features = len(feature_index)
         rows = cells.rows
         n_rows = len(rows.names)
         grouped = cells.groups >= 0
@@ -347,6 +360,36 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
         n_kept = len(kept)
         names = rows.names[kept].astype(str)
         row_targets = rows.target_names[rows.codes].astype(str)
+        slot = np.full(n_rows, -1, dtype=np.int64)
+        slot[kept] = np.arange(n_kept)
+        groups = np.where(grouped, slot[np.maximum(cells.groups, 0)], -1)
+        # The cells read: the control cells and the cells of the profiled
+        # perturbations, which by guide include the control cells of a
+        # control guide, in store order.
+        used = np.flatnonzero(cells.control | (groups >= 0))
+        used_cells = cells.cell_index[used]
+        is_control = cells.control[used]
+        # The profiles hold the selected features that every source of the
+        # cells read measured, and each cell's total covers those features.
+        cells_measured = cells_measured_features(
+            expression.cells, expression.feats, used_cells, assay=expression.name
+        )
+        features, selected = cast(Any, self)._measured_feature_selection(
+            expression,
+            features,
+            selected,
+            used_cells,
+            analysis="perturbation.profiles",
+            remedy=(
+                "Profile the perturbations of the sources that measured them, or "
+                "features that every source measured."
+            ),
+            measured=cells_measured,
+            of_cells="the profiled cells",
+        )
+        measured = measured_mask(cells_measured)
+        feature_index = np.flatnonzero(selected).astype(np.int64)
+        n_features = len(feature_index)
         feature_ids = np.asarray(expression.feats.fetch_all("ids")).astype(str)
         # Each profile's masked feature, as a position in the assay.
         masked = np.full(n_kept, -1, dtype=np.int64)
@@ -368,15 +411,6 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
             # Only a target among the profiles' features has a value to mask.
             inside = np.isin(matched, feature_index)
             masked[inside] = matched[inside]
-        slot = np.full(n_rows, -1, dtype=np.int64)
-        slot[kept] = np.arange(n_kept)
-        groups = np.where(grouped, slot[np.maximum(cells.groups, 0)], -1)
-        # The cells read: the control cells and the cells of the profiled
-        # perturbations, which by guide include the control cells of a
-        # control guide, in store order.
-        used = np.flatnonzero(cells.control | (groups >= 0))
-        used_cells = cells.cell_index[used]
-        is_control = cells.control[used]
         cell_samples = read_cell_samples(
             self,
             MemoryLedger(
@@ -416,6 +450,9 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
             mask_targets=mask_targets,
             sample_columns=cell_samples.columns,
             invalidate_cache=invalidate_cache,
+            measured_features_fingerprint=(
+                None if measured is None else fingerprint_array(measured)
+            ),
         )
         planned = arguments.plan(
             self.zw,
@@ -509,7 +546,7 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
         )
         del read_cells
         self._require_writable(arguments.operation)
-        totals = expression._cell_count_totals(used_cells)
+        totals = cell_totals(expression, used_cells, measured, held_bytes=held)
         target = depth_target(totals, is_control)
         member_groups = groups[used][members]
         n_cells = sizes[kept].astype(np.int64)

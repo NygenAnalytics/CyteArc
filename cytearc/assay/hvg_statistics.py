@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from ..metadata.rows import read_metadata_rows_chunkwise
 from ..storage.geometry import array_geometry
 from ..utils.compute import pairwise_merge_tree
 from ..utils.moments import add_implicit_zeros, welford_add
@@ -104,19 +105,30 @@ class GroupedMoments:
 
 @njit(cache=True, nogil=True)
 def _band_totals_kernel(
-    values: np.ndarray, value_rows: np.ndarray, local: np.ndarray, out: np.ndarray
+    values: np.ndarray,
+    value_rows: np.ndarray,
+    local: np.ndarray,
+    out: np.ndarray,
+    detected: bool,
 ) -> None:
     """Write each selected cell's sum of the rows ``value_rows`` of ``values`` into ``out``.
 
     Each row is read along its cells, as the band stores it, and adds to
-    each cell's total in the order of ``value_rows``.
+    each cell's total in the order of ``value_rows``; with ``detected``, a
+    value adds 1 when it is above 0, so the total counts the rows with counts,
+    as ``<assay>_nFeatures`` counts them.
     """
     for cell in range(local.shape[0]):
         out[cell] = 0.0
     for k in range(value_rows.shape[0]):
         row = value_rows[k]
         for cell in range(local.shape[0]):
-            out[cell] += np.float64(values[row, local[cell]])
+            value = np.float64(values[row, local[cell]])
+            if detected:
+                if value > 0.0:
+                    out[cell] += 1.0
+            else:
+                out[cell] += value
 
 
 @njit(cache=True, nogil=True)
@@ -386,9 +398,14 @@ def _band_sizes(band_groups: np.ndarray, n_groups: int) -> np.ndarray:
 
 
 def cell_totals_over_features(
-    assay: "Assay", cell_idx: np.ndarray, feat_idx: np.ndarray, *, held_bytes: int = 0
+    assay: "Assay",
+    cell_idx: np.ndarray,
+    feat_idx: np.ndarray,
+    *,
+    held_bytes: int = 0,
+    detected: bool = False,
 ) -> np.ndarray:
-    """Return each selected cell's total count over the features ``feat_idx``.
+    """Return each selected cell's total count over the features ``feat_idx``, or with ``detected`` its number of them with counts.
 
     The counts of those features are read feature-major from ``countsT``, a
     band at a time in a fixed order, and each band's sums are added to its
@@ -404,6 +421,7 @@ def cell_totals_over_features(
         cell_idx: The sorted, unique selected cells.
         feat_idx: The features whose counts are summed.
         held_bytes: What the caller holds throughout.
+        detected: Count the features with counts instead of summing them.
 
     Returns:
         The float64 total of each cell of ``cell_idx``, in its order.
@@ -418,9 +436,10 @@ def cell_totals_over_features(
         return totals
     counts_t = assay.rawDataT
     if counts_t is None:
+        counts = assay.rawData[:, feat_idx][cell_idx, :]
         return np.asarray(
             compute_with_progress(
-                assay.rawData[:, feat_idx][cell_idx, :].sum(axis=1, dtype=np.float64),
+                (counts > 0 if detected else counts).sum(axis=1, dtype=np.float64),
                 f"({assay.name}) Summing the counts of the measured features",
                 assay.nthreads,
             ),
@@ -441,7 +460,7 @@ def cell_totals_over_features(
     def process(band: Any) -> tuple[np.ndarray, np.ndarray]:
         rows = np.flatnonzero(summed[band.featStart + band.featureRows()])
         sums = np.empty(len(band.selectedLocal), dtype=np.float64)
-        _band_totals_kernel(band.values, rows, band.selectedLocal, sums)
+        _band_totals_kernel(band.values, rows, band.selectedLocal, sums, detected)
         return band.selectedDestinations, sums
 
     for destinations, sums in map_feature_cell_bands(
@@ -465,6 +484,7 @@ def cell_totals(
     features: np.ndarray | None = None,
     *,
     held_bytes: int = 0,
+    detected: bool = False,
 ) -> np.ndarray:
     """Return each selected cell's total count over the features of the Boolean mask ``features``.
 
@@ -475,7 +495,10 @@ def cell_totals(
     over the counts reads the smaller set (:func:`cell_totals_over_features`).
     Whole counts sum exactly either way. Counts with fractions can differ
     from a direct sum by the rounding of float64 sums, about ``1e-15`` of the
-    prepared total, and a total that rounding takes below zero is zero.
+    prepared total, and a total that rounding takes below zero is zero. With
+    ``detected``, each cell's number of the features with counts takes the
+    place of its total, from the prepared ``<assay>_nFeatures`` in the same
+    way.
 
     Args:
         assay: A prepared assay.
@@ -483,20 +506,39 @@ def cell_totals(
         features: The features to total, every feature when None.
         held_bytes: What the caller holds throughout, which the pass over
             ``countsT`` charges beside its bands.
+        detected: Count each cell's features with counts instead of summing
+            its counts.
 
     Returns:
         The float64 total of each cell of ``cell_idx``, in its order.
     """
-    totals = assay._cell_count_totals(cell_idx)
+    totals: np.ndarray = (
+        np.asarray(
+            read_metadata_rows_chunkwise(
+                assay.cells, f"{assay.name}_nFeatures", np.asarray(cell_idx)
+            ),
+            dtype=np.float64,
+        )
+        if detected
+        else assay._cell_count_totals(cell_idx)
+    )
     if features is None:
         return totals
     kept = np.asarray(features, dtype=bool)
     if np.count_nonzero(kept) < kept.size / 2:
         return cell_totals_over_features(
-            assay, cell_idx, np.flatnonzero(kept), held_bytes=held_bytes
+            assay,
+            cell_idx,
+            np.flatnonzero(kept),
+            held_bytes=held_bytes,
+            detected=detected,
         )
     totals -= cell_totals_over_features(
-        assay, cell_idx, np.flatnonzero(~kept), held_bytes=held_bytes + totals.nbytes
+        assay,
+        cell_idx,
+        np.flatnonzero(~kept),
+        held_bytes=held_bytes + totals.nbytes,
+        detected=detected,
     )
     np.maximum(totals, 0.0, out=totals)
     return totals

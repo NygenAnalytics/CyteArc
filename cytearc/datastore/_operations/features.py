@@ -2198,6 +2198,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         feature_names: np.ndarray | None = None,
         kind: str = "feature",
         measured: CellsMeasuredFeatures | None = None,
+        of_cells: str = "the selected cells",
     ) -> tuple[ArtifactRef, np.ndarray]:
         """Return the selected features that every source of some cells measured, as a selection, and its mask.
 
@@ -2205,7 +2206,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         measured every feature is returned as it is. Otherwise the features
         that some source did not measure are left out, with the warning of
         :func:`~cytearc.metadata.membership.leave_out_unmeasured_features`,
-        which calls them ``kind`` features and names them by
+        which calls them ``kind`` features of ``of_cells`` and names them by
         ``feature_names`` or the assay's own names, and the others are saved
         as a feature selection, so that the result's lineage records what it
         read. ``measured``, a reading of the cells' sources that the caller
@@ -2228,7 +2229,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             assay.feats,
             analysis=analysis,
             kind=kind,
-            of_cells="the selected cells",
+            of_cells=of_cells,
             remedy=remedy,
             selected=feature_values,
             names=feature_names,

@@ -898,6 +898,62 @@ def test_cell_totals_read_the_smaller_set_of_features_and_sum_whole_counts_exact
     assert read == [np.flatnonzero(third).tolist()] * 2
 
 
+def test_cell_totals_count_the_detected_features_of_a_mask(banded, tmp_path) -> None:
+    from cytearc.assay import hvg_statistics
+
+    # Every other cell, over the prepared counts of detected genes and over a
+    # third of the genes or the other two thirds, as countsT holds them.
+    cells = np.arange(0, _N_CELLS, 2)
+    detected = _COUNTS[cells] > 0
+    third = np.arange(_N_GENES) % 3 == 0
+    np.testing.assert_array_equal(
+        hvg_statistics.cell_totals(banded.RNA, cells, detected=True),
+        detected.sum(axis=1),
+    )
+    for kept in (third, ~third):
+        np.testing.assert_array_equal(
+            hvg_statistics.cell_totals(banded.RNA, cells, kept, detected=True),
+            detected[:, kept].sum(axis=1),
+        )
+    # An assay without countsT sums the rows of its counts.
+    rng = np.random.default_rng(5)
+    values = rng.poisson(0.7, size=(40, 30)) * rng.integers(1, 4, size=(40, 30))
+    write_count_store(str(tmp_path / "adt.zarr"), {"ADT": values}, "uint32")
+    store = DataStore(
+        str(tmp_path / "adt.zarr"),
+        default_assay="ADT",
+        min_features_per_cell=-1,
+        nthreads=1,
+    )
+    assert store.ADT.rawDataT is None
+    rows = np.arange(1, 40, 3)
+    for kept in (np.arange(30) % 4 == 0, np.arange(30) % 4 != 0):
+        np.testing.assert_array_equal(
+            hvg_statistics.cell_totals(store.ADT, rows, kept, detected=True),
+            (values[np.ix_(rows, kept)] > 0).sum(axis=1),
+        )
+        np.testing.assert_array_equal(
+            hvg_statistics.cell_totals(store.ADT, rows, kept),
+            values[np.ix_(rows, kept)].sum(axis=1),
+        )
+    # Signed counts: a feature is detected where its count is above 0, as the
+    # prepared <assay>_nFeatures counts it, through countsT either way.
+    signed = rng.integers(-2, 4, size=(30, 12))
+    write_count_store(str(tmp_path / "signed.zarr"), {"RNA": signed}, "int32")
+    store = DataStore(
+        str(tmp_path / "signed.zarr"),
+        default_assay="RNA",
+        min_features_per_cell=-1,
+        nthreads=1,
+    )
+    assert store.RNA.rawDataT is not None
+    for kept in (np.arange(12) % 3 == 0, np.arange(12) % 3 != 0):
+        np.testing.assert_array_equal(
+            hvg_statistics.cell_totals(store.RNA, np.arange(30), kept, detected=True),
+            (signed[:, kept] > 0).sum(axis=1),
+        )
+
+
 def test_cell_totals_of_counts_with_fractions_stay_within_rounding_and_above_zero(
     tmp_path, monkeypatch
 ) -> None:
