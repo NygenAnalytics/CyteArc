@@ -1,3 +1,4 @@
+import math
 import re
 import warnings
 
@@ -1637,6 +1638,333 @@ def test_nearest_feature_profiles_rank_every_distance_of_their_space(space):
     assert neighbors.dtype == np.int64
 
 
+def _summed_neighbors(profiles: np.ndarray, k: int, space: str = "l2") -> np.ndarray:
+    """Each row's k nearest other rows by distances summed over the bins in order, the earlier of equals first.
+
+    Each bin's difference, or product, is rounded, squared and added in turn,
+    one array operation at a time, as the exact search sums them.
+    """
+    values = np.asarray(profiles, dtype=np.float64)
+    with np.errstate(over="ignore", invalid="ignore"):
+        if space == "cosine":
+            squares = np.zeros(len(values))
+            for column in values.T:
+                squares += column * column
+            values = values / np.sqrt(squares)[:, None]
+        sums = np.zeros((len(values), len(values)))
+        for column in values.T:
+            if space == "l2":
+                offset = column[None, :] - column[:, None]
+                sums += offset * offset
+            else:
+                sums += column[None, :] * column[:, None]
+    if space != "l2":
+        sums = 1.0 - sums
+    order = np.argsort(sums, axis=1, kind="stable")
+    return np.array([ranked[ranked != row][:k] for row, ranked in enumerate(order)])
+
+
+def _every_distance_neighbors(monkeypatch, profiles, n_neighbors, **options):
+    """The neighbors of the search that sums every distance, with no candidates from BLAS."""
+    from cytearc.trajectory import feature_dynamics
+
+    with monkeypatch.context() as patch:
+        # As many candidates beyond the neighbors as profiles leave none out.
+        patch.setattr(feature_dynamics, "_EXTRA_CANDIDATES", len(profiles))
+        return nearest_feature_profiles(profiles, n_neighbors, **options)
+
+
+@pytest.mark.parametrize("space", ["l2", "ip", "cosine"])
+@pytest.mark.parametrize(
+    ("n_profiles", "n_bins", "n_neighbors", "nthreads"),
+    [(600, 50, 11, 4), (300, 2, 1, 1), (200, 7, 30, 3)],
+)
+def test_nearest_feature_profiles_rank_candidates_from_blas_as_every_sum_ranks_them(
+    monkeypatch, space, n_profiles, n_bins, n_neighbors, nthreads
+):
+    profiles = np.random.default_rng(n_bins).normal(size=(n_profiles, n_bins))
+
+    neighbors = nearest_feature_profiles(
+        profiles, n_neighbors, space=space, nthreads=nthreads
+    )
+
+    np.testing.assert_array_equal(
+        neighbors, _summed_neighbors(profiles, n_neighbors, space)
+    )
+    np.testing.assert_array_equal(
+        neighbors,
+        _every_distance_neighbors(
+            monkeypatch, profiles, n_neighbors, space=space, nthreads=nthreads
+        ),
+    )
+
+
+@pytest.mark.parametrize("space", ["l2", "ip", "cosine"])
+def test_nearest_feature_profiles_keep_the_earliest_of_more_equal_profiles_than_candidates(
+    monkeypatch, space
+):
+    # One profile repeated 30 times among 200, more than the 3 + 8 candidates
+    # that each takes, so BLAS's distances, tied or rounded apart, cannot
+    # pick the earliest copies.
+    rng = np.random.default_rng(14)
+    profiles = rng.normal(size=(200, 20))
+    copies = np.sort(rng.choice(200, size=30, replace=False))
+    profiles[copies] = rng.normal(size=20)
+
+    neighbors = nearest_feature_profiles(profiles, 3, space=space, nthreads=2)
+
+    if space != "ip":
+        # Each copy lies nearest its copies, the earliest first; an inner
+        # product prefers longer profiles.
+        for copy in copies:
+            np.testing.assert_array_equal(neighbors[copy], copies[copies != copy][:3])
+    np.testing.assert_array_equal(neighbors, _summed_neighbors(profiles, 3, space))
+    np.testing.assert_array_equal(
+        neighbors,
+        _every_distance_neighbors(monkeypatch, profiles, 3, space=space, nthreads=2),
+    )
+
+
+# Over 8,000 bins, the rounding of each sum grows with the bins.
+@pytest.mark.parametrize(
+    ("space", "n_profiles", "n_bins"),
+    [("l2", 300, 50), ("l2", 100, 8000), ("ip", 300, 50), ("cosine", 300, 50)],
+)
+def test_nearest_feature_profiles_rank_every_profile_that_blas_rounding_could_leave_out(
+    monkeypatch, space, n_profiles, n_bins
+):
+    # Rows of mean 2**26 put each squared norm near 2**52 times the bins,
+    # where floats lie 32 apart for 50 bins and 4,096 for 8,000, farther than
+    # the distances between the profiles, about a sixth of the bins, and than
+    # their products differ, so BLAS cannot order the profiles on any
+    # platform.
+    rng = np.random.default_rng(15)
+    spread = rng.random((n_profiles, n_bins))
+    profiles = 2.0**26 + (spread - spread.mean(axis=1, keepdims=True))
+    if space == "l2":
+        # A profile of zeros, whose distances round as much as the norms of
+        # the others, which its own norm does not bound.
+        profiles[0] = 0.0
+    values = profiles
+    if space == "cosine":
+        values = profiles / np.linalg.norm(profiles, axis=1, keepdims=True)
+    products = values @ values.T
+    norms = np.einsum("ij,ij->i", values, values)
+    fast = (
+        norms[:, None] + norms[None, :] - 2.0 * products
+        if space == "l2"
+        else 1.0 - products
+    )
+    np.fill_diagonal(fast, np.inf)
+    expected = _summed_neighbors(profiles, 11, space)
+    by_blas = np.sort(np.argsort(fast, axis=1, kind="stable")[:, :11], axis=1)
+    assert np.mean((by_blas != np.sort(expected, axis=1)).any(axis=1)) > 0.5
+
+    neighbors = nearest_feature_profiles(profiles, 11, space=space, nthreads=2)
+
+    np.testing.assert_array_equal(neighbors, expected)
+    np.testing.assert_array_equal(
+        neighbors,
+        _every_distance_neighbors(monkeypatch, profiles, 11, space=space, nthreads=2),
+    )
+
+
+def test_nearest_feature_profiles_rank_distances_that_underflow(monkeypatch):
+    # Differences of about 1e-162 square to a few multiples of the smallest
+    # subnormal number or to 0, so the sums tie and BLAS rounds its distances
+    # apart by as much as they differ.
+    profiles = np.random.default_rng(16).normal(size=(300, 20)) * 3e-162
+
+    neighbors = nearest_feature_profiles(profiles, 5, nthreads=2)
+
+    np.testing.assert_array_equal(neighbors, _summed_neighbors(profiles, 5))
+    np.testing.assert_array_equal(
+        neighbors, _every_distance_neighbors(monkeypatch, profiles, 5, nthreads=2)
+    )
+
+
+# The square of 1e200 overflows, so the last profile lies infinitely far from
+# every other; four squares of 6e153 sum to 1.4e308, which eight times over
+# would overflow. Either way the last profile lies as far from every other,
+# so its neighbors are the first five.
+@pytest.mark.parametrize("value", [1e200, 6e153])
+def test_nearest_feature_profiles_rank_profiles_whose_squares_overflow(value):
+    profiles = np.random.default_rng(17).normal(size=(60, 4))
+    profiles[-1] = value
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        neighbors = nearest_feature_profiles(profiles, 5, nthreads=2)
+
+    np.testing.assert_array_equal(neighbors[-1], [0, 1, 2, 3, 4])
+    np.testing.assert_array_equal(neighbors, _summed_neighbors(profiles, 5))
+
+
+def test_nearest_feature_profiles_rank_two_profiles_whose_norms_overflow_together():
+    # Profiles of 6e153 and 6e153 (1 + 2**-40) have finite squared norms,
+    # 1.4e308 each, whose sum overflows, so BLAS's distance between them
+    # would be infinity minus infinity; each is the other's nearest.
+    profiles = np.random.default_rng(19).normal(size=(60, 4))
+    profiles[-2] = 6e153
+    profiles[-1] = 6e153 * (1 + 2.0**-40)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        neighbors = nearest_feature_profiles(profiles, 5, nthreads=2)
+
+    assert neighbors[-2, 0] == 59
+    assert neighbors[-1, 0] == 58
+    np.testing.assert_array_equal(neighbors, _summed_neighbors(profiles, 5))
+
+
+def _two_product(a: np.ndarray, b: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Products a * b as p + e exactly, by Dekker's splitting."""
+    product = a * b
+    split = 2.0**27 + 1
+    a_high = a * split - (a * split - a)
+    b_high = b * split - (b * split - b)
+    a_low, b_low = a - a_high, b - b_high
+    error = ((a_high * b_high - product) + a_high * b_low + a_low * b_high) + (
+        a_low * b_low
+    )
+    return product, error
+
+
+def _within(target: float, center: float, radius: float) -> float:
+    """``target`` rounded, then moved toward ``center`` until within ``radius`` of it."""
+    value = float(target)
+    while abs(value - center) > radius:
+        value = math.nextafter(value, center)
+    return value
+
+
+def _worst_blas_neighbors(monkeypatch, profiles, n_neighbors, space, expected, scale):
+    """The search's neighbors when BLAS rounds each product as far as ``scale`` times its bound allows.
+
+    Every inner product of n terms, in any order, lies within n u of the
+    exact one relative to the sum of their magnitudes (Jeannerod and Rump
+    2013), and every squared norm within n u of itself. Here the products of
+    each profile with its ``expected`` neighbors move down by ``scale`` times
+    that bound, so those neighbors look farther, the products with every
+    other profile move up, and the squared norms move up.
+    """
+    from cytearc.trajectory import feature_dynamics
+
+    kernel = feature_dynamics._nearest_candidates
+    unit = 2.0**-53
+    moved: dict[str, np.ndarray] = {}
+
+    def worst_case(values, norms, products, first, *rest):
+        n_profiles, n_bins = values.shape
+        if not moved:
+            exact = np.empty((n_profiles, n_profiles))
+            bound = np.empty((n_profiles, n_profiles))
+            for row in range(n_profiles):
+                product, error = _two_product(values[row][None, :], values)
+                for other in range(n_profiles):
+                    exact[row, other] = math.fsum([*product[other], *error[other]])
+                    bound[row, other] = (
+                        n_bins
+                        * unit
+                        * math.fsum(np.abs(product[other]))
+                        * (1 - 4 * unit)
+                    )
+            moved["exact"], moved["bound"] = exact, bound
+            squares = np.diag(exact)
+            moved["norms"] = np.array(
+                [
+                    _within(
+                        square * (1 + scale * n_bins * unit),
+                        square,
+                        scale * n_bins * unit * square * (1 - 4 * unit),
+                    )
+                    for square in squares
+                ]
+            )
+        exact, bound = moved["exact"], moved["bound"]
+        for index in range(products.shape[0]):
+            row = first + index
+            near = set(expected[row].tolist())
+            for other in range(n_profiles):
+                reach = scale * bound[row, other]
+                sign = -1.0 if other in near else 1.0
+                products[index, other] = _within(
+                    exact[row, other] + sign * reach, exact[row, other], reach
+                )
+        squared = norms if space != "l2" else moved["norms"]
+        return kernel(values, squared, products, first, *rest)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(feature_dynamics, "_nearest_candidates", worst_case)
+        neighbors = nearest_feature_profiles(
+            profiles, n_neighbors, space=space, nthreads=2
+        )
+    assert moved, "the search ranked every distance without candidates"
+    return neighbors
+
+
+def _worst_blas_profiles(case: str) -> tuple[np.ndarray, int, str]:
+    rng = np.random.default_rng(20)
+    if case == "pairs":
+        # Pairs of profiles 1e-3 apart near 2**19, whose nearest sum lies far
+        # below the n_neighbors-th.
+        pairs = 2.0**19 + rng.random((60, 50))
+        spread = np.tile([[0.0], [1e-3]], (60, 1)) * rng.random((120, 50))
+        return np.repeat(pairs, 2, axis=0) + spread, 11, "l2"
+    if case == "offset":
+        # Profiles near 2**20, and one of zeros, whose distances round with
+        # the others' norms, not its own.
+        profiles = 2.0**20 + rng.random((120, 50))
+        profiles[0] = 0.0
+        return profiles, 11, "l2"
+    if case == "long":
+        # One profile of 2**20 in its first bin, and 120 in the other bins
+        # whose squared norms are all 16: from the long profile, their sums
+        # round apart by up to 2.7e-3, each square rounded beside 2**40, while
+        # BLAS's distances tie at 2**40 + 16, rounded once. Only the long
+        # profile's own share of the bound covers that rounding.
+        others = np.zeros((120, 50))
+        others[:, 1:] = rng.random((120, 49))
+        others *= np.sqrt(16.0 / np.einsum("ij,ij->i", others, others))[:, None]
+        long = np.zeros((1, 50))
+        long[0, 0] = 2.0**20
+        return np.vstack([long, others]), 11, "l2"
+    # Inner products near 2**-54, where 1 - a.b rounds to 1 or to 1 - u:
+    # the nearest profile's product, 2**-54 + 2**-106, lies just above u / 2,
+    # and a product moved down by its bound, 1.5 * 2**-106, rounds 1 - a.b
+    # to 1, as for the farther profiles. Only the 1 that the bound adds for
+    # an inner product covers that rounding: the norms lie near 2**-48.
+    query = [2.0**-30, 0.0, 0.0]
+    near = [2.0**-24 + 2.0**-76, 0.0, 0.0]
+    far = [-(2.0**-20), 0.0, 0.0]
+    return np.array([query] + [near] * 10 + [far] * 10), 1, "ip"
+
+
+# Products moved by their whole bound, which any BLAS could return, and by
+# four times their bound, which the limit's margin of four still covers.
+@pytest.mark.parametrize(
+    ("case", "scale"),
+    [
+        ("pairs", 1.0),
+        ("offset", 1.0),
+        ("offset", 4.0),
+        ("long", 1.0),
+        ("tiny inner products", 1.0),
+    ],
+)
+def test_nearest_feature_profiles_stay_exact_where_blas_rounds_its_worst(
+    monkeypatch, case, scale
+):
+    profiles, n_neighbors, space = _worst_blas_profiles(case)
+    expected = _summed_neighbors(profiles, n_neighbors, space)
+
+    neighbors = _worst_blas_neighbors(
+        monkeypatch, profiles, n_neighbors, space, expected, scale
+    )
+
+    np.testing.assert_array_equal(neighbors, expected)
+
+
 def test_nearest_feature_profiles_put_the_earlier_of_equally_near_profiles_first():
     profiles = np.array([[2.0], [0.0], [4.0], [3.0], [1.0]])
 
@@ -1658,7 +1986,16 @@ def test_nearest_feature_profiles_put_the_earlier_of_equally_near_profiles_first
     )
 
 
-def test_nearest_feature_profiles_sum_each_distance_over_the_bins_in_order():
+def _beside_far_profiles(profiles: np.ndarray, n_far: int) -> np.ndarray:
+    """The profiles followed by profiles far from them, so that a search can leave some out."""
+    far = 1e3 + np.random.default_rng(18).random((n_far, profiles.shape[1]))
+    return np.vstack([profiles, far])
+
+
+# Three profiles alone are ranked by every distance; beside 30 far ones, by
+# the candidates that BLAS picks, 2 + 8 for each.
+@pytest.mark.parametrize("n_far", [0, 30])
+def test_nearest_feature_profiles_sum_each_distance_over_the_bins_in_order(n_far):
     # 2**-54, the square of 2**-27, is a quarter of the spacing of floats at 1.
     quarter = 2.0**-27
     profiles = np.array(
@@ -1673,10 +2010,12 @@ def test_nearest_feature_profiles_sum_each_distance_over_the_bins_in_order():
 
     # Both sums are 1 + 2**-52 exactly, which would put row 1 first; summed in
     # order, row 2 is nearer.
-    assert nearest_feature_profiles(profiles, 2)[0].tolist() == [2, 1]
+    neighbors = nearest_feature_profiles(_beside_far_profiles(profiles, n_far), 2)
+    assert neighbors[0].tolist() == [2, 1]
 
 
-def test_nearest_feature_profiles_round_each_product_before_adding_it():
+@pytest.mark.parametrize("n_far", [0, 30])
+def test_nearest_feature_profiles_round_each_product_before_adding_it(n_far):
     # x**2 and y**2 round to 1 + 2**-29 and 1 + 24 * 2**-30 + 2**-52, and both
     # sums round to 2 + 26 * 2**-30, a tie that the earlier row wins. A fused
     # multiply-add rounds the second product only with the sum, which puts
@@ -1684,17 +2023,36 @@ def test_nearest_feature_profiles_round_each_product_before_adding_it():
     x, y = 1 + 2**-30, 1 + 12 * 2**-30
     profiles = np.array([[0.0, 0.0], [y, x], [x, y]])
 
-    assert nearest_feature_profiles(profiles, 2)[0].tolist() == [1, 2]
+    neighbors = nearest_feature_profiles(_beside_far_profiles(profiles, n_far), 2)
+    assert neighbors[0].tolist() == [1, 2]
 
 
-def test_nearest_feature_profiles_stop_between_blocks_and_report_each(monkeypatch):
+@pytest.mark.parametrize("n_far", [0, 20])
+def test_nearest_feature_profiles_rank_equal_sums_in_the_order_of_the_profiles(n_far):
+    # From [2**26, 0], the profiles [2**26 - 1, 0] and [2**26 + 1, 0] both lie
+    # at 1. BLAS's distance of the later is 0: its squared norm plus that of
+    # [2**26, 0], 2**53 + 2**27 + 1, rounds to an even number. That of the
+    # earlier stays 1. Ranked in BLAS's order, the later would come first.
+    base = 2.0**26
+    profiles = np.array([[base, 0.0], [base - 1.0, 0.0], [base + 1.0, 0.0]])
+
+    neighbors = nearest_feature_profiles(_beside_far_profiles(profiles, n_far), 1)
+    assert neighbors[0].tolist() == [1]
+
+
+# Twelve profiles, which leave none out of 4 + 8 candidates, are ranked by
+# every distance, here in blocks of one row for each of the two threads: 6
+# blocks. Forty are ranked from candidates, in blocks of two rows for each
+# thread, as many as the 3 bins rounded up to whole rows: 10 blocks.
+@pytest.mark.parametrize(("n_profiles", "n_blocks"), [(12, 6), (40, 10)])
+def test_nearest_feature_profiles_stop_between_blocks_and_report_each(
+    monkeypatch, n_profiles, n_blocks
+):
     from cytearc.trajectory import feature_dynamics
     from cytearc.utils.progress import observe_progress
     from cytearc.utils.shutdown import ShutdownRequested, ShutdownToken, shutdown_scope
 
-    profiles = np.random.default_rng(12).normal(size=(40, 3))
-    whole = nearest_feature_profiles(profiles, 4, nthreads=2)
-    # Blocks of one row for each of the two threads: 20 blocks.
+    profiles = np.random.default_rng(12).normal(size=(n_profiles, 3))
     monkeypatch.setattr(feature_dynamics, "_BLOCK_OPERATIONS", 1)
     updates: list[tuple[str | None, int, int | None]] = []
 
@@ -1704,8 +2062,10 @@ def test_nearest_feature_profiles_stop_between_blocks_and_report_each(monkeypatc
     with observe_progress(observe):
         blocked = nearest_feature_profiles(profiles, 4, nthreads=2)
 
-    np.testing.assert_array_equal(blocked, whole)
-    assert updates == [("Finding feature neighbors", done, 20) for done in range(1, 21)]
+    np.testing.assert_array_equal(blocked, _summed_neighbors(profiles, 4))
+    assert updates == [
+        ("Finding feature neighbors", done, n_blocks) for done in range(1, n_blocks + 1)
+    ]
 
     # A request to stop, made once the first block is done, ends the search
     # before the second.
@@ -1719,21 +2079,24 @@ def test_nearest_feature_profiles_stop_between_blocks_and_report_each(monkeypatc
     with shutdown_scope(token), observe_progress(stop):
         with pytest.raises(ShutdownRequested, match="stop the search"):
             nearest_feature_profiles(profiles, 4, nthreads=2)
-    assert updates == [("Finding feature neighbors", 1, 20)]
+    assert updates == [("Finding feature neighbors", 1, n_blocks)]
 
 
+# Profiles of about 1, ranked from candidates, and of 1e160, whose squared
+# norms overflow, ranked by every distance.
+@pytest.mark.parametrize("scale", [1.0, 1e160])
 @pytest.mark.parametrize(
     ("n_profiles", "n_bins", "nthreads", "space"),
     [(3000, 50, 4, "l2"), (2000, 200, 2, "ip")],
 )
 def test_nearest_feature_profiles_bytes_count_what_the_search_holds(
-    n_profiles, n_bins, nthreads, space
+    n_profiles, n_bins, nthreads, space, scale
 ):
     import tracemalloc
 
     from cytearc.trajectory.feature_dynamics import nearest_feature_profiles_bytes
 
-    profiles = np.random.default_rng(13).normal(size=(n_profiles, n_bins))
+    profiles = np.random.default_rng(13).normal(size=(n_profiles, n_bins)) * scale
     # A first search compiles the kernel and makes what a process makes once.
     nearest_feature_profiles(profiles, 11, nthreads=nthreads, space=space)
     tracemalloc.start()
@@ -1745,9 +2108,15 @@ def test_nearest_feature_profiles_bytes_count_what_the_search_holds(
     # The transposed copy, a row of distances for each thread and the
     # neighbors, held at once, and at most the progress bar's 64 KiB beside.
     arrays = n_profiles * n_bins * 8 + nthreads * n_profiles * 8 + n_profiles * 11 * 8
+    if scale == 1.0:
+        # Or the squared norms, at least as many rows of products as bins,
+        # and the neighbors.
+        least = n_profiles * 8 + n_bins * n_profiles * 8 + n_profiles * 11 * 8
+    else:
+        least = arrays
     held = peak - before
     assert (
-        arrays
+        least
         <= held
         <= nearest_feature_profiles_bytes(n_profiles, n_bins, 11, nthreads, space=space)
     )
