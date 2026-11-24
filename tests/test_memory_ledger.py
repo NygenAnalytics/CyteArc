@@ -587,6 +587,36 @@ def test_what_thousands_of_band_reads_leave_levels_off_within_its_charge(
 
 
 @pytest.mark.slow
+@pytest.mark.parametrize(("features", "chunk_features"), [(2, 1), (80, 16)])
+def test_whole_and_row_reads_of_a_thousand_bands_of_rows_stay_within_their_charge(
+    tmp_path, features, chunk_features
+) -> None:
+    from tests.memory_helpers import traced_charge
+
+    # 100,000 rows of float32 in chunks of 100 rows, two and five chunks a
+    # band, in shards of 1,000 rows. Reads of rows of a two-dimensional array
+    # leave more of their objects than those of flags, up to 613 KB after
+    # 1,000 reads on Python 3.13, where 192 KiB was charged for them.
+    root = zarr.open_group(tmp_path / "store.zarr", mode="w")
+    values = np.random.default_rng(0).random((100_000, features), dtype=np.float32)
+    array = root.create_array(
+        "values", data=values, chunks=(100, chunk_features), shards=(1_000, features)
+    )
+    # One row of each band, as a read of selected rows takes them.
+    rows = np.arange(0, 100_000, 100)
+
+    whole = traced_charge(
+        lambda ledger: read_whole(ledger, root, "values", item="the values"), runs=2
+    )
+    selected = traced_charge(
+        lambda ledger: read_rows(ledger, array, rows, item="the rows"), runs=2
+    )
+
+    assert whole.held <= whole.charged
+    assert selected.held <= selected.charged
+
+
+@pytest.mark.slow
 def test_a_read_of_every_row_of_many_bands_orders_them_within_its_charge() -> None:
     from zarr.storage import MemoryStore
 
@@ -623,10 +653,15 @@ def test_the_reads_of_bands_leave_the_objects_of_a_read_and_of_each_chunk() -> N
     assert geometry.leftoverBytes(5_000) == 32 * 1024 + 40 * 4 * 1024
     column = ArrayGeometry((1_000,), (100,), None, 4)
     assert column.leftoverBytes(5_000) == 32 * 1024 + 10 * 4 * 1024
-    # What the reads leave levels off at 192 KiB, which 40 chunks reach.
+    # What the reads of a one-dimensional array leave levels off at 192 KiB,
+    # which 40 chunks reach, and what reads of rows of an array of more axes
+    # leave at 640 KiB, which 152 chunks reach.
+    flags = ArrayGeometry((100_000,), (100,), None, 4)
+    assert flags.bandsLeftoverBytes(40) == 32 * 1024 + 40 * 4 * 1024 == 192 * 1024
+    assert flags.bandsLeftoverBytes(41) == flags.bandsLeftoverBytes(999) == 192 * 1024
     long = ArrayGeometry((100_000, 40), (100, 10), None, 4)
-    assert long.bandsLeftoverBytes(10) == 32 * 1024 + 40 * 4 * 1024
-    assert long.bandsLeftoverBytes(11) == long.bandsLeftoverBytes(999) == 192 * 1024
+    assert long.bandsLeftoverBytes(38) == 32 * 1024 + 152 * 4 * 1024 == 640 * 1024
+    assert long.bandsLeftoverBytes(39) == long.bandsLeftoverBytes(999) == 640 * 1024
     # A read of three rows in three bands holds what the reads of the two
     # earlier bands leave, and a block of rows of 512 bytes for each of the
     # two more bands, which three rows of one band do not.

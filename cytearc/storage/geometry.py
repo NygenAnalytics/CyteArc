@@ -59,8 +59,13 @@ _READ_CHUNK_OBJECT_BYTES = 4 * 1024
 _READ_DECODE_OBJECT_BYTES = 16 * 1024
 #: What the reads of a band each leave of their objects levels off as CPython
 #: reuses the objects it freed for the next reads: 140 to 150 KB after 100 to
-#: 2,000 reads of a band, on Python 3.13 and 3.14.
+#: 2,000 reads of a band of a one-dimensional array, on Python 3.13 and 3.14.
 _READ_LEFTOVER_LIMIT_BYTES = 192 * 1024
+#: Reads of rows of an array of more axes leave more of their objects: on
+#: Python 3.13, 1,000 to 4,000 Zarr reads of one row of a two-dimensional
+#: sharded array, of 2, 4 and 16 chunks each, left 265, 422 and 613 KB, by
+#: slices and index arrays alike, and on Python 3.14 17 to 23 KB.
+_BAND_LEFTOVER_LIMIT_BYTES = 640 * 1024
 
 #: Zarr's orthogonal indexer orders the positions of an index array by chunk
 #: in arrays of int64. While it builds them it holds each position's chunk,
@@ -287,9 +292,17 @@ class ArrayGeometry:
         """Return what the reads of ``bands`` bands of chunks leave of their objects once they return.
 
         The reads take every chunk of the bands, as :meth:`chunksLeftoverBytes`
-        counts them.
+        counts them, up to 192 KiB for a one-dimensional array and up to 640
+        KiB for an array of more axes, whose reads of rows leave more.
         """
-        return self.chunksLeftoverBytes(max(0, int(bands)) * self.bandChunks())
+        limit = (
+            _READ_LEFTOVER_LIMIT_BYTES
+            if len(self.shape) == 1
+            else _BAND_LEFTOVER_LIMIT_BYTES
+        )
+        return self.chunksLeftoverBytes(
+            max(0, int(bands)) * self.bandChunks(), limit=limit
+        )
 
     def chunksLeftoverBytes(
         self, chunks: int, *, limit: int = _READ_LEFTOVER_LIMIT_BYTES

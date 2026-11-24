@@ -8,7 +8,7 @@ from typing import Any, Literal
 import numpy as np
 
 from ..utils.arrays import has_duplicates
-from .geometry import ArrayGeometry, array_geometry
+from .geometry import _BAND_LEFTOVER_LIMIT_BYTES, ArrayGeometry, array_geometry
 
 type Fits = Callable[[int], bool]
 
@@ -40,13 +40,6 @@ SCAN_BAND_BYTES = 64 * 1024**2
 #: that index: 48 bytes an index of int64 in all. Its stable sort and masks
 #: held less beside them, 26 bytes an index traced.
 _BAND_INDEX_BYTES = 48
-#: The reads of the earlier bands of a read in bands leave more of their
-#: objects than whole reads of one-dimensional arrays, whose 192 KiB
-#: ``ArrayGeometry.chunksLeftoverBytes`` charges unless given another limit:
-#: on Python 3.13, 1,000 to 4,000 Zarr reads of one row of a two-dimensional
-#: sharded array, of 2, 4 and 16 chunks each, left 265, 422 and 613 KB, by
-#: slices and index arrays alike, and on Python 3.14 17 to 23 KB.
-_BAND_LEFTOVER_LIMIT_BYTES = 640 * 1024
 #: Passes over a selection's indices take at most this many at a time, or,
 #: where they take whole bands, one band that holds more, so a pass holds 9
 #: to 11 bytes for each index of a piece, 590 to 720 KB for 65,536 of them,
