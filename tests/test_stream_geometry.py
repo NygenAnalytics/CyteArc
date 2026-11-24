@@ -1288,6 +1288,31 @@ def test_a_stream_that_shrinks_its_blocks_charges_each_size_the_shards_it_touche
     assert report.plan.reservedBytes <= budget
 
 
+def test_an_unsharded_read_of_shuffled_cells_is_charged_each_chunk_of_their_rows_and_columns() -> (
+    None
+):
+    # 8,000 cells by 512 features in unsharded chunks of 2,000 cells and 128
+    # features: a block of every cell in a shuffled order reads each of the
+    # four rows of chunks, by every feature or by those of one chunk. Each
+    # chunk is a read of its own, whose task holds the objects of a chunk,
+    # 4 KiB, beside those of the read, 32 KiB, and of the one chunk that it
+    # decodes at a time, stored and decoded, and 16 KiB of its objects.
+    array = zarr.create_array(
+        store=MemoryStore(),
+        shape=(8_000, 512),
+        chunks=(2_000, 128),
+        dtype=np.float32,
+        fill_value=0,
+    )
+    cells = np.random.default_rng(3).permutation(8_000)
+    decoded = 2_000 * 128 * 4
+    stored = 2 * decoded + decoded // 128 + 1_024
+    every = ChunkedArray(array, rows=cells, block_size=8_000)
+    one_chunk = ChunkedArray(array, rows=cells, cols=np.arange(128), block_size=8_000)
+    assert every._read_bytes(0) == stored + 32_768 + 16 * 4_096 + 16_384
+    assert one_chunk._read_bytes(0) == stored + 32_768 + 4 * 4_096 + 16_384
+
+
 def test_planned_reads_never_decode_more_chunks_than_budgeted() -> None:
     # Budget chosen so admission has to trade read depth against per-read
     # decodes: charging one decode per read admits four concurrent chunk

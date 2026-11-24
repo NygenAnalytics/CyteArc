@@ -839,8 +839,8 @@ def test_a_read_in_bands_of_cells_spread_over_shards_holds_what_the_bands_before
     left = 192 * 1024
     assert charge - fewer._read_bytes(read.nbytes) == left
     if sys.version_info < (3, 14):
-        # Python 3.14's collector frees those objects as the reads go; on
-        # 3.13 the read holds them beyond the rest of its charge.
+        # On Python 3.13 the read holds those objects beyond the rest of its
+        # charge; the reads leave few of them on Python 3.14.
         assert peak > charge - left
 
 
