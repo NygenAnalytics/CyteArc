@@ -5,6 +5,7 @@ entry in the order the entries were appended, SciPy row permutations, and
 sorts of the appended coordinates.
 """
 
+import shutil
 import tracemalloc
 from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import get_context
@@ -1253,16 +1254,33 @@ def test_from_entries_refuses_chunks_of_the_wrong_shape_and_cleans_up(tmp_path):
 @pytest.mark.parametrize("entries", [None, 6, 10**9])
 def test_from_entries_sizes_buckets_from_the_entries_expected(tmp_path, entries):
     matrix = coo_matrix(np.arange(1, 13, dtype=np.int64).reshape(6, 2))
-    store = SparseRowStore.from_entries(
-        iter((matrix,)),
-        matrix.shape,
-        np.int64,
-        operation=_OPERATION,
-        max_bytes=1 << 20,
-        entry_bytes=100,
-        entries=entries,
-        temp_dir=tmp_path,
-    )
+
+    def convert() -> SparseRowStore:
+        return SparseRowStore.from_entries(
+            iter((matrix,)),
+            matrix.shape,
+            np.int64,
+            operation=_OPERATION,
+            max_bytes=1 << 20,
+            entry_bytes=100,
+            entries=entries,
+            temp_dir=tmp_path,
+        )
+
+    if entries == 10**9:
+        # The store checks that the disk holds the entries it expects before
+        # it writes any, about 25 GB for a billion, which it names when the
+        # disk is full.
+        with free_disk(0), pytest.raises(OSError, match="temporary bytes") as full:
+            convert()
+        needed = asked_bytes(full.value)
+        free = shutil.disk_usage(tmp_path).free
+        if free < needed:
+            pytest.skip(
+                f"needs {needed:,} bytes free in the test's temporary directory "
+                f"for a billion expected entries, which has {free:,}"
+            )
+    store = convert()
     try:
         # A billion entries over six rows asks for buckets of one row.
         assert (store.bucket_starts.size - 1 == 6) == (entries == 10**9)
