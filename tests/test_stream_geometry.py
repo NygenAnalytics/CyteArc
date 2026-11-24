@@ -476,6 +476,32 @@ def test_reads_in_bands_are_charged_the_shards_each_band_touches_and_what_the_ba
         + 100 * 4_096
         + 10 * 48
     )
+    # A block of one cell from each of 400 shards of such an array is read in
+    # bands, not in one request over its 400 shards, which only a block whose
+    # rows form a run would be, over at most five rows of shards: its charge
+    # exceeds that of as many shuffled cells of the first four shards by what
+    # the earlier bands leave alone, 640 KiB against the objects of a read and
+    # of the six chunks of the three bands before the last.
+    array = zarr.create_array(
+        store=MemoryStore(),
+        shape=(40_000, 20),
+        chunks=(100, 10),
+        shards=(100, 20),
+        dtype=np.float32,
+        fill_value=0,
+    )
+    spread = ChunkedArray(
+        array, rows=np.arange(400) * 100 + 7, cols=columns, block_size=400
+    )
+    fewer = ChunkedArray(
+        array,
+        rows=np.random.default_rng(3).permutation(400),
+        cols=columns,
+        block_size=400,
+    )
+    assert spread._read_bytes(0) - fewer._read_bytes(0) == (
+        640 * 1024 - (32 * 1024 + 6 * 4_096)
+    )
     # A run of rows touches a row of shards for every 100 rows, and one more
     # where it does not start at a shard's first row.
     assert [run_shards(geometry, rows) for rows in (0, 1, 2, 100, 101, 102)] == [
