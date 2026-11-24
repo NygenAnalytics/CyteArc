@@ -291,6 +291,16 @@ plan["pca"].estimate               # time, memory, threads and network of the ea
 
 A reused stage's `outputs` are the `(key, ref)` pairs that the run would record. A computed stage's `reason` is `"absent"` (no artifact of the operation), `"changed"` (the closest one, `existing`, differs in `changed_parameters` or `changed_inputs`), `"superseded"` (an operation revision replaces `existing`), `"incomplete"`, `"missing_diagnostics"` (an artifact saved before its operation recorded diagnostics), `"invalid"`, or `"upstream"`. A stage that reads nothing that changed stays reused: after a `umap` change, Leiden, cluster selection, doublets and markers are reused. `estimate` is a past measurement from the latest run of the same recipe and assay that computed the stage, None without one; that run's cells, settings and machine can differ, and its `resources` record that machine's `workers`, CPUs and memory. A value that the run did not record is None, as runs of releases before these measurements hold no CPU time.
 
+Plan a trajectory's calls, which no recipe runs, by wrapping them as written in `ds.trajectory.plan()`. A call whose result the store holds returns its ref; one that would compute returns its plan in place of the ref, and calls that take it are `"upstream"`. The planned calls save nothing and read no count matrix; each call but `lineage_tree` loads its graph, as it does when it runs. The plan covers the calls of the thread that opened it, and a call that changes the store without saving a result, such as `ds.cells.insert`, still writes:
+
+```python
+with ds.trajectory.plan() as plan:
+    pseudotime = ds.trajectory.pseudotime(graph, source_sink=clusters, sources=[1], sinks=[2])
+    fate = ds.trajectory.fate(pseudotime, clusters, sinks=[2, 3, 4])
+plan.computed                      # calls that would compute, in the order made
+plan["fate"].reason, plan["fate"].upstream  # ("upstream", (0,)) when the pseudotime would compute
+```
+
 ### Handle failures and interruptions
 
 A stage error raises `PipelineExecutionError` (`run_id`, `stage`, cause in `__cause__`). SIGTERM,

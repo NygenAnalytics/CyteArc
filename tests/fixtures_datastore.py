@@ -237,6 +237,33 @@ def analyzed_datastore_zarr_root(datastore_zarr_root, tmp_path_factory):
     return str(zarr_root)
 
 
+@pytest.fixture(scope="session")
+def clustered_store(analyzed_datastore_zarr_root, tmp_path_factory):
+    """A store with a graph, its Leiden clusters, its HVGs and the detected genes.
+
+    Returns the store's location, to copy before writing, and the refs by name.
+    """
+    from cytearc.datastore.datastore import DataStore
+
+    location = tmp_path_factory.mktemp("clustered_store") / "data.zarr"
+    shutil.copytree(analyzed_datastore_zarr_root, location)
+    datastore = DataStore(str(location), default_assay="RNA", nthreads=1)
+    graph = datastore.artifacts.find("graph")
+    coordinates = _input_ref(
+        datastore, _input_ref(datastore, graph, "neighbors"), "coordinates"
+    )
+    normalized = _input_ref(datastore, coordinates, "normalized")
+    refs = {
+        "graph": graph,
+        "hvgs": _input_ref(datastore, normalized, "feature_selection"),
+        "leiden": datastore.clusters.leiden(graph),
+        "detected": datastore.features.detected(
+            _input_ref(datastore, normalized, "cell_selection"), min_cells=20
+        ),
+    }
+    return location, refs
+
+
 @pytest.fixture
 def analyzed_datastore_ephemeral(analyzed_datastore_zarr_root):
     from cytearc.datastore.datastore import DataStore

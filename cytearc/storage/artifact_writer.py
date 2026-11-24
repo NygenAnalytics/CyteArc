@@ -164,6 +164,11 @@ def artifact_forecast_scope() -> Iterator[None]:
         _FORECAST.reset(token)
 
 
+def artifact_forecast_active() -> bool:
+    """Return whether calls in this context run in an artifact forecast."""
+    return _FORECAST.get()
+
+
 def _computation(
     root: zarr.Group,
     *,

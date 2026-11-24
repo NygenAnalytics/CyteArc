@@ -433,6 +433,8 @@ A computed stage's `estimate`, a {py:class}`~cytearc.datastore.pipeline_accessor
 
 A plan raises the errors that the call raises before it writes, such as a `ValueError` for an already completed label or for a setting that the stage's method refuses ([Validation before a run starts](#validation-before-a-run-starts)), and a `TypeError` for `run_until`, `callback`, or `cancel`, which belong to a run. A stage's method checks the limits that depend on the data only when the stage runs: when every stage before it would be reused, the plan reaches that check and raises the stage's error, as the run would. The plan goes through each stage until the stage would compute an artifact, so a reused stage warns from its saved diagnostics as it does in a run.
 
+No recipe runs trajectory calls, so they have a plan of their own: `ds.trajectory.plan()` plans the calls made in its block, as written ([Plan a trajectory](datastore.html#plan-a-trajectory)).
+
 ## Rerun a run with changed settings
 
 `ds.pipeline.rerun` runs a run's recipe again with the settings that the run recorded, so a call passes only what it changes. `run.settings()` returns those settings as the keywords of the recipe's method, every keyword but `label`, `run_until`, `callback`, and `cancel`, and `ds.pipeline.plan` takes a run in place of a recipe's name to report what the rerun would compute.

@@ -242,28 +242,6 @@ def _outside_artifacts(files: dict[str, str]) -> dict[str, str]:
     }
 
 
-@pytest.fixture(scope="module")
-def clustered_store(
-    analyzed_datastore_zarr_root: str, tmp_path_factory: pytest.TempPathFactory
-) -> tuple[Path, dict[str, ArtifactRef]]:
-    """A store with a graph, its Leiden clusters and the detected genes."""
-    location = tmp_path_factory.mktemp("concurrent_writers") / "data.zarr"
-    shutil.copytree(analyzed_datastore_zarr_root, location)
-    ds = _open(location)
-    graph = ds.artifacts.find("graph")
-    coordinates = _input(ds, _input(ds, graph, "neighbors"), "coordinates")
-    normalized = _input(ds, coordinates, "normalized")
-    refs = {
-        "graph": graph,
-        "hvgs": _input(ds, normalized, "feature_selection"),
-        "leiden": ds.clusters.leiden(graph),
-        "detected": ds.features.detected(
-            _input(ds, normalized, "cell_selection"), min_cells=20
-        ),
-    }
-    return location, refs
-
-
 def _copy(source: Path, target: Path) -> Path:
     shutil.copytree(source, target)
     return target

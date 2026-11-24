@@ -255,8 +255,8 @@ def test_datastore_namespace_bindings_cover_all_moved_methods_and_find():
     # trajectory.lineage_membership, trajectory.load_lineage_membership and
     # trajectory.branch_cells, then scores.potency and scores.load_potency,
     # then embeddings.localmap, then trajectory.states and
-    # trajectory.load_states.
-    assert len(_NAMESPACE_METHODS) == 164
+    # trajectory.load_states, then trajectory.plan.
+    assert len(_NAMESPACE_METHODS) == 165
     assert {
         "import_receptors",
         "load_receptors",
@@ -350,6 +350,7 @@ def test_datastore_namespace_bindings_cover_all_moved_methods_and_find():
         "branch_cells",
         "states",
         "load_states",
+        "plan",
     } <= {
         name
         for namespace, _, name, _ in _NAMESPACE_METHODS
