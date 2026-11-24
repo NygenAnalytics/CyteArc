@@ -73,6 +73,30 @@ def _record_original_threads(libraries: list[Any], thread: int, openmp: bool) ->
             _original_threads.setdefault(library.filepath, library.get_num_threads())
 
 
+def _set_threads(library: Any, threads: int) -> None:
+    """Set a library's thread count from the calling thread.
+
+    From threadpoolctl 3.8, an OpenBLAS whose single thread pool serves the
+    whole process takes counts only from the thread in control of it: the
+    first to set a count, until it gives control up through
+    ``clear_controlling_thread``. The calls of other threads do nothing. The
+    limits here apply to the whole process in the order they begin, on any
+    thread, so the calling thread takes control for the call and then gives
+    it up, which leaves the next limit, or a threadpoolctl limit on any
+    thread, free to set the count. Libraries without that method, every one
+    before threadpoolctl 3.8, take counts from any thread.
+    """
+    release = getattr(library, "clear_controlling_thread", None)
+    if release is None:
+        library.set_num_threads(threads)
+        return
+    release(force=True)
+    try:
+        library.set_num_threads(threads)
+    finally:
+        release()
+
+
 def _apply_thread_limits(libraries: list[Any], thread: int, openmp: bool) -> None:
     """Set the libraries to the most recent remaining limit, or to their originals.
 
@@ -112,7 +136,7 @@ def _apply_thread_limits(libraries: list[Any], thread: int, openmp: bool) -> Non
                 count if count is not None else _original_threads.get(library.filepath)
             )
         if target is not None and library.get_num_threads() != target:
-            library.set_num_threads(target)
+            _set_threads(library, target)
 
 
 def enter_thread_limit(
