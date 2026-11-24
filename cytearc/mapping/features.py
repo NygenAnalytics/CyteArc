@@ -26,6 +26,7 @@ from ..assay.normalization import (
     library_size_divisors,
     normalize_rows,
 )
+from ..metadata.membership import FeatureRecord, present_sources
 from ..metadata.rows import read_metadata_rows_chunkwise
 from ..storage.budget import ResourceBudget
 from ..storage.execution import admit_stream
@@ -40,6 +41,8 @@ from ..storage.partition import (
     row_band,
     row_read_parts,
 )
+from ..storage.artifacts import ValueFingerprintBuilder
+from ..utils.arguments import quoted_examples
 from ..utils.arrays import read_only_copy
 from ..utils.count_values import is_real_count_dtype
 from ..utils.memory_budget import MemoryBudgetError
@@ -217,6 +220,14 @@ class AlignedFeatureStream:
     count of the feature. The rows are normalized with ``normalization``, the
     fit of the reference's cells over every reference feature, restricted to
     the features that the query measures.
+
+    A query merged from sources that measured different features records
+    which features each source measured in its feature columns
+    ``measured_in_<source>``, which ``sources`` holds with the source of each
+    selected cell. A reference feature that the source of a query cell did
+    not measure is missing for that cell, and takes the fill of
+    ``missing_feature_policy``, as it does when that source's store is
+    mapped alone; ``"error"`` refuses such a source.
     """
 
     def __init__(
@@ -233,6 +244,7 @@ class AlignedFeatureStream:
         feature_key: str = "ids",
         reserved_resident_bytes: int = 0,
         reserved_per_row_bytes: int = 0,
+        sources: tuple[FeatureRecord, np.ndarray] | None = None,
     ) -> None:
         if not isinstance(query_assay, RNAassay):
             raise TypeError("AlignedFeatureStream supports RNA query assays only")
@@ -344,11 +356,19 @@ class AlignedFeatureStream:
         self._feature_coverage = float(
             reference_indices.size / len(self._reference_feature_keys)
         )
-        if self.renormalize_subset and self._feature_coverage < 1:
+        self._take_source_features(sources, missing_feature_policy)
+        lowest_coverage = min(
+            [self._feature_coverage]
+            + [
+                columns.size / len(self._reference_feature_keys)
+                for columns in self._source_features.values()
+            ]
+        )
+        if self.renormalize_subset and lowest_coverage < 1:
             warn(
                 "The reference divides each cell by its total over the reference "
                 "features (renormalize_subset=True), but the query measures only "
-                f"{self._feature_coverage:.1%} of them. Query totals cover the "
+                f"{lowest_coverage:.1%} of them. Query totals cover the "
                 "shared features alone, so normalized query values are larger "
                 "than the reference would compute for the same cell."
             )
@@ -392,6 +412,13 @@ class AlignedFeatureStream:
             + len(self._reference_feature_keys) * normalized_bytes
             + (normalized_bytes if self.renormalize_subset else 0)
             + np.dtype(bool).itemsize
+            # The rows of each source of a merged query, which a block
+            # compares and gathers.
+            + (
+                0
+                if self._cell_sources is None
+                else np.dtype(bool).itemsize + np.dtype(np.int64).itemsize
+            )
             + int(reserved_per_row_bytes)
         )
         block_rows, boundaries, io_concurrency = self._plan_rows(
@@ -403,6 +430,69 @@ class AlignedFeatureStream:
             boundaries=boundaries,
         )
         self._io_concurrency = io_concurrency
+
+    def _take_source_features(
+        self,
+        sources: tuple[FeatureRecord, np.ndarray] | None,
+        missing_feature_policy: str,
+    ) -> None:
+        """Keep the source of each query cell and the reference features that each source measured.
+
+        ``sources`` holds a merged query's record of which features each
+        source measured and the position in it of each selected cell's
+        source. The stream keeps them, and the fingerprint of what the
+        sources measured, which the projection records, only when some
+        source of the cells did not measure some reference feature that the
+        query holds.
+
+        Raises:
+            ValueError: If ``missing_feature_policy`` is ``"error"`` and a
+                source of the selected cells did not measure such a feature.
+        """
+        self._cell_sources: np.ndarray | None = None
+        self._source_features: dict[int, np.ndarray] = {}
+        self._measured_features_fingerprint: str | None = None
+        if sources is None:
+            return
+        record, codes = sources
+        if codes.shape != self._query_cell_indices.shape:
+            raise ValueError("sources must give the source of every selected cell")
+        # A source measured a reference feature when it measured one of the
+        # query features that match it.
+        measured = record.measured_of(self._query_index_map)
+        if self._column_starts is not None:
+            measured = np.logical_or.reduceat(measured, self._column_starts, axis=1)
+        present = present_sources(codes, len(record.sources))
+        lacking = [code for code in present if not measured[code].all()]
+        if not lacking:
+            return
+        if missing_feature_policy == "error":
+            code = lacking[0]
+            unmeasured = self._reference_index_map[~measured[code]]
+            raise ValueError(
+                f"Query source {record.sources[code]!r} did not measure "
+                f"{unmeasured.size} required reference features, as the feature "
+                f"column {record.columns[code]!r} records: "
+                f"{quoted_examples(self._reference_feature_keys[unmeasured])}. Map "
+                "the cells of the sources that measured them, or fill them with "
+                "missing_feature_policy='reference_mean' or 'zero'"
+            )
+        self._cell_sources = read_only_copy(codes)
+        self._source_features = {
+            int(code): read_only_copy(self._reference_index_map[measured[code]])
+            for code in present
+        }
+        fingerprint = ValueFingerprintBuilder()
+        fingerprint.update_text_values(
+            "sources", np.asarray([record.sources[code] for code in present])
+        )
+        fingerprint.update_array("measured", measured[present])
+        self._measured_features_fingerprint = fingerprint.hexdigest()
+
+    @property
+    def measured_features_fingerprint(self) -> str | None:
+        """The fingerprint of the reference features that each source of the query cells measured, or None when every source measured every one that the query measures."""
+        return self._measured_features_fingerprint
 
     @property
     def row_geometry(self) -> AlignedRowGeometry:
@@ -442,6 +532,9 @@ class AlignedFeatureStream:
             arrays.append(self._column_starts)
         if self._cell_scalars is not None:
             arrays.append(self._cell_scalars)
+        if self._cell_sources is not None:
+            arrays.append(self._cell_sources)
+            arrays.extend(self._source_features.values())
         return sum(array.nbytes for array in arrays) + np.dtype(np.float64).itemsize
 
     def _read_parts(self, rows: int) -> tuple[int, int]:
@@ -566,9 +659,41 @@ class AlignedFeatureStream:
                 else:
                     values.fill(0)
                 values[:, self._reference_index_map] = normalized
+                if self._cell_sources is not None:
+                    self._fill_unmeasured(start, values)
                 yield AlignedFeatureBlock(
                     row_offset=start,
                     values=values,
                     observed=observed,
                 )
                 del raw, normalized, values, observed
+
+    def _fill_unmeasured(self, row_offset: int, values: np.ndarray) -> None:
+        """Fill the reference features that the source of a block's cell did not measure, which are missing for that cell."""
+        for rows, measured in self.measured_rows(row_offset, len(values)):
+            unmeasured = np.setdiff1d(self._reference_index_map, measured)
+            if unmeasured.size:
+                values[np.ix_(rows, unmeasured)] = (
+                    self._reference_normalized_means[unmeasured]
+                    if self._missing_feature_policy == "reference_mean"
+                    else 0.0
+                )
+
+    def measured_rows(
+        self, row_offset: int, n_rows: int
+    ) -> tuple[tuple[np.ndarray, np.ndarray], ...]:
+        """Return the rows of a block of the selected cells by the reference features that their sources measured.
+
+        Each pair holds the positions in the block of one source's rows and
+        the reference features that the source measured. Unless some source
+        of the cells did not measure a reference feature that the query
+        holds, one pair holds every row and every such feature.
+        """
+        rows = np.arange(n_rows)
+        if self._cell_sources is None:
+            return ((rows, self._reference_index_map),)
+        codes = self._cell_sources[row_offset : row_offset + n_rows]
+        return tuple(
+            (rows[codes == code], self._source_features[int(code)])
+            for code in np.unique(codes)
+        )

@@ -1,13 +1,14 @@
 from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
 from numbers import Real
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
 import pandas as pd
 
 from ...assay import Assay, ATACassay, RNAassay, norm_tf_idf
 from ...assay.normalization import builtin_normalizer
+from ...assay.hvg_statistics import cell_totals_over_features
 from ...assay.feature_summary import (
     ensure_feature_summary,
     feature_summary_selected_count,
@@ -52,7 +53,11 @@ from ...metadata.arguments import (
     HtoIdentityArguments,
     PrevalentPeakArguments,
 )
-from ...metadata.membership import leave_out_unmeasured_features, measured_selection
+from ...metadata.membership import (
+    leave_out_unmeasured_features,
+    measured_feature_mask,
+    measured_selection,
+)
 from ...metadata.rows import (
     apply_missing_mask,
     metadata_missing_mask,
@@ -465,11 +470,56 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         self._require_measured_cells(
             assay.name, cell_selection, operation="run_cell_cycle_scoring"
         )
+        # A gene that some source of the cells did not measure leaves the
+        # phase genes, the expression bins and the controls, and each cell's
+        # total is taken over the others. Only a store whose record leaves out
+        # a gene reads the selected cells here.
+        measured = leave_out_unmeasured_features(
+            assay.cells,
+            assay.feats,
+            partial(
+                read_stored_selection_indices,
+                self.zw,
+                cell_selection,
+                kind="cell_selection",
+                scope="datastore",
+                assay=None,
+                table_path="cellData",
+            ),
+            assay=assay.name,
+            analysis="scores.cell_cycle",
+            kind="gene",
+            of_cells="the selected cells",
+            remedy="Score the cells of one source.",
+            names=names,
+        )
+        if measured is not None:
+
+            def measured_of(indices: list[int], label: str) -> list[int]:
+                assert measured is not None
+                kept = [index for index in indices if measured[index]]
+                if not kept:
+                    raise ValueError(
+                        f"None of the {label} was measured by every source of the "
+                        "selected cells; score the cells of one source, or pass "
+                        f"{label} that every source measured"
+                    )
+                if len(kept) < len(indices):
+                    logger.warning(
+                        f"{len(indices) - len(kept)} of the {len(indices)} matched "
+                        f"{label} were not measured by every source of the "
+                        "selected cells and are left out"
+                    )
+                return kept
+
+            s_gene_indices = measured_of(s_gene_indices, "s_genes")
+            g2m_gene_indices = measured_of(g2m_gene_indices, "g2m_genes")
         summary_ref = ensure_feature_summary(
             self.zw,
             assay,
             cell_selection,
             log_transform=log_transform,
+            measured=measured,
             invalidate_cache=invalidate_cache,
         )
         n_cells = feature_summary_selected_count(self.zw, cell_selection)
@@ -535,6 +585,7 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             n_bins=n_bins,
             rand_seed=rand_seed,
             log_transform=log_transform,
+            measured=measured,
         )
         phase = np.asarray(assign_cell_cycle_phase(s_score, g2m_score))
         write_cell_data_artifact(
@@ -1502,6 +1553,15 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
     ) -> ArtifactRef:
         """Persist the percentage of counts assigned to selected features.
 
+        On a store merged from sources that measured different features, as
+        its feature columns ``measured_in_<source>`` record, a selected
+        feature that some source of the selected cells did not measure is
+        left out, through a feature selection of the others, with a warning
+        that names such features, and each cell's percentage is of its total
+        over the features that every such source measured, as a store of
+        those features alone holds it. The artifact then records those
+        features as ``measured_features_fingerprint``.
+
         Args:
             cell_selection: Exact datastore-scoped cell-selection artifact.
             features: Exact assay-scoped feature-selection artifact.
@@ -1512,6 +1572,8 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
 
         Raises:
             UnmeasuredCellsError: If the assay did not measure a selected cell.
+            ValueError: If no selected feature was measured by every source
+                of the selected cells.
         """
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         if not isinstance(cell_selection, ArtifactRef):
@@ -1547,10 +1609,31 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             ),
             dtype=bool,
         )
+        # A feature that some source of the cells did not measure would lower
+        # the percentages of that source's cells.
+        feature_selection, feature_values = cast(Any, self)._measured_feature_selection(
+            assay,
+            feature_selection,
+            feature_values,
+            cell_index,
+            analysis="qc.feature_percentage",
+            remedy=(
+                "Take the percentages of the cells of the sources that measured "
+                "them, or of features that every source measured."
+            ),
+        )
         feature_index = np.flatnonzero(feature_values).astype(
             np.int64,
             copy=False,
         )
+        # Each cell's total leaves out the features of its own source that
+        # another source of the cells did not measure.
+        measured = measured_feature_mask(
+            assay.cells, assay.feats, cell_index, assay=assay.name
+        )
+        parameters: dict[str, Any] = {"scale": 100.0}
+        if measured is not None:
+            parameters["measured_features_fingerprint"] = fingerprint_array(measured)
 
         planned = plan_cell_data_artifact(
             self.zw,
@@ -1558,7 +1641,7 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             assay=assay.name,
             kind="quality_metric",
             operation="run_feature_percentage",
-            parameters={"scale": 100.0},
+            parameters=parameters,
             inputs={"feature_selection": feature_selection},
             execution_options={"nthreads": assay.nthreads},
             cell_selection=cell_selection,
@@ -1568,7 +1651,17 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         if planned.reused:
             return planned.ref
         self._require_writable("run_feature_percentage")
-        values = assay._compute_feature_percentage(cell_index, feature_index)
+        values = assay._compute_feature_percentage(
+            cell_index,
+            feature_index,
+            totals=(
+                None
+                if measured is None
+                else cell_totals_over_features(
+                    assay, cell_index, np.flatnonzero(measured)
+                )
+            ),
+        )
         write_cell_data_artifact(self.zw, planned, {"values": values})
         return planned.ref
 
@@ -1958,9 +2051,16 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         or which is computed and saved now. A session that normalizes
         otherwise summarizes peaks otherwise, so they are counted in one pass
         over the cells' counts of the LSI's peaks while ``resident_bytes``
-        stay held. The totals are each cell's total counts, or None when the
+        stay held. The totals are each cell's total counts, its total over
+        the peaks that every source of a merged store's cells measured when
+        the normalization took term frequencies over them, or None when the
         normalization renormalized over the selected peaks, so that each
         doublet's term frequencies divide by its own total of them.
+
+        Raises:
+            ValueError: If the normalization took term frequencies over the
+                peaks that every source measured, and the feature columns
+                ``measured_in_<source>`` now record other peaks.
         """
         from ...assay.feature_summary import (
             ensure_feature_summary,
@@ -1974,12 +2074,25 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
 
         # _require_lsi_doublet_graph checked that the lineage names both.
         assert lineage.reduction is not None and lineage.normalized is not None
+        parameters = inspect_artifact(self.zw, lineage.normalized).parameters or {}
         renormalize = bool_argument(
-            (inspect_artifact(self.zw, lineage.normalized).parameters or {}).get(
-                "renormalize_subset"
-            ),
-            "renormalize_subset",
+            parameters.get("renormalize_subset"), "renormalize_subset"
         )
+        measured: np.ndarray | None = None
+        if "measured_features_fingerprint" in parameters:
+            measured = measured_feature_mask(
+                assay.cells, assay.feats, active_idx, assay=assay.name
+            )
+            if measured is None or fingerprint_array(measured) != parameters.get(
+                "measured_features_fingerprint"
+            ):
+                raise ValueError(
+                    "The graph's LSI normalized each cell's peaks over its total "
+                    "of the peaks that every source of its cells measured, but "
+                    f"the feature columns measured_in_<source> of {assay.name!r} "
+                    "now record other peaks; normalize the cells again and build "
+                    "the graph from the new values"
+                )
         if assay.normMethod is norm_tf_idf:
             summary = ensure_feature_summary(self.zw, assay, lineage.cell_selection)
             document_frequency = feature_summary_values(
@@ -2004,7 +2117,14 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             as_zarr_array(group["data"], name="data"),
             renormalize_subset=renormalize,
         )
-        totals = None if renormalize else assay._cell_count_totals(active_idx)
+        if renormalize:
+            totals = None
+        elif measured is None:
+            totals = assay._cell_count_totals(active_idx)
+        else:
+            totals = cell_totals_over_features(
+                assay, active_idx, np.flatnonzero(measured)
+            )
         return projection, totals
 
     def _run_doublet_detection_artifact(
@@ -2649,7 +2769,8 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         cutoff are kept in feature order, on every platform. On a store merged from sources that called different peaks,
         as its feature columns ``measured_in_<source>`` record, the peaks that some source of the selected cells did not
         measure are left out, with a warning that names them, and every remaining peak is marked when fewer than `top_n`
-        remain.
+        remain. The remaining peaks' prevalence then divides each cell's counts by its total over them, as a store of
+        those peaks alone does, which one more pass over their counts gives.
 
         Args:
             from_assay: Assay to use for peak selection. If no value is provided
@@ -2707,6 +2828,7 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             self.zw,
             assay,
             cell_selection,
+            measured=measured,
             invalidate_cache=invalidate_cache,
         )
         arguments = PrevalentPeakArguments(
@@ -2794,6 +2916,13 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         - G2M is assigned when the G2M score exceeds the S score.
         - S is assigned otherwise, including tied non-negative scores.
 
+        On a store merged from sources that measured different genes, as its
+        feature columns ``measured_in_<source>`` record, a gene that some
+        source of the selected cells did not measure is left out of the phase
+        genes, the bins and the controls, with a warning that names such
+        genes, and each cell's total, which library-size values divide by, is
+        its total over the other genes, as a store of them alone scores them.
+
         Args:
             from_assay: Name of assay to be used. If no value is provided then the default assay will be used.
             cell_selection: Explicit cells to score.
@@ -2814,6 +2943,8 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             PermissionError: If the scores or their feature summary must be
                 computed and the store is not opened with ``zarr_mode='r+'``.
                 A read-only store returns saved scores.
+            ValueError: If no gene of a phase list was measured by every
+                source of the selected cells.
         """
         log_transform = optional_bool_argument(log_transform, "log_transform")
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")

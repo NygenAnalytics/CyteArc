@@ -502,12 +502,12 @@ def unshared_features_warning(
         + f"{zeros}; {record}, so "
         + (
             "analyses leave those zeros out or refuse them, except some that "
-            "still read them as counts, such as features.detected and "
-            "add_grouped_assay."
+            "still read them as counts, such as the pseudotime and lineage "
+            "analyses of features."
             if assay_type == "ADT"
             else "analyses leave those zeros out or refuse them, except some that "
-            "still read them as counts, such as cell-cycle and chromVAR scores, "
-            "features.detected, add_grouped_assay and mapping."
+            "still read them as counts, such as potency scores and the pseudotime "
+            "and lineage analyses of features."
         )
     )
     if combination == "merge":

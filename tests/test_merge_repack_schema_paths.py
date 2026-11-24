@@ -1446,12 +1446,12 @@ def _zeros_read_as_counts(first: str = "left", *, adt: bool = False) -> str:
         f"such as 'measured_in_{first}' record what each source measured, so "
         + (
             "analyses leave those zeros out or refuse them, except some that "
-            "still read them as counts, such as features.detected and "
-            "add_grouped_assay."
+            "still read them as counts, such as the pseudotime and lineage "
+            "analyses of features."
             if adt
             else "analyses leave those zeros out or refuse them, except some that "
-            "still read them as counts, such as cell-cycle and chromVAR scores, "
-            "features.detected, add_grouped_assay and mapping."
+            "still read them as counts, such as potency scores and the pseudotime "
+            "and lineage analyses of features."
         )
     )
 
@@ -2643,8 +2643,8 @@ def test_a_merged_store_that_alone_holds_an_assay_keeps_its_zero_counts(tmp_path
         "source 'inner' holds zero counts for the features its sources lack, "
         "which the merge keeps; columns such as 'measured_in_inner__left' record "
         "what each source measured, so analyses leave those zeros out or refuse "
-        "them, except some that still read them as counts, such as "
-        "features.detected and add_grouped_assay."
+        "them, except some that still read them as counts, such as the "
+        "pseudotime and lineage analyses of features."
     ]
     assert set(_measured_columns(str(tmp_path / "outer.zarr"))) == {
         "measured_in_inner__left",

@@ -319,6 +319,9 @@ def _validate_feature_summary_parent(
             context=context,
         )
     parameter_names, payload_names = expected
+    # A summary of the features that every source of the cells measured
+    # records them.
+    parameter_names |= _measured_features_parameters(status.parameters or {}, context)
     if set(status.parameters or {}) != parameter_names or set(status.inputs or {}) != {
         "cell_selection",
         "dataset_fingerprint",
@@ -651,7 +654,7 @@ def _validate_feature_selection_provenance(
         and parameters.get("feature_key") == "names"
     ):
         parameter_names = frozenset({"feature_key"})
-    if status.operation == "select_prevalent_peaks":
+    if status.operation in {"select_detected_features", "select_prevalent_peaks"}:
         parameter_names |= _measured_features_parameters(parameters, context)
     received_inputs = set(inputs)
     if received_inputs != input_names or set(parameters) != parameter_names:

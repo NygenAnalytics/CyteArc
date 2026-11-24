@@ -23,6 +23,7 @@ from ...assay.normalization import (
     builtin_normalizer,
     require_counts_for,
 )
+from ...metadata.membership import cell_sources, measured_features_by_source
 from ...metadata.alignment import (
     align_to_cell_ids,
     keyed_values_remedy,
@@ -299,6 +300,17 @@ class _MappingOperationsMixin(_MappingOperationsBase):
         query-batch statistics, and ``queryScaledDispersion``. A read-only
         query store returns a saved projection of the same request.
 
+        A query store merged from sources that measured different genes
+        records which genes each source measured in its feature columns
+        ``measured_in_<source>``. Each query cell is then projected on the
+        reference features that its own source measured; the others are
+        missing for that cell and take the fill of ``missing_feature_policy``,
+        as when the source's own store is mapped, and its
+        ``queryScaledDispersion`` reads the features that the source measured.
+        The projection records what each source measured as
+        ``measured_features_fingerprint``, only when some source did not
+        measure some reference feature that the query holds.
+
         ``query_batches``, for a Symphony reference only, holds the technical
         batch of each selected query cell, one column per batch variable, as
         a pandas DataFrame indexed by cell ID; rows of other cells are left
@@ -320,7 +332,9 @@ class _MappingOperationsMixin(_MappingOperationsBase):
                 batches, such as ``1`` and ``"1"``, or the reference
                 normalizes with ``norm_dummy`` and the query assay holds
                 another kind of values than the reference's, counts or values
-                normalized before import.
+                normalized before import, or ``missing_feature_policy`` is
+                ``"error"`` and a source of the selected query cells did not
+                measure a reference feature that the query holds.
             PermissionError: If the projection or its overlap selection must be
                 written and the query store is not opened with
                 ``zarr_mode='r+'``, before any query cell is projected.
@@ -471,6 +485,23 @@ class _MappingOperationsMixin(_MappingOperationsBase):
         )
         query_dataset_fingerprint = self._ensure_dataset_fingerprint(assay_name)
         feature_ids_fingerprint = _ordered_feature_ids_fingerprint(assay.z)
+        # A query merged from sources that measured different features maps
+        # each cell on the reference features that its own source measured.
+        record = measured_features_by_source(assay.feats)
+        sources = (
+            None
+            if record is None or record.measured.all()
+            else (
+                record,
+                cell_sources(
+                    assay.cells,
+                    assay.feats,
+                    query_cell_indices,
+                    record,
+                    assay=assay_name,
+                ),
+            )
+        )
         stream = AlignedFeatureStream(
             query_assay=assay,
             query_cell_indices=query_cell_indices,
@@ -483,6 +514,7 @@ class _MappingOperationsMixin(_MappingOperationsBase):
             reserved_resident_bytes=reserved_resident,
             reserved_per_row_bytes=reserved_per_row,
             normalization=normalization,
+            sources=sources,
         )
         if _ordered_feature_ids_fingerprint(assay.z) != feature_ids_fingerprint:
             raise ValueError("Query feature identities changed during mapping setup")
@@ -533,6 +565,7 @@ class _MappingOperationsMixin(_MappingOperationsBase):
             reference=reference,
             reference_cell_count=reference.selected_cell_count,
             feature_key=feature_key,
+            measured_features_fingerprint=stream.measured_features_fingerprint,
             invalidate_cache=invalidate_cache,
         )
         if projection_plan.reused:
@@ -545,14 +578,14 @@ class _MappingOperationsMixin(_MappingOperationsBase):
             chunk_rows=stream.row_geometry.block_rows,
             profile=self.storageProfile,
         )
-        overlap_features = stream.reference_index_map
         dispersion_total = 0.0
-        informative_total = 0
+        # The informative cells' measured features that the dispersion sums.
+        dispersion_terms = 0
 
         def projected_blocks() -> Generator[
             tuple[int, np.ndarray, np.ndarray], None, None
         ]:
-            nonlocal dispersion_total, informative_total
+            nonlocal dispersion_total, dispersion_terms
             expected_start = 0
             with closing(stream.iter_blocks()) as blocks:
                 for block in blocks:
@@ -560,13 +593,17 @@ class _MappingOperationsMixin(_MappingOperationsBase):
                         raise RuntimeError("Aligned query blocks are not contiguous")
                     coordinates = project_pca(block.values, reference.model)
                     informative = block.observed
-                    if informative.any():
-                        dispersion_total += scaled_dispersion_sum(
-                            block.values[informative],
-                            reference.model,
-                            features=overlap_features,
-                        )
-                        informative_total += int(np.count_nonzero(informative))
+                    # Each cell's dispersion reads the features that its
+                    # source measured, not the values filled for the others.
+                    for rows, features in stream.measured_rows(
+                        block.row_offset, len(block.values)
+                    ):
+                        rows = rows[informative[rows]]
+                        if rows.size:
+                            dispersion_total += scaled_dispersion_sum(
+                                block.values[rows], reference.model, features=features
+                            )
+                            dispersion_terms += rows.size * features.size
                     expected_start += len(coordinates)
                     yield block.row_offset, coordinates, ~informative
             if expected_start != n_cells:
@@ -656,7 +693,6 @@ class _MappingOperationsMixin(_MappingOperationsBase):
                 raise RuntimeError("Mapping did not cover all selected query cells")
             if _ordered_feature_ids_fingerprint(assay.z) != feature_ids_fingerprint:
                 raise ValueError("Query feature identities changed during mapping")
-            denominator = informative_total * len(overlap_features)
             writer.finish(
                 {
                     "featureCoverage": stream.feature_coverage,
@@ -664,7 +700,7 @@ class _MappingOperationsMixin(_MappingOperationsBase):
                     "algorithmVariant": algorithm_variant,
                     "uninformativeCellCount": uninformative_count,
                     "queryScaledDispersion": (
-                        dispersion_total / denominator if denominator else 0.0
+                        dispersion_total / dispersion_terms if dispersion_terms else 0.0
                     ),
                 }
             )

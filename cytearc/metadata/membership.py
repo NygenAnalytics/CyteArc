@@ -57,6 +57,9 @@ the source of some of its cells did not measure, with a warning
 (:func:`leave_out_unmeasured_features`); an analysis or an export whose
 result holds a value for each feature that its caller names refuses them
 (:func:`require_features_measured_by_cells`, :func:`require_measured_features`).
+An analysis that divides each cell's counts by the cell's total takes the
+total over the features that every source of its cells measured
+(:func:`measured_feature_mask`).
 """
 
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -598,6 +601,26 @@ def cells_measured_features(
         sources,
         np.asarray(np.logical_and.reduce(record.measured[sources], axis=0)),
     )
+
+
+def measured_feature_mask(
+    cells: Any, features: Any, rows: CellRows, *, assay: str
+) -> np.ndarray | None:
+    """Return the features that the source of every cell at ``rows`` measured, or None when it measured every feature.
+
+    An analysis that divides each cell's counts by the cell's total takes the
+    total over these features, as a store of them alone holds it, so that the
+    total leaves out the counts of features that another source of the cells
+    did not measure. The cells' sources are read as
+    :func:`cells_measured_features` reads them.
+
+    Raises:
+        ValueError: As :func:`cell_sources` raises.
+    """
+    measured = cells_measured_features(cells, features, rows, assay=assay)
+    if measured is None or measured.measured.all():
+        return None
+    return measured.measured
 
 
 def _selected_and_unmeasured(

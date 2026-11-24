@@ -215,7 +215,11 @@ class _RegulonOperationsMixin(_RegulonOperationsBase):
             features: Feature selection of the genes modeled as targets; the
                 factors among them are the regulators. Genes whose name occurs
                 more than once in the selection are left out, because regulons
-                name genes.
+                name genes. On a store merged from sources that measured
+                different genes, as its feature columns ``measured_in_<source>``
+                record, a gene that some source of the selected cells did not
+                measure is left out too, through a feature selection of the
+                others, with a warning that names such genes.
             tfs: Candidate transcription factor names, such as a species TF
                 list. Names are matched exactly to feature names.
             from_assay: RNA assay to model. The default assay when omitted.
@@ -248,6 +252,8 @@ class _RegulonOperationsMixin(_RegulonOperationsBase):
             MemoryError: If the counts do not fit the memory budget.
             PermissionError: If the store is not opened with ``zarr_mode='r+'``.
             UnmeasuredCellsError: If the assay did not measure a selected cell.
+            ValueError: If no selected gene was measured by every source of
+                the selected cells.
         """
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         from ...regulons.grn import (
@@ -292,9 +298,6 @@ class _RegulonOperationsMixin(_RegulonOperationsBase):
         self._require_writable("regulons.grn")
         self._ensure_dataset_fingerprint(assay.name)
         feature_selection = resolve_feature_selection(self.zw, assay.name, features)
-        feature_index = np.flatnonzero(
-            _feature_selection_values(self.zw, feature_selection)
-        ).astype(np.int64)
         cell_index = read_stored_selection_indices(
             self.zw,
             cell_selection,
@@ -305,6 +308,22 @@ class _RegulonOperationsMixin(_RegulonOperationsBase):
         ).astype(np.int64, copy=False)
         if len(cell_index) < 2:
             raise ValueError("GRN inference needs at least two selected cells")
+        # A gene that some source of the cells did not measure would read as
+        # silent in that source's cells, which counts against every link
+        # through it, so it is left out as a target and as a regulator.
+        feature_selection, feature_values = cast(Any, self)._measured_feature_selection(
+            assay,
+            feature_selection,
+            np.asarray(_feature_selection_values(self.zw, feature_selection), bool),
+            cell_index,
+            analysis="regulons.grn",
+            remedy=(
+                "Infer the network of the cells of the sources that measured them, "
+                "or of genes that every source measured."
+            ),
+            kind="gene",
+        )
+        feature_index = np.flatnonzero(feature_values).astype(np.int64)
         names = np.asarray(assay.feats.fetch_all("names"))[feature_index].astype(str)
         keep, dropped = _unique_name_positions(names)
         if dropped:

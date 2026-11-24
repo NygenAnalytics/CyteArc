@@ -28,6 +28,7 @@ from ..utils.numba import njit
 from .normalization import library_size_divisors
 
 if TYPE_CHECKING:
+    from .base import Assay
     from .rna import RNAassay
 
 __all__ = [
@@ -390,17 +391,20 @@ def _band_sizes(band_groups: np.ndarray, n_groups: int) -> np.ndarray:
 
 
 def cell_totals_over_features(
-    assay: "RNAassay", cell_idx: np.ndarray, feat_idx: np.ndarray
+    assay: "Assay", cell_idx: np.ndarray, feat_idx: np.ndarray
 ) -> np.ndarray:
     """Return each selected cell's total count over the features ``feat_idx``.
 
     The counts of those features are read feature-major from ``countsT``, a
     band at a time in a fixed order, and each band's sums are added to its
     cells' totals. The stream's plan charges the totals, the mask of the
-    features and the sums of one band for each worker beside its bands.
+    features and the sums of one band for each worker beside its bands. An
+    assay without ``countsT``, as ATAC and ADT assays usually are, sums the
+    rows of its counts of the features instead, a budgeted block of cells at
+    a time.
 
     Args:
-        assay: An RNA assay.
+        assay: An assay; every RNA assay holds ``countsT``.
         cell_idx: The sorted, unique selected cells.
         feat_idx: The features whose counts are summed.
 
@@ -408,6 +412,7 @@ def cell_totals_over_features(
         The float64 total of each cell of ``cell_idx``, in its order.
     """
     from ..storage.feature_stream import map_feature_cell_bands
+    from ..utils.compute import compute_with_progress
 
     cell_idx = np.asarray(cell_idx, dtype=np.int64)
     feat_idx = np.asarray(feat_idx, dtype=np.int64)
@@ -415,8 +420,15 @@ def cell_totals_over_features(
     if not len(cell_idx) or not len(feat_idx):
         return totals
     counts_t = assay.rawDataT
-    # An RNA assay opens only with a complete countsT.
-    assert counts_t is not None
+    if counts_t is None:
+        return np.asarray(
+            compute_with_progress(
+                assay.rawData[:, feat_idx][cell_idx, :].sum(axis=1, dtype=np.float64),
+                f"({assay.name}) Summing the counts of the measured features",
+                assay.nthreads,
+            ),
+            dtype=np.float64,
+        )
     summed = np.zeros(int(counts_t.shape[0]), dtype=bool)
     summed[feat_idx] = True
     geometry = array_geometry(counts_t)

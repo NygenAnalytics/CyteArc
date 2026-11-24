@@ -1341,12 +1341,12 @@ def _zeros_read_as_counts(first: str, *, adt: bool = False, shared: bool = True)
         f"such as 'measured_in_{first}' record what each source measured, so "
         + (
             "analyses leave those zeros out or refuse them, except some that "
-            "still read them as counts, such as features.detected and "
-            "add_grouped_assay."
+            "still read them as counts, such as the pseudotime and lineage "
+            "analyses of features."
             if adt
             else "analyses leave those zeros out or refuse them, except some that "
-            "still read them as counts, such as cell-cycle and chromVAR scores, "
-            "features.detected, add_grouped_assay and mapping."
+            "still read them as counts, such as potency scores and the pseudotime "
+            "and lineage analyses of features."
         )
     )
     return zeros + (
@@ -1922,8 +1922,8 @@ def test_unshared_features_warning_names_its_combinations():
         " The merge writes zero counts for the features a source lacks; columns "
         "such as 'measured_in_a' record what each source measured, so analyses "
         "leave those zeros out or refuse them, except some that still read them "
-        "as counts, such as cell-cycle and chromVAR scores, features.detected, "
-        "add_grouped_assay and mapping."
+        "as counts, such as potency scores and the pseudotime and lineage analyses "
+        "of features."
     )
     assert unshared_features_warning(
         "RNA", alignment, ["a", "b"], combination="composite", assay_type="RNA"

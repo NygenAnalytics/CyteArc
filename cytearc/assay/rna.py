@@ -610,6 +610,7 @@ class RNAassay(Assay):
         feature_groups: dict[str, np.ndarray],
         *,
         log_transform: bool = False,
+        totals: np.ndarray | None = None,
     ) -> dict[str, np.ndarray]:
         """Per-cell mean of library-size normalized counts for each feature group.
 
@@ -618,9 +619,10 @@ class RNAassay(Assay):
         full ChunkedArray normalization path (and
         its repeated wide-chunk reads) used by ``normed`` when scoring small,
         scattered gene sets such as cell cycle markers. Values are computed in
-        float64 to match ``norm_lib_size``. Row blocks are read ahead in
-        parallel and accumulated as they arrive (each writes a disjoint row
-        slice, so order does not matter).
+        float64 to match ``norm_lib_size``, over each cell's prepared total or
+        its value of ``totals``, which this call overwrites. Row blocks are
+        read ahead in parallel and accumulated as they arrive (each writes a
+        disjoint row slice, so order does not matter).
         """
         cell_idx = np.asarray(cell_idx)
         if (self.normMethod is norm_lib_size or log_transform) and self.sf is None:
@@ -628,8 +630,14 @@ class RNAassay(Assay):
                 "RNA library-size normalization requires a size factor (sf), got None"
             )
         sf = float(self.sf) if self.sf is not None else 1.0
-        scalar = library_size_divisors(
-            self._cell_count_totals(cell_idx), source=self._totals_name, copy=False
+        scalar = (
+            library_size_divisors(
+                self._cell_count_totals(cell_idx), source=self._totals_name, copy=False
+            )
+            if totals is None
+            else library_size_divisors(
+                totals, source=_feature_subset_source(self), copy=False
+            )
         )
 
         union = np.unique(
@@ -825,6 +833,7 @@ class RNAassay(Assay):
         feat_idx: np.ndarray,
         *,
         log_transform: bool = False,
+        totals: np.ndarray | None = None,
     ) -> dict[str, np.ndarray]:
         """Per-feature library-size normalized stats via cell-band countsT.
 
@@ -833,8 +842,10 @@ class RNAassay(Assay):
         (``m2``), and merges the bands of a group in a fixed pairwise order
         with ``ColumnMoments.merge``. Returns ``normed_tot``, ``normed_n``,
         and ``sigmas``, the population variance ``m2 / n_cells``, matching
-        ``norm_lib_size``. A feature whose normalized values are all equal
-        has a variance of exactly zero when its band sums are exact.
+        ``norm_lib_size``, over each cell's prepared total or its value of
+        ``totals``, which this call overwrites. A feature whose normalized
+        values are all equal has a variance of exactly zero when its band
+        sums are exact.
         """
         import time
 
@@ -852,8 +863,14 @@ class RNAassay(Assay):
                 "RNA library-size normalization requires a size factor (sf), got None"
             )
         sf = float(self.sf) if self.sf is not None else 1.0
-        inv_scalar = library_size_divisors(
-            self._cell_count_totals(cell_idx), source=self._totals_name, copy=False
+        inv_scalar = (
+            library_size_divisors(
+                self._cell_count_totals(cell_idx), source=self._totals_name, copy=False
+            )
+            if totals is None
+            else library_size_divisors(
+                totals, source=_feature_subset_source(self), copy=False
+            )
         )
         np.reciprocal(inv_scalar, out=inv_scalar)
 
@@ -1012,8 +1029,11 @@ class RNAassay(Assay):
 
         ``log_transform`` summarizes the values of
         ``normed(log_transform=True)``, and ``renormalize_subset`` those that
-        take each cell's total over ``feat_idx``.
+        take each cell's total over ``feat_idx``, which library-size values
+        take from one more pass over the counts of ``feat_idx``.
         """
+        from .hvg_statistics import cell_totals_over_features
+
         log_transform, renormalize_subset = check_normalization_flags(
             self, log_transform=log_transform, renormalize_subset=renormalize_subset
         )
@@ -1026,9 +1046,16 @@ class RNAassay(Assay):
                 "normed_n": zeros.copy(),
                 "sigmas": zeros.copy(),
             }
-        if uses_library_size_normalization(self) and not renormalize_subset:
+        if uses_library_size_normalization(self):
             return self._streaming_feature_stats(
-                cell_idx, feat_idx, log_transform=log_transform
+                cell_idx,
+                feat_idx,
+                log_transform=log_transform,
+                totals=(
+                    cell_totals_over_features(self, cell_idx, feat_idx)
+                    if renormalize_subset
+                    else None
+                ),
             )
         normed = self.normed(
             cell_idx,
