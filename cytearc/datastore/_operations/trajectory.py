@@ -5774,8 +5774,8 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
 
         Features with similar binned profiles are grouped into
         ``n_clusters`` modules: each retained feature's ``n_neighbors``
-        nearest features, found exactly from every distance between their
-        profiles, form a graph whose Paris hierarchy is cut into the modules.
+        nearest features, found exactly by distances summed over the bins in
+        order, form a graph whose Paris hierarchy is cut into the modules.
         Of two equally near features the earlier ranks first, so the same
         profiles give the same modules on every platform. The modules are
         numbered from 1 by the median bin of their features' peaks.

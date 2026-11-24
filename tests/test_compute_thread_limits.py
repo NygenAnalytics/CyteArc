@@ -786,6 +786,15 @@ def _doublet_call(_tmp_path: Path) -> Callable[[], object]:
     )
 
 
+def _feature_neighbors_call(_tmp_path: Path) -> Callable[[], object]:
+    from cytearc.trajectory.feature_dynamics import nearest_feature_profiles
+
+    # Sixty profiles leave some out of each one's 3 + 8 candidates, which
+    # BLAS's products pick.
+    profiles = np.random.default_rng(10).normal(size=(60, 5))
+    return lambda: nearest_feature_profiles(profiles, 3, nthreads=2)
+
+
 def _runner_call(_tmp_path: Path) -> Callable[[], object]:
     from cytearc.storage.async_execution import AsyncStorageRunner
     from cytearc.storage.budget import ResourceBudget
@@ -951,6 +960,12 @@ _FAMILIES = {
     "loaded profile clusters": _Family(
         _load_clusters_call,
         ("cytearc.perturbation.clusters", "profile_distances"),
+        blas=2,
+        openmp=False,
+    ),
+    "feature neighbors": _Family(
+        _feature_neighbors_call,
+        ("cytearc.trajectory.feature_dynamics", "_nearest_candidates"),
         blas=2,
         openmp=False,
     ),
