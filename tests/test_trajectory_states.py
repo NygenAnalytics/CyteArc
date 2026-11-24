@@ -1080,7 +1080,13 @@ def test_the_budget_that_a_refusal_names_runs_the_search() -> None:
         _states(trajectory, direction, n_states=_PATH_STATES)
 
     _set_budget(trajectory.store, refused.value.needed_bytes)
-    _states(trajectory, direction, n_states=_PATH_STATES)
+    # Sixteen states of the path stop Nelder-Mead at its limit of 45,000
+    # trials, while they would need 99,402 to converge with Accelerate's
+    # rounding and 122,897 with OpenBLAS's.
+    with pytest.warns(
+        DiagnosticWarning, match="16 states stopped at its limit of 45,000 trials"
+    ):
+        _states(trajectory, direction, n_states=_PATH_STATES)
 
     assert len(_state_artifacts(trajectory)) == 1
 
