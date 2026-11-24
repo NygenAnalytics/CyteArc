@@ -742,23 +742,31 @@ def test_a_read_of_selected_cells_holds_no_more_than_its_charge(
 
 
 @pytest.mark.parametrize(
-    ("chunks", "shards"),
-    [((100, 10), (100, 20)), ((100, 4), (100, 4))],
-    ids=["one-column-shard", "five-column-shards"],
+    ("chunks", "shards", "touched"),
+    [
+        pytest.param((100, 10), (100, 20), 100, id="one-column-shard-100"),
+        pytest.param(
+            (100, 10), (100, 20), 300, id="one-column-shard-300", marks=pytest.mark.slow
+        ),
+        pytest.param((100, 4), (100, 4), 40, id="five-column-shards-40"),
+        pytest.param(
+            (100, 4), (100, 4), 300, id="five-column-shards-300", marks=pytest.mark.slow
+        ),
+    ],
 )
-@pytest.mark.parametrize("touched", [100, 300])
 def test_a_read_of_cells_spread_over_shards_holds_a_task_for_each_shard(
     tmp_path: Any,
     touched: int,
     chunks: tuple[int, int],
     shards: tuple[int, int],
 ) -> None:
-    # 30,000 cells by 20 features in shards of 100 cells, of every feature in
-    # two chunks or of four features in one; a block of one cell from each of
-    # 100 or 300 rows of shards, and a block of as many shuffled cells of the
-    # first one to three rows.
+    # 100 cells for each row of shards that the block reads, by 20 features
+    # in shards of 100 cells, of every feature in two chunks or of four
+    # features in one; a block of one cell from each of 40, 100 or 300 rows
+    # of shards, and a block of as many shuffled cells of the first one to
+    # three rows.
     stored, values = _random_bits_store(
-        tmp_path, (30_000, 20), chunks, shards, np.float32
+        tmp_path, (touched * 100, 20), chunks, shards, np.float32
     )
     column_shards = 20 // shards[1]
     spread = np.arange(touched) * 100 + 7
@@ -772,8 +780,9 @@ def test_a_read_of_cells_spread_over_shards_holds_a_task_for_each_shard(
     # chunk, 4 KiB, until it is read; as many cells of fewer rows of shards
     # hold the same indexers and copies.
     charge = block._read_bytes(read.nbytes)
+    filled = -(-touched // 100)
     assert charge - fewer._read_bytes(read.nbytes) == (
-        column_shards * (touched - touched // 100) * 4_096
+        column_shards * (touched - filled) * 4_096
     )
     # A stream of blocks of ten of these cells charges each block the shards
     # of ten rows, where blocks of one cell charge those of one row.
