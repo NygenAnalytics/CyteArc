@@ -832,6 +832,48 @@ def test_a_shuffled_import_names_one_budget_for_a_bucket_and_one_cell(
     assert not list(tmp_path.glob("cytearc-sparse-*"))
 
 
+@pytest.mark.parametrize("shuffle_cells", [False, True], ids=["object", "shuffled"])
+def test_a_seurat_import_charges_its_counts_t_write_with_its_sources(
+    tmp_path, monkeypatch, shuffle_cells
+) -> None:
+    from cytearc.storage import sharding
+
+    charged: list[int] = []
+    preflight = sharding.preflight_counts_t_spec
+
+    def recorded(*args: Any, residentBytes: int = 0, **options: Any) -> Any:
+        charged.append(int(residentBytes))
+        return preflight(*args, residentBytes=residentBytes, **options)
+
+    monkeypatch.setattr(sharding, "preflight_counts_t_spec", recorded)
+    n_cells = 5
+    source = _write_object(tmp_path / "object.rds", n_cells=n_cells)
+    with SeuratReader(source, temp_dir=tmp_path) as reader:
+        SeuratToZarr(
+            reader,
+            str(tmp_path / "store.zarr"),
+            nthreads=1,
+            shuffle_cells=shuffle_cells,
+        ).dump()
+    # RNA's countsT runs beside ADT's source, whose protein and cell names
+    # count their UTF-8 bytes and 8 more and whose layer maps each protein
+    # and member cell by an int64 index; RNA's and ADT's prefix sums of each
+    # cell's stored values, 8 bytes a cell and one each; and a shuffled
+    # import's order, 8 bytes a cell. The scans let go of the order's
+    # inverse, and the counts writes of the shuffled cells.
+    names = [*_PROTEINS, *_cells(n_cells)]
+    adt = (
+        sum(len(name.encode()) + 8 for name in names)
+        + 8 * len(_PROTEINS)
+        + 8 * len(_members(n_cells))
+    )
+    held = adt + 2 * 8 * (n_cells + 1) + (8 * n_cells if shuffle_cells else 0)
+    # The layout fit plans the write and the write admits itself, both with
+    # that charge.
+    assert len(charged) >= 2
+    assert set(charged) == {held}
+
+
 def test_a_budget_without_room_for_the_shuffle_is_refused_before_it_runs(
     tmp_path, monkeypatch
 ) -> None:

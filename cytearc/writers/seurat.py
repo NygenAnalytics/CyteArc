@@ -793,6 +793,7 @@ class SeuratToZarr:
                     resources=self.resources,
                     profile=self.profile,
                     io=self.io,
+                    resident_bytes=self._counts_t_resident_bytes(),
                 )
             cell_selection = self._write_cell_selection()
             active_identity = self._write_active_identity(
@@ -1305,6 +1306,17 @@ class SeuratToZarr:
             + self._shuffle_resident_bytes()
         )
 
+    def _counts_t_resident_bytes(self) -> int:
+        """Return what the import holds beside its ``countsT`` writes.
+
+        They are the count sources, their prefix sums of stored values, and a
+        shuffled import's order and its inverse; the counts writes let go of
+        the shuffled cells first.
+        """
+        return self._source_resident_bytes() - sum(
+            store.resident_bytes for store in self._shuffledRows.values()
+        )
+
     def _shuffle_resident_bytes(self) -> int:
         """Return what a shuffled import holds beside its count sources; 0 otherwise."""
         if self._cellOrder is None:
@@ -1737,6 +1749,7 @@ class SeuratToZarr:
             transposed=counts_t_assays((assay.name,)),
             admitCounts=admit_counts,
             requested=requested,
+            countsTResidentBytes=self._counts_t_resident_bytes(),
         )
 
     def _write_counts(
