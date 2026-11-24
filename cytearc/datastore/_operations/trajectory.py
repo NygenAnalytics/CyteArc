@@ -103,7 +103,10 @@ from ...trajectory.feature_dynamics import (
     scatter_feature_clusters as _scatter_feature_clusters_impl,
     validate_pseudotime_regressor,
 )
-from ...trajectory.parameters import resolve_aggregation_ann_params
+from ...trajectory.parameters import (
+    requested_ann_params,
+    resolve_aggregation_ann_params,
+)
 from ...trajectory.artifacts import (
     AGGREGATION_INPUTS as _AGGREGATION_INPUTS,
     AGGREGATION_PAYLOAD as _AGGREGATION_PAYLOAD,
@@ -5768,6 +5771,14 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
     ) -> ArtifactRef:
         """Cluster features by pseudotime and store one immutable artifact.
 
+        Features with similar binned profiles are grouped into
+        ``n_clusters`` modules: each retained feature's ``n_neighbors``
+        nearest features, found exactly from every distance between their
+        profiles, form a graph whose Paris hierarchy is cut into the modules.
+        Of two equally near features the earlier is the neighbor, so the
+        modules are the same on every platform. The modules are numbered from
+        1 by the median bin of their features' peaks.
+
         Args:
             pseudotime: Explicit pseudotime artifact defining cells and ordering.
             features: Explicit assay-scoped feature-selection artifact.
@@ -5781,7 +5792,10 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             batch_size: Number of features processed per batch. When None,
                 selected features are grouped into chunk-aligned blocks that
                 fit the operation memory budget.
-            ann_params: Parameters forwarded to the HNSW index.
+            ann_params: The distance between profiles, as ``{"space": "l2"}``,
+                the squared Euclidean distance and the default; ``"ip"``,
+                one minus the inner product; or ``"cosine"``, one minus the
+                cosine similarity.
             nan_cluster_value: Value assigned to features excluded from clustering.
             **norm_params: Extra keyword arguments forwarded to normalized expression.
 
@@ -5822,7 +5836,7 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
                 "z_scale": z_scale,
                 "n_neighbours": n_neighbors,
                 "n_clusters": n_clusters,
-                "ann_params": {} if ann_params is None else ann_params,
+                "ann_params": requested_ann_params(ann_params),
                 "nan_cluster_value": nan_cluster_value,
             }
         )
@@ -6943,7 +6957,10 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             n_clusters: Number of feature modules to create.
             batch_size: Number of features processed per batch. ``None``
                 sizes batches to the memory budget.
-            ann_params: Parameters forwarded to the HNSW index.
+            ann_params: The distance between profiles, as ``{"space": "l2"}``,
+                the squared Euclidean distance and the default; ``"ip"``,
+                one minus the inner product; or ``"cosine"``, one minus the
+                cosine similarity.
             nan_cluster_value: Value assigned to features excluded from clustering.
             invalidate_cache: Compute a new result even when one matches.
             **norm_params: Extra keyword arguments forwarded to normalized
@@ -6994,7 +7011,7 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
                 "z_scale": z_scale,
                 "n_neighbours": n_neighbors,
                 "n_clusters": n_clusters,
-                "ann_params": {} if ann_params is None else ann_params,
+                "ann_params": requested_ann_params(ann_params),
                 "nan_cluster_value": nan_cluster_value,
             }
         )

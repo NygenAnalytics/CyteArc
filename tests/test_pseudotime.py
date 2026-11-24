@@ -9,6 +9,7 @@ from scipy.sparse import csr_matrix
 from cytearc.trajectory.feature_dynamics import (
     aggregate_feature_profiles,
     knn_clustering,
+    nearest_feature_profiles,
 )
 from cytearc.trajectory.feature_dynamics import (
     scatter_feature_clusters as _scatter_feature_clusters,
@@ -633,13 +634,21 @@ def test_aggregation_logs_the_configured_normalizer(
     logged = datastore.trajectory.aggregation(
         pseudotime_scoring, log_transform=True, **arguments
     )
-    # Normalizers defined outside CyteArc record the code-digest revision.
-    assert datastore.artifacts.inspect(logged).revision == 2
+    # A normalizer defined outside CyteArc brings the code-digest revision,
+    # 2, which revision 3 of every aggregation follows.
+    from cytearc.storage.operation_revisions import applicable_revisions
+
+    status = datastore.artifacts.inspect(logged)
+    assert status.revision == 3
+    applicable = applicable_revisions(
+        "run_pseudotime_aggregation", logged.kind, status.parameters, status.inputs
+    )
+    assert [entry.revision for entry in applicable] == [2, 3]
 
     # The same values from a normalizer that logs its own output.
     monkeypatch.setattr(datastore.RNA, "normMethod", _logged_scaled_by_totals)
     direct = datastore.trajectory.aggregation(pseudotime_scoring, **arguments)
-    assert datastore.artifacts.inspect(direct).revision == 2
+    assert datastore.artifacts.inspect(direct).revision == 3
     np.testing.assert_allclose(
         np.asarray(datastore.trajectory.load_aggregation(logged).data),
         np.asarray(datastore.trajectory.load_aggregation(direct).data),
@@ -804,8 +813,9 @@ def test_aggregation_provenance_records_resolved_ann_defaults(
     few_features,
 ):
     status = datastore.artifacts.inspect(pseudotime_aggregation)
-    expected = dict(AGGREGATION_ANN_DEFAULTS)
-    expected["dim"] = 10
+    # The record holds the distance and the bins, and no search settings.
+    expected = {"space": "l2", "dim": 10}
+    assert dict(AGGREGATION_ANN_DEFAULTS) == {"space": "l2"}
     assert (status.parameters or {})["ann_params"] == expected
 
     result = datastore.trajectory.load_aggregation(pseudotime_aggregation)
@@ -818,24 +828,124 @@ def test_aggregation_provenance_records_resolved_ann_defaults(
     }
     default = datastore.trajectory.aggregation(**arguments)
     overridden = datastore.trajectory.aggregation(
-        **arguments, ann_params={"random_seed": 445}
+        **arguments, ann_params={"space": "cosine"}
     )
     assert overridden != default
     default_parameters = datastore.artifacts.inspect(default).parameters or {}
     overridden_parameters = datastore.artifacts.inspect(overridden).parameters or {}
     assert default_parameters["ann_params"] == expected
-    assert overridden_parameters["ann_params"] == {
-        **expected,
-        "random_seed": 445,
-    }
-    # Only the requested ANN seed differs between the two records.
+    assert overridden_parameters["ann_params"] == {**expected, "space": "cosine"}
+    # Only the requested distance differs between the two records.
     for parameters in (default_parameters, overridden_parameters):
         parameters.pop("ann_params")
     assert overridden_parameters == default_parameters
     assert (
-        datastore.trajectory.aggregation(**arguments, ann_params={"random_seed": 445})
+        datastore.trajectory.aggregation(**arguments, ann_params={"space": "cosine"})
         == overridden
     )
+    # Naming the default distance asks for the same modules.
+    assert datastore.trajectory.aggregation(
+        **arguments, ann_params={"space": "l2"}
+    ) == (default)
+
+
+@pytest.mark.parametrize(
+    "ann_params",
+    [
+        {"ef": 40},
+        # The refusal comes before any check of the setting's value.
+        {"ef": 1.5},
+        {"M": 16, "space": "l2"},
+        {"random_seed": 445, "ef_construction": 100},
+        {"num_threads": 2},
+        {"max_elements": 10_000},
+    ],
+)
+def test_aggregation_refuses_the_settings_of_an_approximate_search(
+    datastore,
+    pseudotime_scoring,
+    few_features,
+    ann_params,
+):
+    before = _aggregation_artifacts(datastore)
+    names = ", ".join(repr(name) for name in sorted(ann_params) if name != "space")
+
+    with pytest.raises(
+        ValueError, match=re.escape(f"drop {names}. It takes only 'space'")
+    ):
+        datastore.trajectory.aggregation(
+            pseudotime_scoring,
+            features=few_features,
+            window_size=50,
+            chunk_size=10,
+            ann_params=ann_params,
+        )
+
+    assert _aggregation_artifacts(datastore) == before
+
+
+# The ann_params that CyteArc 1.4.0 recorded for its default HNSW search over
+# 10 bins.
+_ANN_PARAMS_SAVED_BY_1_4 = {
+    "space": "l2",
+    "ef_construction": 80,
+    "M": 50,
+    "random_seed": 444,
+    "ef": 80,
+    "num_threads": 1,
+    "dim": 10,
+}
+
+
+def test_aggregation_records_revision_3_and_computes_earlier_modules_anew(
+    datastore,
+    pseudotime_scoring,
+    few_features,
+):
+    from cytearc.storage.artifacts import artifact_group
+    from cytearc.storage.operation_revisions import effective_revision
+
+    arguments = {
+        "features": few_features,
+        "n_clusters": 4,
+        "window_size": 50,
+        "chunk_size": 10,
+    }
+    saved = datastore.trajectory.aggregation(pseudotime_scoring, **arguments)
+    assert datastore.artifacts.inspect(saved).revision == 3
+    # Rewrite the record as 1.4.0 saved the same call: with the settings of
+    # its HNSW search, and without a revision.
+    group = artifact_group(datastore.zw, saved)
+    provenance = dict(group.attrs["provenance"])
+    assert provenance.pop("revision") == 3
+    provenance["parameters"] = {
+        **provenance["parameters"],
+        "ann_params": _ANN_PARAMS_SAVED_BY_1_4,
+    }
+    group.attrs["provenance"] = provenance
+
+    status = datastore.artifacts.inspect(saved)
+    assert status.revision == 1
+    assert not status.is_current
+    assert [entry.revision for entry in status.superseded_by] == [3]
+    # The earlier modules still load, and a call computes them anew.
+    assert datastore.trajectory.load_aggregation(saved).ref == saved
+    computed = datastore.trajectory.aggregation(pseudotime_scoring, **arguments)
+    assert computed != saved
+    assert datastore.artifacts.inspect(computed).revision == 3
+    assert datastore.trajectory.aggregation(pseudotime_scoring, **arguments) == computed
+    # Every record is revision 3, whatever its normalizer.
+    for parameters in (
+        {},
+        provenance["parameters"],
+        {"normalization_method": {"module": "lab.norms", "qualname": "scaled"}},
+    ):
+        assert (
+            effective_revision(
+                "run_pseudotime_aggregation", "pseudotime_aggregation", parameters, {}
+            )
+            == 3
+        )
 
 
 def test_aggregation_takes_n_neighbors_and_saves_it_under_the_released_key(
@@ -1281,7 +1391,8 @@ def test_knn_clustering_rejects_infeasible_parameters():
             1,
             {"dim": 2},
         )
-    with pytest.raises(ValueError, match="smaller than the feature count"):
+    # The neighbors are exact, so the settings of an HNSW search are refused.
+    with pytest.raises(ValueError, match="drop 'max_elements'"):
         knn_clustering(
             _ShapeOnlyArray((3, 3)),
             1,
@@ -1432,6 +1543,186 @@ def test_knn_clustering_never_exceeds_requested_clusters_on_tied_heights():
     for n_clusters in range(1, n_features + 1):
         labels = knn_clustering(profiles, 2, n_clusters, 1)
         assert sorted(np.unique(labels)) == list(range(1, n_clusters + 1))
+
+
+def _reference_neighbors(distances: np.ndarray, k: int) -> np.ndarray:
+    """Each row's k nearest other rows by a full distance matrix, the earlier of equals first."""
+    distances = np.array(distances, dtype=np.float64)
+    np.fill_diagonal(distances, np.inf)
+    order = np.argsort(distances, axis=1, kind="stable")
+    ranked = np.take_along_axis(distances, order, axis=1)[:, : k + 1]
+    # The profiles lie far from ties, so rounding cannot reorder the k nearest.
+    assert np.diff(ranked, axis=1).min() > 1e-9
+    return order[:, :k]
+
+
+@pytest.mark.parametrize("space", ["l2", "ip", "cosine"])
+def test_nearest_feature_profiles_rank_every_distance_of_their_space(space):
+    from scipy.spatial.distance import cdist
+
+    profiles = np.random.default_rng(7).normal(size=(61, 9))
+    distances = {
+        "l2": cdist(profiles, profiles, "sqeuclidean"),
+        "ip": 1.0 - profiles @ profiles.T,
+        "cosine": cdist(profiles, profiles, "cosine"),
+    }[space]
+
+    neighbors = nearest_feature_profiles(profiles, 7, space=space)
+
+    np.testing.assert_array_equal(neighbors, _reference_neighbors(distances, 7))
+    assert neighbors.dtype == np.int64
+
+
+def test_nearest_feature_profiles_put_the_earlier_of_equally_near_profiles_first():
+    profiles = np.array([[2.0], [0.0], [4.0], [3.0], [1.0]])
+
+    # Squared distances of whole numbers are exact. From 2, the values 3 and 1
+    # lie at 1 and the values 0 and 4 at 4; each pair keeps its rows' order.
+    np.testing.assert_array_equal(
+        nearest_feature_profiles(profiles, 4),
+        [[3, 4, 1, 2], [4, 0, 3, 2], [3, 0, 4, 1], [0, 2, 4, 1], [0, 1, 3, 2]],
+    )
+    # A full list keeps the earlier of two equally near profiles.
+    np.testing.assert_array_equal(
+        nearest_feature_profiles(profiles, 1).ravel(), [3, 4, 3, 0, 0]
+    )
+    # A profile equal to another is its nearest, and never its own neighbor;
+    # the middle profile lies as near to both, and takes the first.
+    duplicated = np.array([[1.0, 2.0], [5.0, 5.0], [1.0, 2.0]])
+    np.testing.assert_array_equal(
+        nearest_feature_profiles(duplicated, 1).ravel(), [2, 0, 0]
+    )
+
+
+def test_nearest_feature_profiles_sum_each_distance_over_the_bins_in_order():
+    # 2**-54, the square of 2**-27, is a quarter of the spacing of floats at 1.
+    quarter = 2.0**-27
+    profiles = np.array(
+        [
+            [0.0, 0.0, 0.0, 0.0, 0.0],
+            # Four quarters first make 2**-52, which 1 then keeps: 1 + 2**-52.
+            [quarter, quarter, quarter, quarter, 1.0],
+            # 1 first rounds each quarter away: the sum is 1.
+            [1.0, quarter, quarter, quarter, quarter],
+        ]
+    )
+
+    # Both sums are 1 + 2**-52 exactly, which would put row 1 first; summed in
+    # order, row 2 is nearer.
+    assert nearest_feature_profiles(profiles, 2)[0].tolist() == [2, 1]
+
+
+def test_nearest_feature_profiles_do_not_depend_on_the_threads():
+    profiles = np.random.default_rng(11).normal(size=(101, 6))
+
+    one = nearest_feature_profiles(profiles, 5, nthreads=1)
+
+    for nthreads in (3, 200):
+        np.testing.assert_array_equal(
+            nearest_feature_profiles(profiles, 5, nthreads=nthreads), one
+        )
+
+
+@pytest.mark.parametrize(
+    ("profiles", "options", "message"),
+    [
+        (np.zeros(4), {}, "matrix of features by bins"),
+        (np.array([[0.0, 1.0], [np.nan, 1.0], [1.0, 1.0]]), {}, "must be finite"),
+        (np.array([[0.0, 1.0], [np.inf, 1.0], [1.0, 1.0]]), {}, "must be finite"),
+        (np.eye(3), {"n_neighbors": 0}, r"1 <= n_neighbors < 3"),
+        (np.eye(3), {"n_neighbors": 3}, r"1 <= n_neighbors < 3"),
+        (np.eye(3), {"space": "hamming"}, "space must be one of"),
+        (np.eye(3), {"nthreads": 0}, "nthreads must be at least 1"),
+        (
+            np.array([[1.0, 0.0], [0.0, 0.0], [0.0, 1.0]]),
+            {"space": "cosine"},
+            r"not all zeros; the profiles at \[1\] are",
+        ),
+    ],
+)
+def test_nearest_feature_profiles_refuse_what_they_cannot_rank(
+    profiles, options, message
+):
+    with pytest.raises(ValueError, match=message):
+        nearest_feature_profiles(profiles, **{"n_neighbors": 1, **options})
+
+
+@pytest.mark.parametrize(
+    "options", [{"n_neighbors": True}, {"n_neighbors": 1.0}, {"nthreads": 2.0}]
+)
+def test_nearest_feature_profiles_take_whole_numbers(options):
+    name = next(iter(options))
+    with pytest.raises(TypeError, match=f"^{name} must be an integer$"):
+        nearest_feature_profiles(np.eye(3), **{"n_neighbors": 1, **options})
+
+
+def test_knn_clustering_numbers_modules_from_the_earliest_median_peak():
+    from cytearc.matrix import ChunkedArray
+
+    # Three far-apart groups whose profiles peak at the last, the first and
+    # the third of four bins, in row order.
+    centers = 3.0 * np.eye(4)[[3, 0, 2]]
+    rng = np.random.default_rng(6)
+    profiles = np.repeat(centers, 5, axis=0) + rng.normal(scale=0.01, size=(15, 4))
+
+    labels = knn_clustering(ChunkedArray.from_numpy(profiles), 2, 3, 1)
+
+    np.testing.assert_array_equal(labels, np.repeat([3, 1, 2], 5))
+
+
+def test_knn_clustering_numbers_modules_whose_peaks_tie_in_the_order_of_the_cut():
+    from cytearc.matrix import ChunkedArray
+
+    # Three far-apart groups whose profiles all peak at the first bin, so the
+    # median peaks of their modules tie. The cut labels groups by decreasing
+    # size, and the rows hold the smallest group first.
+    centers = np.array(
+        [[3.0, 0.0, 0.0, 2.0], [3.0, 2.0, 0.0, 0.0], [3.0, 0.0, 2.0, 0.0]]
+    )
+    sizes = (3, 7, 5)
+    rng = np.random.default_rng(5)
+    profiles = np.repeat(centers, sizes, axis=0) + rng.normal(scale=0.01, size=(15, 4))
+    assert (profiles.argmax(axis=1) == 0).all()
+
+    labels = knn_clustering(ChunkedArray.from_numpy(profiles), 2, 3, 1)
+
+    np.testing.assert_array_equal(labels, np.repeat([3, 1, 2], sizes))
+
+
+def test_knn_clustering_measures_the_distance_that_ann_params_names():
+    from cytearc.matrix import ChunkedArray
+
+    # Two rays 0.3 radians apart, each with four profiles near length 1 and
+    # four near length 10. Cosine distances join each ray; squared Euclidean
+    # distances join the near profiles of both rays, and the far ones.
+    lengths = np.array([1.0, 1.01, 1.02, 1.03, 10.0, 10.01, 10.02, 10.03])
+    rays = (np.array([1.0, 0.0]), np.array([np.cos(0.3), np.sin(0.3)]))
+    profiles = np.concatenate([np.outer(lengths, ray) for ray in rays])
+    ray = np.repeat([0, 1], 8)
+    far = np.tile(lengths > 5, 2)
+
+    by_angle = knn_clustering(
+        ChunkedArray.from_numpy(profiles), 4, 2, 1, {"space": "cosine"}
+    )
+    by_position = knn_clustering(ChunkedArray.from_numpy(profiles), 4, 2, 1)
+
+    assert len(set(zip(ray.tolist(), by_angle.tolist(), strict=True))) == 2
+    assert len(set(zip(far.tolist(), by_position.tolist(), strict=True))) == 2
+
+
+def test_knn_clustering_gives_the_same_modules_on_any_thread_count():
+    from cytearc.matrix import ChunkedArray
+
+    rng = np.random.default_rng(9)
+    profiles = np.repeat(rng.normal(scale=3.0, size=(6, 8)), 20, axis=0)
+    profiles += rng.normal(size=profiles.shape)
+
+    one = knn_clustering(ChunkedArray.from_numpy(profiles), 5, 6, 1)
+
+    np.testing.assert_array_equal(
+        knn_clustering(ChunkedArray.from_numpy(profiles, nthreads=4), 5, 6, 4), one
+    )
+    assert sorted(np.unique(one)) == list(range(1, 7))
 
 
 def _aggregation_artifacts(datastore) -> set:

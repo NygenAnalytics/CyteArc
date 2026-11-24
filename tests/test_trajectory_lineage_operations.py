@@ -901,7 +901,7 @@ def test_lineage_aggregation_without_scaling_keeps_weighted_means(
         z_scale=False,
         n_clusters=3,
         batch_size=13,
-        ann_params={"ef": 40},
+        ann_params={"space": "cosine"},
     )
     result = datastore.trajectory.load_lineage_aggregation(ref)
     scored = _scored(datastore, lineage_fate)
@@ -923,7 +923,7 @@ def test_lineage_aggregation_without_scaling_keeps_weighted_means(
             z_scale=False,
             n_clusters=3,
             batch_size=13,
-            ann_params={"ef": 40},
+            ann_params={"space": "cosine"},
         )
         == ref
     )
@@ -980,6 +980,72 @@ def test_lineage_aggregation_takes_n_neighbors_under_the_aggregation_key(
         aggregate(lineage_fate, features=mark_hvgs, n_neighbors=0)
     with pytest.raises(TypeError, match="^n_neighbors must be an integer$"):
         aggregate(lineage_fate, features=mark_hvgs, n_neighbors=True)
+
+
+def test_lineage_aggregation_records_the_distance_and_refuses_search_settings(
+    datastore, lineage_fate, mark_hvgs, lineage_aggregation
+):
+    # Three lineages of 12 bins: each profile has 36 values.
+    parameters = inspect_artifact(datastore.zw, lineage_aggregation).parameters
+    assert parameters["ann_params"] == {"space": "l2", "dim": 36}
+    before = set(datastore.artifacts.list(kind="lineage_aggregation", from_assay="RNA"))
+
+    with pytest.raises(ValueError, match=r"drop 'M', 'ef'\. It takes only 'space'"):
+        datastore.trajectory.lineage_aggregation(
+            lineage_fate,
+            features=mark_hvgs,
+            n_bins=12,
+            n_clusters=5,
+            ann_params={"ef": 40.5, "M": 16},
+        )
+
+    after = set(datastore.artifacts.list(kind="lineage_aggregation", from_assay="RNA"))
+    assert after == before
+
+
+def test_lineage_aggregation_records_revision_2_and_computes_earlier_modules_anew(
+    datastore, lineage_fate, mark_hvgs
+):
+    from cytearc.storage.operation_revisions import effective_revision
+
+    arguments = {"features": mark_hvgs, "n_bins": 10, "n_clusters": 4}
+    saved = datastore.trajectory.lineage_aggregation(lineage_fate, **arguments)
+    assert datastore.artifacts.inspect(saved).revision == 2
+    # Rewrite the record as 1.4.0 saved the same call: with the settings of
+    # its HNSW search over three lineages of 10 bins, and without a revision.
+    group = artifact_group(datastore.zw, saved)
+    provenance = dict(group.attrs["provenance"])
+    assert provenance.pop("revision") == 2
+    provenance["parameters"] = {
+        **provenance["parameters"],
+        "ann_params": {
+            "space": "l2",
+            "ef_construction": 80,
+            "M": 50,
+            "random_seed": 444,
+            "ef": 80,
+            "num_threads": 1,
+            "dim": 30,
+        },
+    }
+    group.attrs["provenance"] = provenance
+
+    status = datastore.artifacts.inspect(saved)
+    assert status.revision == 1
+    assert not status.is_current
+    assert [entry.revision for entry in status.superseded_by] == [2]
+    # The earlier modules still load, and a call computes them anew.
+    assert datastore.trajectory.load_lineage_aggregation(saved).ref == saved
+    computed = datastore.trajectory.lineage_aggregation(lineage_fate, **arguments)
+    assert computed != saved
+    assert datastore.artifacts.inspect(computed).revision == 2
+    assert (
+        datastore.trajectory.lineage_aggregation(lineage_fate, **arguments) == computed
+    )
+    assert (
+        effective_revision("run_lineage_aggregation", "lineage_aggregation", {}, {})
+        == 2
+    )
 
 
 def test_lineage_aggregation_reuse_builds_no_bin_operator(

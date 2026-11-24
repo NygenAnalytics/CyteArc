@@ -23,6 +23,7 @@ from cytearc.storage.lineage import ArtifactLineage
 from cytearc.storage.operation_revisions import (
     OPERATION_REVISIONS,
     _NORMALIZER_CODE,
+    applicable_revisions,
     effective_revision,
 )
 from cytearc.utils.logging import logger
@@ -281,9 +282,30 @@ _NORMALIZER_OPERATIONS = {
 @pytest.mark.parametrize(("operation", "kind"), sorted(_NORMALIZER_OPERATIONS.items()))
 def test_every_operation_that_records_a_normalizer_scopes_the_revision(operation, kind):
     # run_marker_search is at revision 2 for every marker table of 1.3.0, so
-    # the normalizer revision is its revision 3; the other operations have
-    # only the normalizer revision, at 2.
+    # the normalizer revision is its revision 3; run_pseudotime_aggregation
+    # adds revision 3 of every aggregation in 1.5.0, after the normalizer
+    # revision at 2; the other operations have only the normalizer revision,
+    # at 2.
     entries = OPERATION_REVISIONS[operation]
+    if operation == "run_pseudotime_aggregation":
+        assert entries[0] == _NORMALIZER_CODE
+        (exact_neighbors,) = entries[1:]
+        assert (exact_neighbors.revision, exact_neighbors.release) == (3, "1.5.0")
+        assert exact_neighbors.applies is None
+        external = callable_identity(_normalizer())
+        for method, scoped in (
+            (external, True),
+            ({"module": "lab.norms", "qualname": "scaled"}, True),
+            (callable_identity(norm_lib_size), False),
+            (None, False),
+        ):
+            parameters = {"normalization_method": method}
+            applicable = applicable_revisions(operation, kind, parameters, {})
+            assert applicable == (
+                (_NORMALIZER_CODE, exact_neighbors) if scoped else (exact_neighbors,)
+            )
+            assert effective_revision(operation, kind, parameters, {}) == 3
+        return
     if operation == "run_marker_search":
         assert len(entries) == 2
         assert (entries[0].revision, entries[0].release) == (2, "1.3.0")
