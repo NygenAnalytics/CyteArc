@@ -15,7 +15,6 @@ import asyncio
 import pickle
 import shutil
 import stat
-import time
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -2523,33 +2522,49 @@ def _copied_panels(panels: _PanelStores, tmp_path: Path) -> DataStore:
     return _PanelStores(tmp_path).open()
 
 
-class _LatencyStore(WrapperStore):
-    """A store whose every get waits ``delay`` seconds first, as a remote store's round trip does."""
+class _RoundTripStore(WrapperStore):
+    """A store whose reads, once ``round_trip`` is set, each wait until the barrier's other parties are in flight with it, as the requests of one round trip to a remote store.
 
-    def __init__(self, store: Any, delay: float) -> None:
+    How many reads overlap depends on how the machine schedules the threads
+    that send them, so the reads wait for each other instead: reads sent
+    together pass in rounds of ``round_trip.parties`` on any machine, and a
+    read that waits 10 seconds for the rest of its round fails. ``held`` lists
+    the reads that passed, round after round. Zarr opens a read-only store as
+    it is, and reads a writable one through a copy that ``round_trip`` does not
+    reach, so the store wraps a read-only one.
+    """
+
+    def __init__(self, store: Any) -> None:
         super().__init__(store)
-        self.delay = delay
-
-    def with_read_only(self, read_only: bool = False) -> "_LatencyStore":
-        return _LatencyStore(self._store.with_read_only(read_only), self.delay)
+        self.round_trip: asyncio.Barrier | None = None
+        self.held: list[str] = []
 
     async def get(self, key: str, prototype: Any, byte_range: Any = None) -> Any:
-        await asyncio.sleep(self.delay)
+        if self.round_trip is not None:
+            try:
+                async with asyncio.timeout(10):
+                    await self.round_trip.wait()
+            except TimeoutError:
+                raise AssertionError(
+                    f"The read of {key} waited 10 s for "
+                    f"{self.round_trip.parties - 1} other reads to go out with "
+                    f"it, and {self.round_trip.n_waiting} came"
+                ) from None
+            self.held.append(key)
         return await self._store.get(key, prototype, byte_range)
 
 
-def _record_lookup_seconds(location: Path, n_sources: int, delay: float) -> float:
-    """Return how long a read of one feature's row of a record of ``n_sources`` sources takes when every get waits ``delay``."""
+def _write_record_of_sources(location: str, sources: list[str]) -> None:
+    """Write a store of three ADT features whose record says that each of ``sources`` measured the second feature only at an even position."""
     names = ["CD3", "CD4", "CD8"]
     write_count_store(
-        str(location),
+        location,
         {"ADT": np.full((4, len(names)), 3)},
         "uint16",
         feature_ids={"ADT": names},
     )
-    stored = zarr.open_group(str(location), mode="r+")
-    for index in range(n_sources):
-        source = f"s{index:02d}"
+    stored = zarr.open_group(location, mode="r+")
+    for index, source in enumerate(sources):
         create_metadata_column(
             stored["ADT/featureData"],
             f"measured_in_{source}",
@@ -2561,30 +2576,35 @@ def _record_lookup_seconds(location: Path, n_sources: int, delay: float) -> floa
                 "sourceColumn": "dataset",
             },
         )
-    remote = zarr.open_group(
-        store=_LatencyStore(LocalStore(str(location)), delay),
-        mode="r",
-        path="ADT/featureData",
-    )
-    table = MetaData(remote)
-    start = time.perf_counter()
-    record = measured_features_by_source(table, [1])
-    elapsed = time.perf_counter() - start
-    assert record is not None and len(record.sources) == n_sources
-    np.testing.assert_array_equal(record.measured[:, 0], np.arange(n_sources) % 2 == 0)
-    return elapsed
 
 
-def test_a_record_of_many_sources_is_read_in_about_the_round_trips_of_few(
+def test_the_columns_of_a_record_of_many_sources_are_read_together(
     tmp_path,
 ) -> None:
-    # Each source's column costs a round trip to open and one to read. Read
-    # one after another, 24 sources would take 12 times as long as 2.
-    delay = 0.03
-    few = _record_lookup_seconds(tmp_path / "few.zarr", 2, delay)
-    many = _record_lookup_seconds(tmp_path / "many.zarr", 24, delay)
-    assert few >= 2 * delay
-    assert many < 3 * few, (few, many)
+    # A remote store pays a round trip for each request, and each source's
+    # column takes one request to open and one to read. Sent together, the
+    # requests of 24 sources take two round trips, as those of one source do;
+    # sent one after another, they would take 48.
+    sources = [f"s{index:02d}" for index in range(24)]
+    location = str(tmp_path / "record.zarr")
+    _write_record_of_sources(location, sources)
+    store = _RoundTripStore(LocalStore(location, read_only=True))
+    # Opening the table reads every column's metadata, no more at once than
+    # Zarr's concurrency setting allows, so the reads wait for each other only
+    # from the record's read on.
+    table = MetaData(zarr.open_group(store=store, mode="r", path="ADT/featureData"))
+    store.round_trip = asyncio.Barrier(len(sources))
+    record = measured_features_by_source(table, [1])
+    assert record is not None and record.sources == sources
+    np.testing.assert_array_equal(
+        record.measured[:, 0], np.arange(len(sources)) % 2 == 0
+    )
+    # The first round opened every column, and the second read the feature's
+    # row of each.
+    columns = [f"ADT/featureData/measured_in_{source}" for source in sources]
+    opened, read = store.held[: len(sources)], store.held[len(sources) :]
+    assert sorted(opened) == [f"{column}/zarr.json" for column in columns]
+    assert sorted(read) == [f"{column}/c/0" for column in columns]
 
 
 def test_a_record_without_its_cells_sources_is_refused_with_the_calls_that_drop_it(
