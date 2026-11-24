@@ -776,10 +776,10 @@ def test_a_budget_without_room_for_the_spill_is_refused_with_the_bytes_it_needs(
     assert not list(tmp_path.glob("cytearc-sparse-*"))
 
 
+@pytest.mark.parametrize("n_cells", [40, 3000])
 def test_a_shuffled_import_names_one_budget_for_a_bucket_and_one_cell(
-    tmp_path,
+    tmp_path, n_cells
 ) -> None:
-    n_cells = 40
     source = _write_object(tmp_path / "object.rds", n_cells=n_cells)
     attempts = iter(range(100))
 
@@ -806,8 +806,10 @@ def test_a_shuffled_import_names_one_budget_for_a_bucket_and_one_cell(
     # Beside ADT's source, RNA's prefix sums and the order and its inverse, as
     # the three-cell import holds them, a bucket reads the longest cell: every
     # gene of RNA, float64 values of 3 * 8 + 32 bytes each as they are read,
-    # and 112 bytes for the cell's piece and pointers. Forty cells need more
-    # to read one cell and send it, and the first refusal names that budget.
+    # and 112 bytes for the cell's piece and pointers. Forty cells and more
+    # need more to read one cell and send it, and the first refusal names
+    # that budget: the least, though a larger budget sizes larger buckets,
+    # which need less beside them.
     names = [*_PROTEINS, *_cells(n_cells)]
     adt = (
         sum(len(name.encode()) + 8 for name in names)
@@ -820,7 +822,7 @@ def test_a_shuffled_import_names_one_budget_for_a_bucket_and_one_cell(
     # later step refuses for itself; one byte less is refused again, naming
     # the same budget.
     later = refusal(named)
-    assert later is None or later.item != "shuffling one cell of assay 'RNA'"
+    assert later is None or "one cell of assay" not in later.item
     below = refusal(named - 1)
     assert below is not None
     assert (below.item, below.needed_bytes) == (

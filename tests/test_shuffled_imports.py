@@ -1044,6 +1044,30 @@ def test_a_budget_without_room_for_the_shuffle_is_refused_before_it_runs(
     assert _no_temporary_files(tmp_path)
 
 
+def test_a_shuffled_10x_import_of_many_cells_names_the_least_budget_of_its_spill(
+    tmp_path,
+) -> None:
+    n_cells = 3000
+    path = _write_10x(tmp_path / "matrix.h5", _counts(n_cells))
+    run = _cr_import(lambda: CrH5Reader(str(path), temp_dir=str(tmp_path)))
+    at_budget = _spill_attempts(tmp_path, run)
+    # The reader keeps every barcode: the indexes, the file's row pointers
+    # and the cumulative values, 8 bytes each. Beside them the shuffle needs
+    # 24 bytes a cell.
+    arrays = 8 * n_cells + 8 * (n_cells + 1) + 8 * (n_cells + 1)
+    with pytest.raises(MemoryBudgetError) as caught:
+        at_budget(arrays + 24 * n_cells)
+    needed = caught.value.needed_bytes
+    # That budget sizes buckets of a cell each, which need more beside them
+    # than the larger buckets of the budget that the refusal names, the
+    # least that passes the spill: one byte less is refused, naming it again.
+    at_budget(needed)
+    with pytest.raises(MemoryBudgetError) as below:
+        at_budget(needed - 1)
+    assert below.value.needed_bytes == needed
+    assert _no_temporary_files(tmp_path)
+
+
 def _planned_spill_budgets(monkeypatch) -> list[int]:
     """Record the budget of each spill plan that a 10x, MTX or Tapestri reader makes."""
     from cytearc.readers import cellranger, mtx
@@ -1909,6 +1933,9 @@ def test_an_import_in_the_readers_order_reads_it_whatever_another_import_left(
         if shuffled_first:
             shuffled_writer = shuffled()
             plain_writer = plain()
+            # The plain import let go of the shuffled cells before it scanned
+            # the file beside the reader's arrays alone.
+            assert reader._shuffledRows is None
         else:
             # Built before the shuffled import sends its cells, dumped after.
             plain_writer = plain()

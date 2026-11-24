@@ -33,8 +33,7 @@ def _third_missing(n_rows: int) -> np.ndarray:
         # copies dwarf what else the write holds.
         (np.full(20_000, "n" * 200), _third_missing(20_000)),
         (np.full(20_000, "n" * 200), np.zeros(20_000, dtype=bool)),
-        # Narrow text, numbers and flags, of rows enough that the write's 2
-        # bytes a row outweigh Zarr's objects of the new array.
+        # Narrow text, numbers and flags.
         (np.full(200_000, "ab"), _third_missing(200_000)),
         (np.arange(200_000, dtype=np.float64), _third_missing(200_000)),
         (np.arange(200_000, dtype=np.float64), np.zeros(200_000, dtype=bool)),
@@ -51,10 +50,10 @@ def test_a_column_write_holds_what_its_size_helper_charges(values, missing) -> N
         lambda _ledger: write_metadata_column(_group(), "column", values, missing)
     ).held
     # Beside the column and its mask, which the caller holds, the write holds
-    # no more than the charge and Zarr's objects of the new array, which the
-    # charge leaves out, and the charge's 2 bytes a row bound its buffers.
+    # the charge, within Zarr's objects of the new array and of its writes,
+    # which the charge leaves out.
     zarr_objects = 64 * 1024
-    assert charge - 2 * n_rows - zarr_objects <= held <= charge + zarr_objects
+    assert charge - zarr_objects <= held <= charge + zarr_objects
 
 
 def test_a_column_of_blank_text_holds_less_than_the_charge_of_missing_rows() -> None:

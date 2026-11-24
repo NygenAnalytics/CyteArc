@@ -998,8 +998,7 @@ def test_a_csv_import_refuses_a_budget_without_room_for_its_cell_column_writes(
     # a shuffle, gathered in the order, then written. The write of the
     # largest, the notes, holds them beside Zarr's copy of their values and,
     # as text that may hold blanks, the copy with a placeholder in each
-    # blank row: twice 4 bytes a character of 400, and 2 bytes a cell for
-    # the mask's negation and the write's buffers. The import then holds
+    # blank row: twice 4 bytes a character of 400. The import then holds
     # the reader's IDs, NumPy text of 4 bytes a character of cell-39; every
     # cell column; the count summary, 40 bytes a cell and 16 a gene; and a
     # shuffle's order, 8 bytes a cell.
@@ -1007,7 +1006,7 @@ def test_a_csv_import_refuses_a_budget_without_room_for_its_cell_column_writes(
     columns, notes = _notes_column_bytes(n_cells)
     order = 8 * n_cells if shuffle_cells else 0
     held = ids + columns + 40 * n_cells + 16 * 3 + order
-    needed = held + notes + n_cells * (2 * 4 * 400 + 2)
+    needed = held + notes + n_cells * 2 * 4 * 400
     refusal = refused(lambda: construct(needed - 1))
     assert refusal.item == (
         f"the largest cell column's write beside the {held} bytes that the import holds"
@@ -1015,6 +1014,51 @@ def test_a_csv_import_refuses_a_budget_without_room_for_its_cell_column_writes(
     assert (refusal.needed_bytes, refusal.budget_bytes) == (needed, needed - 1)
     assert not (tmp_path / f"store-{needed - 1}.zarr").exists()
     construct(needed)
+
+
+def test_a_csv_import_charges_the_write_of_a_number_column_as_one_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from cytearc.readers import CSVReader
+    from cytearc.utils.memory_budget import MemoryLedger
+    from cytearc.writers import CSVtoZarr
+
+    n_cells = 40
+    path = tmp_path / "counts.csv"
+    rows = [
+        f"cell-{row},{row % 5},{row / 4},{'x' if row % 2 else ''}"
+        for row in range(n_cells)
+    ]
+    path.write_text("\n".join(["cell,g0,score,tag", *rows]) + "\n")
+    checks: list[tuple[str, int]] = []
+    refuse_beyond = MemoryLedger.refuse_beyond
+
+    def recorded(
+        ledger: MemoryLedger, item: str, needed: int, remedy: str | None = None
+    ) -> None:
+        checks.append((item, int(needed)))
+        refuse_beyond(ledger, item, needed, remedy)
+
+    monkeypatch.setattr(MemoryLedger, "refuse_beyond", recorded)
+    CSVtoZarr(
+        CSVReader(str(path), id_column=0, cell_data_cols=["score", "tag"]),
+        MemoryStore(),
+        "RNA",
+        nthreads=1,
+        shuffle_cells=False,
+    )
+    # The scores' write holds them, float64 with a missing mark each, beside
+    # Zarr's copy of their values: a number column has no missing rows. The
+    # tags' write, of text a character wide that may hold blanks, holds them
+    # beside two copies of 4 bytes a value, less. The import holds the
+    # reader's IDs, NumPy text of 4 bytes a character of cell-39, both
+    # columns, and the count summary, 40 bytes a cell and 16 a gene.
+    ids = n_cells * 4 * len(f"cell-{n_cells - 1}")
+    held = ids + n_cells * ((8 + 1) + (4 + 1)) + 40 * n_cells + 16
+    item = (
+        f"the largest cell column's write beside the {held} bytes that the import holds"
+    )
+    assert (item, held + n_cells * (8 + 1) + n_cells * 8) in checks
 
 
 def test_a_csv_import_charges_its_counts_write_beside_its_ids_and_cell_columns(
