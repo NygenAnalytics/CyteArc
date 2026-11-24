@@ -1240,7 +1240,7 @@ def test_a_shuffled_in_memory_import_names_the_budget_that_gathers_its_ids_in_th
     held = 600 * 4 + 600 * 4 + 31 * 4 + 8 * 30 + id_bytes
     needed = held + id_bytes
 
-    def construct(destination: Path, budget: int) -> None:
+    def construct(destination: Path, budget: int, shuffle_cells: bool = True) -> None:
         SparseToZarr(
             matrix,
             str(destination),
@@ -1248,6 +1248,7 @@ def test_a_shuffled_in_memory_import_names_the_budget_that_gathers_its_ids_in_th
             [f"f{i}" for i in range(20)],
             mem_budget=budget,
             nthreads=1,
+            shuffle_cells=shuffle_cells,
         )
 
     refused = tmp_path / "refused.zarr"
@@ -1260,11 +1261,16 @@ def test_a_shuffled_in_memory_import_names_the_budget_that_gathers_its_ids_in_th
     assert (caught.value.item, caught.value.needed_bytes) == (item, needed)
     assert not refused.exists()
     # With the budget it names, the import gathers the IDs, and a later step
-    # refuses for itself, if at all.
-    try:
-        construct(tmp_path / "admitted.zarr", needed)
-    except MemoryError as later:
-        assert "cell IDs in shuffled order" not in str(later)
+    # refuses for itself, if at all. In the file's order, the import gathers
+    # nothing, even at a budget below two copies of the IDs beside the matrix.
+    for destination, budget, shuffle_cells in (
+        (tmp_path / "admitted.zarr", needed, True),
+        (tmp_path / "in-order.zarr", needed - 8 * 30 - 1, False),
+    ):
+        try:
+            construct(destination, budget, shuffle_cells)
+        except MemoryError as later:
+            assert "cell IDs in shuffled order" not in str(later)
 
 
 def test_a_shuffled_csv_import_refuses_an_occupied_destination_before_it_reads_the_rows(

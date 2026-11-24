@@ -932,13 +932,14 @@ def test_a_sparse_matrix_import_names_the_budget_of_its_scan_beside_the_matrix(
 
 
 def _notes_csv(path: Path, n_cells: int) -> Path:
-    """Write a CSV of three genes and 300-character notes, the middle cell's of 400."""
+    """Write a CSV of three genes, scores and notes of 300 characters, one of 400."""
     rng = np.random.default_rng(8)
-    lines = ["cell,g0,g1,g2,note"]
+    lines = ["cell,g0,g1,g2,note,score"]
     for row in range(n_cells):
         counts = ",".join(str(value) for value in rng.integers(0, 5, 3))
         width = 400 if row == n_cells // 2 else 300
-        lines.append(f"cell-{row},{counts},{'n' * (width - 1)}{row % 10}")
+        note = f"{'n' * (width - 1)}{row % 10}"
+        lines.append(f"cell-{row},{counts},{note},{row / 4}")
     path.write_text("\n".join(lines) + "\n")
     return path
 
@@ -958,7 +959,7 @@ def test_a_csv_import_refuses_a_budget_without_room_for_its_cell_column_writes(
             CSVReader(
                 str(path),
                 id_column=0,
-                cell_data_cols=["note"],
+                cell_data_cols=["note", "score"],
                 batch_size=8,
                 temp_dir=str(tmp_path),
             ),
@@ -969,18 +970,20 @@ def test_a_csv_import_refuses_a_budget_without_room_for_its_cell_column_writes(
             shuffle_cells=shuffle_cells,
         )
 
-    # After the counts write, the notes are joined from their parts and, for
-    # a shuffle, gathered in the order: twice the column beside itself. The
-    # import then holds the reader's IDs, NumPy text of 4 bytes a character of
-    # cell-39; the notes, text of 4 bytes a character of the widest, 400 in
-    # the middle one of the reader's chunks of 8 rows, and a missing mark a cell;
-    # the count summary, 40 bytes a cell and 16 a gene; and a shuffle's
-    # order, 8 bytes a cell.
+    # After the counts write, each column is joined from its parts and, for
+    # a shuffle, gathered in the order: twice the largest column, the notes,
+    # beside itself. The import then holds the reader's IDs, NumPy text of 4
+    # bytes a character of cell-39; the notes, text of 4 bytes a character of
+    # the widest, 400 in the middle one of the reader's chunks of 8 rows, and
+    # the scores, float64 of 8 bytes, each with a missing mark a cell; the
+    # count summary, 40 bytes a cell and 16 a gene; and a shuffle's order, 8
+    # bytes a cell.
     ids = n_cells * 4 * len(f"cell-{n_cells - 1}")
-    column = n_cells * (4 * 400 + 1)
+    notes = n_cells * (4 * 400 + 1)
+    scores = n_cells * (8 + 1)
     order = 8 * n_cells if shuffle_cells else 0
-    held = ids + column + 40 * n_cells + 16 * 3 + order
-    needed = held + (2 if shuffle_cells else 1) * column
+    held = ids + notes + scores + 40 * n_cells + 16 * 3 + order
+    needed = held + (2 if shuffle_cells else 1) * notes
     refusal = refused(lambda: construct(needed - 1))
     assert refusal.item == (
         f"the largest cell column's write beside the {held} bytes that the import holds"
@@ -998,15 +1001,18 @@ def test_a_csv_import_charges_its_counts_write_beside_its_ids_and_cell_columns(
 
     n_cells = 40
     path = _notes_csv(tmp_path / "counts.csv", n_cells)
-    reader = CSVReader(str(path), id_column=0, cell_data_cols=["note"], batch_size=8)
+    reader = CSVReader(
+        str(path), id_column=0, cell_data_cols=["note", "score"], batch_size=8
+    )
     writer = CSVtoZarr(reader, MemoryStore(), "RNA", nthreads=1, shuffle_cells=False)
     resident, _batches = writer._count_import_requirements()
     # The count summary, 40 bytes a cell and 16 a gene, beside the reader's
-    # IDs and the notes, which the write gathers as it reads each chunk, at
-    # the width of the widest note, 400 characters.
+    # IDs and the cell columns, which the write gathers as it reads each
+    # chunk: the notes at the width of the widest, 400 characters, and the
+    # float64 scores, each with a missing mark a cell.
     ids = n_cells * 4 * len(f"cell-{n_cells - 1}")
-    column = n_cells * (4 * 400 + 1)
-    assert resident == 40 * n_cells + 16 * 3 + ids + column
+    columns = n_cells * (4 * 400 + 1) + n_cells * (8 + 1)
+    assert resident == 40 * n_cells + 16 * 3 + ids + columns
 
 
 def test_a_dense_batch_beyond_its_reservation_names_the_write_it_would_reserve() -> (
