@@ -281,7 +281,10 @@ def expected_mito_statistics(truth: VariantTruth, rows: list[int]) -> pd.DataFra
                 "n_cells_covered": int(covered.sum()),
                 "mean_quality": strand_quality.mean(),
             }
-    return pd.DataFrame.from_dict(records, orient="index")
+    # Named as a selection names its variants: from pandas 3.1 on, .loc keeps
+    # the name of a frame's index, where it took the name of an Index key
+    # before (pandas-dev/pandas#17110).
+    return pd.DataFrame.from_dict(records, orient="index").rename_axis("variant")
 
 
 def mito_variant_labels(truth: VariantTruth) -> set[str]:

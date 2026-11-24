@@ -8,7 +8,9 @@ variant callers read their headers and entries through
 import gzip
 import zipfile
 
+import pandas as pd
 import pytest
+from packaging.version import Version
 
 from cytearc.readers._matrix_market import (
     matrix_market_entries,
@@ -199,8 +201,15 @@ def test_entries_of_two_fields_more_are_refused_naming_their_line(tmp_path) -> N
     header = matrix_market_header(path)
     with pytest.raises(ValueError, match="but line 5 of .*m.mtx holds 5$"):
         list(matrix_market_entries(header, 1000))
-    # A chunk that starts at the entry keeps its fourth field.
-    with pytest.raises(ValueError, match="but entry 3 of .*m.mtx holds more$"):
+    # pandas 3.1 refuses a line of too many fields that starts a chunk as any
+    # other (pandas-dev/pandas#40587); earlier releases cut it to the chunk's
+    # width, whose fourth field the reader refuses.
+    refusal = (
+        "but line 5 of .*m.mtx holds 5$"
+        if Version(pd.__version__) >= Version("3.1")
+        else "but entry 3 of .*m.mtx holds more$"
+    )
+    with pytest.raises(ValueError, match=refusal):
         list(matrix_market_entries(header, 1))
 
 
