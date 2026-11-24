@@ -672,6 +672,24 @@ def _doublet_call(_tmp_path: Path) -> Callable[[], object]:
     )
 
 
+def _doublet_lsi_call(_tmp_path: Path) -> Callable[[], object]:
+    from cytearc.matrix import ChunkedArray
+    from cytearc.quality_control import doublets
+    from cytearc.storage.budget import ResourceBudget
+
+    counts = np.random.default_rng(8).poisson(0.8, size=(40, 30)).astype(np.uint16)
+    return lambda: doublets.fit_lsi_doublet_projection(
+        ChunkedArray.from_numpy(counts),
+        np.arange(40),
+        np.arange(30),
+        np.ones(30),
+        n_components=4,
+        random_seed=0,
+        resources=ResourceBudget(1_000_000, 2),
+        resident_bytes=0,
+    )
+
+
 def _runner_call(_tmp_path: Path) -> Callable[[], object]:
     from cytearc.storage.async_execution import AsyncStorageRunner
     from cytearc.storage.budget import ResourceBudget
@@ -819,6 +837,9 @@ _FAMILIES = {
     ),
     "doublets": _Family(
         _doublet_call, ("cytearc.quality_control.doublets", "sum_doublet_pairs"), 2
+    ),
+    "doublet LSI": _Family(
+        _doublet_lsi_call, ("cytearc.quality_control.doublets", "fit_sparse_lsi"), 2
     ),
     "storage runner": _Family(_runner_call),
     "block stream items": _Family(_stream_items_call),

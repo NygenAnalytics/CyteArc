@@ -1946,9 +1946,10 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         active_idx: np.ndarray,
         feature_indices: np.ndarray,
         *,
+        random_seed: int,
         resident_bytes: int,
-    ) -> tuple["LsiDoubletProjection", np.ndarray | None]:
-        """Return the TF-IDF projection onto a graph's LSI, and its cells' totals.
+    ) -> "LsiDoubletProjection":
+        """Fit the LSI that an ATAC graph's cells and simulated doublets are scored on.
 
         Each peak's inverse document frequency is the one that the LSI's
         normalization applied: from the graph's cells with counts of the
@@ -1957,9 +1958,9 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         or which is computed and saved now. A session that normalizes
         otherwise summarizes peaks otherwise, so they are counted in one pass
         over the cells' counts of the LSI's peaks while ``resident_bytes``
-        stay held. The totals are each cell's total counts, or None when the
-        normalization renormalized over the selected peaks, so that each
-        doublet's term frequencies divide by its own total of them.
+        stay held. The fit (:func:`fit_lsi_doublet_projection`) has as many
+        components as the graph's LSI fitted: its ``dims``, and the first
+        component when ``skip_first`` dropped it.
         """
         from ...assay.feature_summary import (
             ensure_feature_summary,
@@ -1969,16 +1970,12 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             inverse_document_frequency,
             stream_document_frequency,
         )
-        from ...quality_control.doublets import LsiDoubletProjection
+        from ...quality_control.doublets import fit_lsi_doublet_projection
 
         # _require_lsi_doublet_graph checked that the lineage names both.
         assert lineage.reduction is not None and lineage.normalized is not None
-        renormalize = bool_argument(
-            (inspect_artifact(self.zw, lineage.normalized).parameters or {}).get(
-                "renormalize_subset"
-            ),
-            "renormalize_subset",
-        )
+        lsi = inspect_artifact(self.zw, lineage.reduction).parameters or {}
+        n_components = int(lsi["dims"]) + int(lsi["skip_first"])
         if assay.normMethod is norm_tf_idf:
             summary = ensure_feature_summary(self.zw, assay, lineage.cell_selection)
             document_frequency = feature_summary_values(
@@ -1996,15 +1993,16 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
                 operation="Doublet detection",
                 resident_bytes=resident_bytes,
             )
-        group = artifact_group(self.zw, lineage.reduction)
-        projection = LsiDoubletProjection(
-            as_zarr_array(group["loadings"], name="loadings")[:],
+        return fit_lsi_doublet_projection(
+            assay.rawData,
+            active_idx,
+            feature_indices,
             inverse_document_frequency(len(active_idx), document_frequency),
-            as_zarr_array(group["data"], name="data"),
-            renormalize_subset=renormalize,
+            n_components=n_components,
+            random_seed=random_seed,
+            resources=self.resources,
+            resident_bytes=resident_bytes,
         )
-        totals = None if renormalize else assay._cell_count_totals(active_idx)
-        return projection, totals
 
     def _run_doublet_detection_artifact(
         self,
@@ -2241,16 +2239,19 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         if atac:
             # The features are kept by their row positions alone.
             feature_bytes = feature_indices.nbytes
-            projection, totals = self._lsi_doublet_projection(
+            projection = self._lsi_doublet_projection(
                 source_assay,
                 lineage,
                 active_idx,
                 feature_indices,
+                random_seed=settings.random_seed,
                 resident_bytes=active_idx.nbytes
                 + labels.nbytes
                 + codes.nbytes
                 + feature_bytes,
             )
+            # The fitted LSI scales each row to unit length over its peaks.
+            totals = None
         else:
             reference_ref = self._mapping_build_reference(neighbors)
             reference = self._mapping_load_reference(reference_ref)

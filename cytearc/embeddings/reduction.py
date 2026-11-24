@@ -742,6 +742,46 @@ def _stream_lsi_gram_action(
     return result
 
 
+def _randomized_lsi(
+    gram_action: Callable[[np.ndarray, int], np.ndarray],
+    projected_gram: Callable[[np.ndarray], np.ndarray],
+    shape: tuple[int, int],
+    *,
+    n_components: int,
+    n_iter: Any,
+    n_oversamples: Any,
+    random_state: int,
+) -> np.ndarray:
+    """Return the leading uncentered right singular vectors of a matrix.
+
+    The randomized range finder starts from a standard normal basis seeded by
+    ``random_state``, applies ``gram_action``, the matrix's transpose times
+    the matrix times a basis, ``n_iter + 1`` times with a QR decomposition
+    after each, and rotates the basis by the eigenvectors of
+    ``projected_gram``, the Gram matrix of the matrix times the basis. Each
+    component's largest entry is positive.
+    """
+    iterations = integer_argument(n_iter, "n_iter", minimum=0)
+    oversamples = integer_argument(n_oversamples, "n_oversamples", minimum=0)
+    width = min(min(shape), n_components + oversamples)
+    rng = np.random.default_rng(random_state)
+    basis = rng.standard_normal((shape[1], width), dtype=np.float64)
+    basis, _ = np.linalg.qr(basis, mode="reduced")
+
+    for iteration in range(iterations + 1):
+        basis = gram_action(basis, iteration)
+        basis, _ = np.linalg.qr(basis, mode="reduced")
+
+    eigenvalues, rotations = np.linalg.eigh(projected_gram(basis))
+    order = np.argsort(eigenvalues)[::-1][:n_components]
+    loadings = np.asarray(basis @ rotations[:, order], dtype=np.float64)
+    largest = np.argmax(np.abs(loadings), axis=0)
+    signs = np.sign(loadings[largest, np.arange(loadings.shape[1])])
+    signs[signs == 0] = 1
+    loadings *= signs
+    return loadings
+
+
 def _fit_streaming_lsi(
     data: ChunkedArray,
     *,
@@ -753,43 +793,111 @@ def _fit_streaming_lsi(
     nthreads: int,
 ) -> np.ndarray:
     iterations = integer_argument(n_iter, "n_iter", minimum=0)
-    oversamples = integer_argument(n_oversamples, "n_oversamples", minimum=0)
-    width = min(min(data.shape), n_components + oversamples)
-    rng = np.random.default_rng(random_state)
-    basis = rng.standard_normal((data.shape[1], width), dtype=np.float64)
-    basis, _ = np.linalg.qr(basis, mode="reduced")
 
-    for iteration in range(iterations + 1):
-        basis = _stream_lsi_gram_action(
+    def gram_action(basis: np.ndarray, iteration: int) -> np.ndarray:
+        return _stream_lsi_gram_action(
             data,
             basis,
             nthreads=nthreads,
             message=f"Fitting streaming LSI model ({iteration + 1}/{iterations + 2})",
         )
-        basis, _ = np.linalg.qr(basis, mode="reduced")
 
-    projected_gram = np.zeros((width, width), dtype=np.float64)
-    resident_bytes = _streaming_lsi_resident_bytes(data, width)
-    # The power iterations above have rejected non-finite input, so this
-    # projection of the same rows onto an orthonormal basis stays finite.
-    for block in data._stream_blocks(
-        nthreads=nthreads,
-        msg=f"Fitting streaming LSI model ({iterations + 2}/{iterations + 2})",
-        prefetch=1,
-        row_mask=None,
-        resident_bytes=resident_bytes,
-    ):
-        projected = np.asarray(block) @ basis
-        projected_gram += projected.T @ projected
-        del block, projected
+    def projected_gram(basis: np.ndarray) -> np.ndarray:
+        width = basis.shape[1]
+        gram = np.zeros((width, width), dtype=np.float64)
+        resident_bytes = _streaming_lsi_resident_bytes(data, width)
+        # The power iterations have rejected non-finite input, so this
+        # projection of the same rows onto an orthonormal basis stays finite.
+        for block in data._stream_blocks(
+            nthreads=nthreads,
+            msg=f"Fitting streaming LSI model ({iterations + 2}/{iterations + 2})",
+            prefetch=1,
+            row_mask=None,
+            resident_bytes=resident_bytes,
+        ):
+            projected = np.asarray(block) @ basis
+            gram += projected.T @ projected
+            del block, projected
+        return gram
 
-    eigenvalues, rotations = np.linalg.eigh(projected_gram)
-    order = np.argsort(eigenvalues)[::-1][:n_components]
-    loadings = np.asarray(basis @ rotations[:, order], dtype=np.float64)
-    largest = np.argmax(np.abs(loadings), axis=0)
-    signs = np.sign(loadings[largest, np.arange(loadings.shape[1])])
-    signs[signs == 0] = 1
-    loadings *= signs
+    loadings = _randomized_lsi(
+        gram_action,
+        projected_gram,
+        data.shape,
+        n_components=n_components,
+        n_iter=iterations,
+        n_oversamples=n_oversamples,
+        random_state=random_state,
+    )
     if skip_first:
         return loadings[:, 1:]
     return loadings
+
+
+def sparse_lsi_bytes(n_features: int, n_rows: int, n_components: int) -> int:
+    """Return the bytes that ``fit_sparse_lsi`` holds beside its rows.
+
+    They are the basis, its QR copies and the Gram action's result, each of
+    ``n_features`` by ``n_components + 10`` float64 values, and two products
+    of the rows with the basis.
+    """
+    width = int(n_components) + 10
+    return (
+        _streaming_lsi_accumulator_bytes(int(n_features), width)
+        + 2 * int(n_rows) * width * np.dtype(np.float64).itemsize
+    )
+
+
+def fit_sparse_lsi(
+    rows: Any,
+    *,
+    n_components: int,
+    random_state: int,
+) -> np.ndarray:
+    """Fit the leading uncentered LSI loadings of rows held in memory.
+
+    The solver is the streaming LSI's, with its default 5 power iterations
+    and 10 oversampling columns, applied to a SciPy sparse or NumPy matrix;
+    no component is skipped. SciPy's sparse products run on one thread, and
+    the caller runs the dense steps under the BLAS threads it chooses.
+
+    Args:
+        rows: The matrix whose rows are fitted, cells by features.
+        n_components: Components to return, at most the smaller dimension
+            of ``rows``.
+        random_state: Seed of the starting basis.
+
+    Returns:
+        The features-by-components float64 loadings.
+
+    Raises:
+        ValueError: If ``n_components`` exceeds the smaller dimension of the
+            rows, or the rows hold a value that is not finite.
+    """
+    shape = (int(rows.shape[0]), int(rows.shape[1]))
+    components = integer_argument(n_components, "n_components", minimum=1)
+    if components > min(shape):
+        raise ValueError(
+            f"An LSI of {shape[0]} rows of {shape[1]} features has at most "
+            f"{min(shape)} components, not {components}"
+        )
+
+    def gram_action(basis: np.ndarray, _iteration: int) -> np.ndarray:
+        result = np.asarray(rows.T @ np.asarray(rows @ basis), dtype=np.float64)
+        if not np.isfinite(result).all():
+            raise ValueError("LSI input must contain only finite values")
+        return result
+
+    def projected_gram(basis: np.ndarray) -> np.ndarray:
+        projected = np.asarray(rows @ basis, dtype=np.float64)
+        return projected.T @ projected
+
+    return _randomized_lsi(
+        gram_action,
+        projected_gram,
+        shape,
+        n_components=components,
+        n_iter=5,
+        n_oversamples=10,
+        random_state=random_state,
+    )

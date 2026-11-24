@@ -1935,97 +1935,210 @@ def two_captures_peaks(tmp_path_factory) -> _SyntheticDoublets:
     return _build_synthetic(path, _TWO_CAPTURES, assay="ATAC")
 
 
-def _lsi_projection(
-    loadings: np.ndarray, idf: np.ndarray, *, renormalize_subset: bool = False
-) -> doublets.LsiDoubletProjection:
-    return doublets.LsiDoubletProjection(
-        loadings,
-        idf,
-        np.zeros((1, loadings.shape[1]), dtype=np.float32),
-        renormalize_subset=renormalize_subset,
-    )
-
-
-def test_lsi_projection_weights_summed_counts_by_tf_idf_by_hand():
+def test_lsi_projection_scales_idf_weighted_counts_to_unit_length_by_hand():
     # Three selected peaks, two LSI dimensions, and each peak's IDF.
     loadings = np.array([[1.0, 0.0], [0.5, -1.0], [0.0, 2.0]])
     idf = np.array([1.0, 2.0, 0.5])
-    # A doublet whose parents hold 3, 2 and 1 counts of the peaks together,
-    # and one whose parents hold none.
-    summed = csr_matrix(np.array([[3, 2, 1], [0, 0, 0]], dtype=np.uint32))
+    # A doublet whose parents hold 3, 2 and 24 counts of the peaks together,
+    # one whose parents hold none, and one that stores a zero alone.
+    summed = csr_matrix(
+        (
+            np.array([3, 2, 24, 0], dtype=np.uint32),
+            np.array([0, 1, 2, 1]),
+            np.array([0, 3, 3, 4]),
+        ),
+        shape=(3, 3),
+    )
     before = summed.copy()
+    projection = doublets.LsiDoubletProjection(loadings, idf)
 
-    # Its TF-IDF values are [3 * 1, 2 * 2, 1 * 0.5] / T, so its coordinates
-    # are [3 + 4 * 0.5, -4 + 0.5 * 2] / T = [5, -3] / T, where T is the sum
-    # of its parents' totals over every peak, here 16.
-    by_totals = _lsi_projection(loadings, idf).project(
-        summed, np.array([16.0, 0.0]), source="test"
+    coordinates = projection.project(summed, None, source="test")
+
+    # The weighted counts [3, 4, 12] have length 13, so the unit row is
+    # [3, 4, 12] / 13 and its coordinates [3 + 4 * 0.5, -4 + 12 * 2] / 13.
+    # Rows without counts stay at the origin.
+    np.testing.assert_allclose(
+        coordinates, [[5 / 13, 20 / 13], [0, 0], [0, 0]], rtol=1e-12, atol=0
     )
-    np.testing.assert_allclose(by_totals, [[5 / 16, -3 / 16], [0, 0]], rtol=1e-12)
-    # Renormalized over the selected peaks, T is the doublet's own 6 counts.
-    renormalized = _lsi_projection(loadings, idf, renormalize_subset=True).project(
-        summed, None, source="test"
-    )
-    np.testing.assert_allclose(renormalized, [[5 / 6, -3 / 6], [0, 0]], rtol=1e-12)
     # The counts are left as they were.
     assert summed.dtype == np.uint32
     assert (summed != before).nnz == 0
-    # A stored zero of a doublet without counts divides by 1, as a cell's
-    # zero total does, and stays at the origin.
-    stored_zero = csr_matrix(
-        (np.array([0], dtype=np.uint32), np.array([1]), np.array([0, 1])),
-        shape=(1, 3),
+    # Every total scales a row's term frequencies alike, so the projection
+    # normalizes over the selected peaks and takes no totals.
+    assert (projection.renormalize_subset, projection.coordinates) == (True, None)
+    with pytest.raises(ValueError, match="takes no totals"):
+        projection.project(summed, np.ones(3), source="The doublets of ATAC")
+
+
+def test_lsi_projection_matches_a_dense_computation_of_unit_length_rows():
+    rng = np.random.default_rng(0)
+    counts = rng.poisson(0.4, size=(50, 30)).astype(np.uint16)
+    counts[3] = 0
+    loadings = rng.normal(size=(30, 4))
+    idf = rng.uniform(0.5, 4.0, size=30)
+    weighted = counts * idf
+    lengths = np.linalg.norm(weighted, axis=1, keepdims=True)
+    unit = np.divide(weighted, lengths, out=np.zeros_like(weighted), where=lengths > 0)
+    projection = doublets.LsiDoubletProjection(loadings, idf)
+
+    coordinates = projection.project(csr_matrix(counts), None, source="test")
+
+    np.testing.assert_allclose(coordinates, unit @ loadings, rtol=1e-12, atol=1e-14)
+    # Three times the counts, as a deeper cell of the same profile holds, has
+    # the same coordinates.
+    np.testing.assert_allclose(
+        projection.project(csr_matrix(3 * counts), None, source="test"),
+        coordinates,
+        rtol=1e-12,
+        atol=1e-14,
     )
-    for projection, denominators in (
-        (_lsi_projection(loadings, idf), np.zeros(1)),
-        (_lsi_projection(loadings, idf, renormalize_subset=True), None),
-    ):
-        np.testing.assert_array_equal(
-            projection.project(stored_zero, denominators, source="test"), [[0, 0]]
-        )
-    with pytest.raises(ValueError, match="one value per row of counts"):
-        _lsi_projection(loadings, idf).project(summed, np.ones(3), source="test")
 
 
 @pytest.mark.parametrize(
-    ("loadings", "idf", "shape", "message"),
+    ("loadings", "idf", "message"),
     [
-        (np.ones(3), np.ones(3), (1, 1), "matrix of features by dimensions"),
-        (np.ones((3, 0)), np.ones(3), (1, 0), "matrix of features by dimensions"),
-        (np.ones((3, 2)), np.ones(2), (1, 2), "one value per LSI feature"),
-        (np.full((3, 2), np.nan), np.ones(3), (1, 2), "must be finite"),
-        (np.ones((3, 2)), np.array([1.0, np.inf, 1.0]), (1, 2), "must be finite"),
-        (np.ones((3, 2)), np.ones(3), (1, 3), "one column per LSI dimension"),
-        (np.ones((3, 2)), np.ones(3), (2,), "one column per LSI dimension"),
+        (np.ones(3), np.ones(3), "matrix of features by dimensions"),
+        (np.ones((3, 0)), np.ones(3), "matrix of features by dimensions"),
+        (np.ones((3, 2)), np.ones(2), "one value per LSI feature"),
+        (np.full((3, 2), np.nan), np.ones(3), "must be finite"),
+        (np.ones((3, 2)), np.array([1.0, np.inf, 1.0]), "must be finite"),
     ],
 )
-def test_lsi_projection_checks_its_loadings_weights_and_coordinates(
-    loadings, idf, shape, message
-):
+def test_lsi_projection_checks_its_loadings_and_weights(loadings, idf, message):
     with pytest.raises(ValueError, match=message):
-        doublets.LsiDoubletProjection(
-            loadings, idf, np.zeros(shape), renormalize_subset=False
-        )
+        doublets.LsiDoubletProjection(loadings, idf)
 
 
 def test_lsi_projection_holds_its_loadings_and_charges_each_doublet():
     loadings = np.arange(12, dtype=np.float32).reshape(4, 3)
-    projection = doublets.LsiDoubletProjection(
-        loadings, np.ones(4), np.zeros((2, 3)), renormalize_subset=True
-    )
+    projection = doublets.LsiDoubletProjection(loadings, np.ones(4))
 
-    assert (projection.n_dims, projection.renormalize_subset) == (3, True)
+    assert projection.n_dims == 3
     # The loadings are held in float64, beside the float64 weights.
     assert projection.loadings.dtype == np.float64
     assert projection.resident_bytes() == 4 * 3 * 8 + 4 * 8
     # Rows of at most 2 values give doublets of at most 4: their float64
-    # values and int64 indices and a weighted copy, and the coordinates.
+    # values and int64 indices and a float64 temporary, and the coordinates.
     counts = csr_matrix(np.array([[1, 0, 2, 0], [0, 3, 0, 0]]))
     assert projection.row_bytes(counts) == 4 * (2 * 8 + 8) + 3 * 16 + 64
-    with pytest.raises(TypeError, match="renormalize_subset must be a boolean"):
-        doublets.LsiDoubletProjection(
-            loadings, np.ones(4), np.zeros((2, 3)), renormalize_subset=1
+
+
+def test_the_doublet_lsi_is_fitted_to_every_cell_or_a_seeded_sample(monkeypatch):
+    monkeypatch.setattr(doublets, "LSI_FIT_CELLS", 10)
+
+    np.testing.assert_array_equal(doublets.lsi_fit_positions(10, 4444), np.arange(10))
+    drawn = doublets.lsi_fit_positions(25, 4444)
+    assert drawn.dtype == np.int64 and len(drawn) == 10
+    assert np.all(np.diff(drawn) > 0) and 0 <= drawn[0] and drawn[-1] < 25
+    np.testing.assert_array_equal(doublets.lsi_fit_positions(25, 4444), drawn)
+    assert not np.array_equal(doublets.lsi_fit_positions(25, 1), drawn)
+    with pytest.raises(ValueError, match="n_cells must be at least 1"):
+        doublets.lsi_fit_positions(0, 4444)
+
+
+def _typed_peaks(seed: int, n_cells: int, n_peaks: int) -> np.ndarray:
+    """Peak counts of three types, each opening its own third of the peaks."""
+    rng = np.random.default_rng(seed)
+    types = rng.integers(0, 3, n_cells)
+    profiles = np.full((3, n_peaks), 0.05)
+    for cell_type in range(3):
+        profiles[cell_type, cell_type::3] = 1.5
+    return rng.poisson(profiles[types] * rng.uniform(0.5, 2.0, (n_cells, 1)))
+
+
+def _unit_rows(counts: np.ndarray, idf: np.ndarray) -> np.ndarray:
+    weighted = counts * idf
+    return weighted / np.linalg.norm(weighted, axis=1, keepdims=True)
+
+
+def _leading_cosines(loadings: np.ndarray, rows: np.ndarray) -> np.ndarray:
+    """The absolute cosine of each loading with the SVD's component of its rank."""
+    _, _, components = np.linalg.svd(rows, full_matrices=False)
+    return np.abs(np.sum(loadings * components[: loadings.shape[1]].T, axis=0))
+
+
+def test_fit_lsi_doublet_projection_fits_the_unit_rows_of_its_cells(monkeypatch):
+    counts = _typed_peaks(1, 60, 45).astype(np.uint16)
+    raw = ChunkedArray.from_numpy(counts)
+    # The selected cells in an order of their own, and every other peak.
+    active = np.random.default_rng(2).permutation(60)[:48]
+    features = np.arange(0, 45, 2)
+    idf = np.random.default_rng(3).uniform(1.0, 3.0, len(features))
+    selected = counts[active][:, features].astype(np.float64)
+
+    def fit(seed: int) -> doublets.LsiDoubletProjection:
+        return doublets.fit_lsi_doublet_projection(
+            raw,
+            active,
+            features,
+            idf,
+            n_components=3,
+            random_seed=seed,
+            resources=ResourceBudget(1 << 26, 1),
+            resident_bytes=0,
         )
+
+    projection = fit(4444)
+
+    np.testing.assert_array_equal(projection.idf, idf)
+    # Three types give three components well apart from the rest, which the
+    # solver finds as an exact SVD of the cells' unit-length rows does.
+    assert np.all(
+        _leading_cosines(projection.loadings, _unit_rows(selected, idf)) > 1 - 1e-9
+    )
+    # A larger assay is fitted on the cells that lsi_fit_positions draws.
+    monkeypatch.setattr(doublets, "LSI_FIT_CELLS", 30)
+    sampled = fit(4444)
+    drawn = doublets.lsi_fit_positions(48, 4444)
+    assert np.all(
+        _leading_cosines(sampled.loadings, _unit_rows(selected[drawn], idf)) > 1 - 1e-9
+    )
+    assert not np.all(
+        _leading_cosines(sampled.loadings, _unit_rows(selected, idf)) > 1 - 1e-9
+    )
+    with pytest.raises(ValueError, match="one finite value per peak"):
+        doublets.fit_lsi_doublet_projection(
+            raw,
+            active,
+            features,
+            idf[1:],
+            n_components=3,
+            random_seed=0,
+            resources=ResourceBudget(1 << 26, 1),
+            resident_bytes=0,
+        )
+
+
+def test_fit_lsi_doublet_projection_refuses_a_solver_beyond_the_budget(monkeypatch):
+    # 3,000 peaks and 40 components: the solver's float64 bases take about
+    # 3.6 MB, and the cells' rows a few kilobytes.
+    counts = (np.random.default_rng(4).random((60, 3_000)) < 0.01).astype(np.uint16)
+    counts[:, 0] = 1
+    fitted = []
+    original = doublets.fit_sparse_lsi
+    monkeypatch.setattr(
+        doublets,
+        "fit_sparse_lsi",
+        lambda rows, **kwargs: fitted.append(rows.shape) or original(rows, **kwargs),
+    )
+
+    def fit(budget: int) -> doublets.LsiDoubletProjection:
+        return doublets.fit_lsi_doublet_projection(
+            ChunkedArray.from_numpy(counts),
+            np.arange(60),
+            np.arange(3_000),
+            np.ones(3_000),
+            n_components=40,
+            random_seed=0,
+            resources=ResourceBudget(budget, 1),
+            resident_bytes=0,
+        )
+
+    with pytest.raises(MemoryError):
+        fit(1 << 20)
+    assert fitted == []
+    assert fit(1 << 24).n_dims == 40
+    assert fitted == [(60, 3_000)]
 
 
 @pytest.mark.parametrize(
@@ -2126,6 +2239,8 @@ def test_doublet_scoring_charges_what_its_projection_holds_and_projects():
     (plan,) = doublets.plan_doublet_samples([4], simulation_ratio=2.0, n_neighbors=2)
 
     def simulate(projection: _ChargedProjection) -> Any:
+        # score_synthetic_doublets maps the cells of a projection without
+        # coordinates.
         return doublets._simulate_sample(
             assay,
             projection,
@@ -2141,6 +2256,7 @@ def test_doublet_scoring_charges_what_its_projection_holds_and_projects():
             heterotypic_fraction=0.0,
             resources=budget,
             resident_bytes=0,
+            map_cells=projection.coordinates is None,
         )
 
     refused = _ChargedProjection(4, row=2_000_000)
@@ -2149,43 +2265,24 @@ def test_doublet_scoring_charges_what_its_projection_holds_and_projects():
     assert refused.projected == 0
     # With room for its doublets, the projection maps every one of them.
     admitted = _ChargedProjection(4, row=1_000)
-    coordinates, _parents, _fraction = simulate(admitted)
+    observed, coordinates, _parents, _fraction = simulate(admitted)
+    assert observed is None
     assert admitted.projected == plan.simulated == len(coordinates) == 8
+    # A projection without coordinates also maps the sample's 4 cells.
+    mapped = _ChargedProjection(4, row=1_000)
+    mapped.coordinates = None
+    observed, coordinates, _parents, _fraction = simulate(mapped)
+    assert observed.shape == (4, 2) and len(coordinates) == 8
+    assert mapped.projected == 8 + 4
 
 
-@pytest.mark.parametrize(
-    ("top_n", "renormalize"),
-    [(None, False), (150, False), (150, True)],
-    ids=["every-peak", "prevalent-peaks", "renormalized"],
-)
-def test_lsi_projection_of_the_cells_reproduces_their_stored_lsi(
-    one_capture_peaks, tmp_path, top_n, renormalize
-):
+def _graph_rows_and_peaks(
+    store: DataStore, graph: ArtifactRef
+) -> tuple[Any, np.ndarray, np.ndarray]:
     from cytearc.graph.feature_projection import resolve_graph_assay_inputs
     from cytearc.storage.feature_selection import read_feature_selection_indices
     from cytearc.storage.selections import read_stored_selection_indices
 
-    opened = _open_synthetic(one_capture_peaks, tmp_path)
-    store = opened.store
-    graph = opened.graph
-    truth = one_capture_peaks.truth
-    # With renormalize_subset, IDF over the cells that are not homotypic
-    # doublets, so that it is not that of every cell either.
-    keep = truth != 2 if renormalize else np.ones(len(truth), dtype=bool)
-    if top_n is not None:
-        # The template's LSI holds every peak, over which a cell's total and
-        # its total of the selected peaks agree; over 150 prevalent peaks
-        # they differ.
-        store.cells.insert("kept", by_cell_id(store.cells, keep))
-        cells = store.snapshot_cell_selection("kept")
-        peaks = store.features.prevalent_peaks(cells, top_n=top_n)
-        normalized = store.features.normalize(
-            cells, peaks, renormalize_subset=renormalize
-        )
-        lsi = store.reduction.lsi(normalized, dims=8, local_cache=False)
-        graph = store.graph.connectivity(
-            store.graph.neighbors(store.graph.ann_index(lsi), coordinates=lsi, k=10)
-        )
     lineage = resolve_graph_assay_inputs(store.zw, graph, "ATAC")
     rows = read_stored_selection_indices(
         store.zw,
@@ -2198,31 +2295,75 @@ def test_lsi_projection_of_the_cells_reproduces_their_stored_lsi(
     features = read_feature_selection_indices(
         store.zw, "ATAC", lineage.feature_selection
     )
+    return lineage, rows, features
+
+
+@pytest.mark.parametrize("top_n", [None, 150], ids=["every-peak", "prevalent-peaks"])
+def test_the_doublet_lsi_matches_an_svd_of_the_cells_unit_length_tf_idf_rows(
+    one_capture_peaks, tmp_path, top_n
+):
+    opened = _open_synthetic(one_capture_peaks, tmp_path)
+    store = opened.store
+    graphs = [opened.graph]
+    keep = np.ones(len(one_capture_peaks.truth), dtype=bool)
+    if top_n is not None:
+        # The cells that are not homotypic doublets and 150 prevalent peaks,
+        # so that the IDF is neither that of every cell nor of every peak,
+        # normalized over every peak and over the selected peaks alone.
+        keep = one_capture_peaks.truth != 2
+        store.cells.insert("kept", by_cell_id(store.cells, keep))
+        cells = store.snapshot_cell_selection("kept")
+        peaks = store.features.prevalent_peaks(cells, top_n=top_n)
+        graphs = []
+        for renormalize in (False, True):
+            normalized = store.features.normalize(
+                cells, peaks, renormalize_subset=renormalize
+            )
+            lsi = store.reduction.lsi(normalized, dims=8, local_cache=False)
+            graphs.append(
+                store.graph.connectivity(
+                    store.graph.neighbors(
+                        store.graph.ann_index(lsi), coordinates=lsi, k=10
+                    )
+                )
+            )
+
+    fitted = []
+    for graph in graphs:
+        lineage, rows, features = _graph_rows_and_peaks(store, graph)
+        fitted.append(
+            store._lsi_doublet_projection(
+                store.ATAC,
+                lineage,
+                rows,
+                features,
+                random_seed=4444,
+                resident_bytes=0,
+            )
+        )
+
     np.testing.assert_array_equal(rows, np.flatnonzero(keep))
     assert len(features) == (400 if top_n is None else top_n)
-
-    projection, totals = store._lsi_doublet_projection(
-        store.ATAC, lineage, rows, features, resident_bytes=0
-    )
-
-    assert projection.renormalize_subset is renormalize
-    assert (totals is None) is renormalize
-    # The counts that the store was written with, apart from its reads.
+    # The counts that the store was written with, weighted by the IDF of
+    # each peak among the graph's cells and scaled to unit length.
     counts, *_ = _synthetic_counts(3, _ONE_CAPTURE, peaks=True)
-    if totals is not None:
-        # Each cell's total over every peak, not over the LSI's peaks.
-        np.testing.assert_array_equal(totals, counts[rows].sum(axis=1))
-        if top_n is not None:
-            selected = counts[rows][:, features].sum(axis=1)
-            assert np.mean(totals > selected) > 0.9
-    coordinates = projection.project(
-        csr_matrix(counts[rows][:, features]), totals, source="test"
-    )
-    # The LSI holds float32 coordinates of float32 TF-IDF values.
-    stored = np.asarray(artifact_group(store.zw, lineage.reduction)["data"][:])
-    np.testing.assert_allclose(
-        coordinates, stored, rtol=0, atol=1e-6 * np.abs(stored).max()
-    )
+    selected = counts[rows][:, features].astype(np.float64)
+    idf = np.log2(1 + len(rows) / ((selected > 0).sum(axis=0) + 1))
+    unit = _unit_rows(selected, idf)
+    singular = np.linalg.svd(unit, compute_uv=False)
+    for projection in fitted:
+        np.testing.assert_allclose(projection.idf, idf, rtol=1e-12)
+        # The LSI's 8 dimensions and the first component that it skipped.
+        assert projection.n_dims == 9
+        # The 5 cell types give 5 components well apart from the noise after
+        # them, which the solver finds as the exact SVD does; the noise
+        # components' order is a matter of the solver's passes.
+        assert singular[4] > 2 * singular[5]
+        assert np.all(_leading_cosines(projection.loadings[:, :5], unit) > 1 - 1e-9)
+    # A graph normalized over its selected peaks alone has the same LSI: the
+    # unit length cancels the total that each cell's TF-IDF divides by.
+    for projection in fitted[1:]:
+        np.testing.assert_array_equal(projection.loadings, fitted[0].loadings)
 
 
 def test_atac_doublet_scores_count_simulated_doublets_among_exact_lsi_neighbors(
@@ -2234,23 +2375,29 @@ def test_atac_doublet_scores_count_simulated_doublets_among_exact_lsi_neighbors(
     payload = _payload(store, ref)
     (sample,) = payload.attrs["samples"]
     k = sample["adjustedNeighbors"]
-    lsi = artifact_group(store.zw, _graph_pca(store, opened.graph))
+    lineage, rows, features = _graph_rows_and_peaks(store, opened.graph)
+    # The LSI that the scores were computed on, which
+    # test_the_doublet_lsi_matches_an_svd_of_the_cells_unit_length_tf_idf_rows
+    # checks against an SVD.
+    loadings = store._lsi_doublet_projection(
+        store.ATAC, lineage, rows, features, random_seed=4444, resident_bytes=0
+    ).loadings
 
-    # The doublets of the parents that the scores record, rebuilt from the
-    # written counts as TF-IDF defines them: summed counts over the parents'
-    # summed totals, times log2(1 + n / (df + 1)) of each peak among the n
-    # cells, times the LSI loadings.
+    # The cells and the doublets of the parents that the scores record,
+    # rebuilt from the written counts as their TF-IDF rows scaled to unit
+    # length, log2(1 + n / (df + 1)) of each peak among the n cells.
     counts, *_ = _synthetic_counts(3, _ONE_CAPTURE, peaks=True)
     counts = counts.astype(np.float64)
     idf = np.log2(1 + len(counts) / ((counts > 0).sum(axis=0) + 1))
     parents = payload["simulated_parents"][:]
     summed = counts[parents[:, 0]] + counts[parents[:, 1]]
-    simulated = (summed / summed.sum(axis=1, keepdims=True) * idf) @ lsi["loadings"][:]
-    points = np.vstack([lsi["data"][:], simulated]).astype(np.float32)
+    points = np.vstack(
+        [_unit_rows(counts, idf) @ loadings, _unit_rows(summed, idf) @ loadings]
+    ).astype(np.float32)
     # Each cell's simulated doublets among its k nearest other points, by
     # exact Euclidean distance. A point whose distance ties the k-th to within
-    # the float32 rounding of the index may count either way, as it does on
-    # one cell of this store, so the exact distances bound each count.
+    # the float32 rounding of the index may count either way, so the exact
+    # distances bound each count.
     low, high = _exact_simulated_neighbors(points, len(counts), k)
     low, high = low[: len(counts)], high[: len(counts)]
     scored = np.rint(payload["raw_scores"][:] * k)

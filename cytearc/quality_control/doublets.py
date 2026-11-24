@@ -2,13 +2,14 @@
 
 Each sample's doublets are simulated by adding the counts of two of its cells.
 They are normalized like the observed cells and projected onto the observed
-cells' reduction: the PCA of an RNA assay (:class:`PcaDoubletProjection`) or
-the LSI of an ATAC assay (:class:`LsiDoubletProjection`). Every observed cell
-and every simulated doublet is then scored by the simulated doublets among
-its nearest neighbors in its own sample, and the score is turned into the
-probability that the cell is a doublet, given an expected doublet rate,
-following Scrublet (Wolock, Lopez and Klein, Cell Systems 2019,
-doi:10.1016/j.cels.2018.11.005).
+cells' reduction: the PCA of an RNA assay (:class:`PcaDoubletProjection`), or
+for an ATAC assay an LSI of the cells' TF-IDF rows scaled to unit length,
+which :func:`fit_lsi_doublet_projection` fits (:class:`LsiDoubletProjection`).
+Every observed cell and every simulated doublet is then scored by the
+simulated doublets among its nearest neighbors in its own sample, and the
+score is turned into the probability that the cell is a doublet, given an
+expected doublet rate, following Scrublet (Wolock, Lopez and Klein, Cell
+Systems 2019, doi:10.1016/j.cels.2018.11.005).
 """
 
 import threading
@@ -23,8 +24,9 @@ from numpy.typing import ArrayLike, NDArray
 from scipy.sparse import csr_matrix, vstack
 
 from ..assay import Assay
-from ..assay.normalization import TfIdfFit, normalize_rows
+from ..assay.normalization import normalize_rows
 from ..assay.persistence import _read_block
+from ..embeddings.reduction import fit_sparse_lsi, sparse_lsi_bytes
 from ..mapping.features import reference_normalization
 from ..mapping.reference import MappingReference
 from ..mapping.symphony import project_pca
@@ -59,13 +61,16 @@ __all__ = [
     "DoubletSampleResult",
     "DoubletScores",
     "DoubletSettings",
+    "LSI_FIT_CELLS",
     "LsiDoubletProjection",
     "PcaDoubletProjection",
     "count_simulated_neighbors",
     "doublet_likelihood",
     "doublet_settings",
     "doublet_threshold",
+    "fit_lsi_doublet_projection",
     "histogram_minimum_threshold",
+    "lsi_fit_positions",
     "minmax_doublet_scores",
     "otsu_threshold",
     "plan_doublet_samples",
@@ -90,6 +95,11 @@ THRESHOLD_SIDE_SHARE = 0.05
 # (Xi and Li, Cell Systems 2021), and a sample whose simulated doublets look
 # like its cells has Otsu's threshold split the cells and the doublets alike.
 THRESHOLD_MAX_DOUBLET_RATE = 0.5
+# The LSI that an ATAC assay's doublets are scored on is fitted to at most this
+# many of its selected cells, drawn at random, held in memory; every cell and
+# simulated doublet is then projected onto it. How closely such a fit ranks
+# doublets as a fit to every cell does is still to be measured at scale.
+LSI_FIT_CELLS = 20_000
 # A sample scored beside others queries its index for at most this many points
 # at once, so that its query block stays small beside its index.
 _SAMPLE_QUERY_ROWS = 4_096
@@ -768,8 +778,10 @@ def _load_parent_counts(
     resources: ResourceBudget,
     resident_bytes: int,
     room: _ScoringRoom | None = None,
+    *,
+    msg: str = "Reading doublet parents",
 ) -> csr_matrix:
-    """Read the selected features of parent rows in admitted blocks.
+    """Read the selected features of rows of counts in admitted blocks.
 
     Each block also waits for its bytes in ``room``, when one is given.
     """
@@ -814,7 +826,7 @@ def _load_parent_counts(
         read,
         workers=1,
         io_concurrency=1,
-        msg="Reading doublet parents",
+        msg=msg,
     ):
         parts.append(part)
         # Concatenation may promote sparse indices to int64.
@@ -1099,11 +1111,13 @@ class DoubletProjection(Protocol):
     """Map simulated doublets to the coordinates of the cells they are scored among.
 
     ``coordinates`` is the Zarr array of the observed cells' coordinates, one
-    row of ``n_dims`` values per selected cell. :meth:`project` maps a block
-    of summed parent counts of the selected features, one doublet per row,
-    and each doublet's total, the sum of its parents' totals, to its
-    coordinates; the totals are None when the projection normalizes over the
-    selected features alone, as ``renormalize_subset`` says.
+    row of ``n_dims`` values per selected cell, or None when the observed
+    cells are mapped from their own counts as the doublets are.
+    :meth:`project` maps a block of summed parent counts of the selected
+    features, one doublet per row, and each doublet's total, the sum of its
+    parents' totals, to its coordinates; the totals are None when the
+    projection normalizes over the selected features alone, as
+    ``renormalize_subset`` says.
     """
 
     n_dims: int
@@ -1111,7 +1125,7 @@ class DoubletProjection(Protocol):
 
     @property
     def coordinates(self) -> Any:
-        """Return the Zarr array of the observed cells' coordinates."""
+        """Return the Zarr array of the observed cells' coordinates, or None."""
         ...
 
     def resident_bytes(self) -> int:
@@ -1197,26 +1211,44 @@ class PcaDoubletProjection:
         return np.asarray(project_pca(normalized, self.reference.model))
 
 
-class LsiDoubletProjection:
-    """Weight simulated doublets by TF-IDF and project them onto an LSI.
+def _unit_tfidf_rows(counts: csr_matrix, idf: NDArray[np.float64]) -> csr_matrix:
+    """Return float64 rows of counts weighted by ``idf`` and scaled to unit length.
 
-    A doublet's term frequencies are its summed counts of the selected peaks
-    over its denominator: the sum of its parents' totals, or its own total
-    over the selected peaks when the LSI's TF-IDF renormalized over them,
-    and 1 for a doublet without counts, as for a cell. They are weighted by
-    ``idf``, the inverse document frequency of each peak among the LSI's
-    cells, and multiplied by the LSI ``loadings``, without centering or
-    scaling, as the LSI coordinates of the cells are. The rows stay sparse.
+    A row's term frequencies, its counts over any positive total, give the
+    same unit-length row, so no total is needed. A row without counts stays
+    zero. The counts are left as they were.
+    """
+    values = csr_matrix(counts, dtype=np.float64, copy=True)
+    values.data *= idf[values.indices]
+    lengths = np.zeros(values.shape[0], dtype=np.float64)
+    filled = np.diff(values.indptr) > 0
+    squares = np.square(values.data)
+    lengths[filled] = np.add.reduceat(squares, values.indptr[:-1][filled])
+    del squares
+    np.sqrt(lengths, out=lengths)
+    # A row of stored zeros has no length and stays zero.
+    lengths[lengths == 0] = 1
+    values.data /= np.repeat(lengths, np.diff(values.indptr))
+    return values
+
+
+class LsiDoubletProjection:
+    """Map cells and simulated doublets onto an LSI of unit-length TF-IDF rows.
+
+    A row's counts of the selected peaks are weighted by ``idf``, the inverse
+    document frequency of each peak among the graph's cells, scaled to unit
+    Euclidean length and multiplied by the LSI ``loadings``, without
+    centering; the rows stay sparse. The scaling makes each row's term
+    frequencies, and so its total, irrelevant, so the projection normalizes
+    over the selected peaks alone. The observed cells are mapped from their
+    own counts as the doublets are, so ``coordinates`` is None.
+    :func:`fit_lsi_doublet_projection` fits the loadings.
     """
 
-    def __init__(
-        self,
-        loadings: ArrayLike,
-        idf: ArrayLike,
-        coordinates: Any,
-        *,
-        renormalize_subset: bool,
-    ) -> None:
+    renormalize_subset = True
+    coordinates = None
+
+    def __init__(self, loadings: ArrayLike, idf: ArrayLike) -> None:
         values = np.asarray(loadings, dtype=np.float64)
         weights = np.asarray(idf, dtype=np.float64)
         if values.ndim != 2 or values.shape[1] < 1:
@@ -1229,24 +1261,17 @@ class LsiDoubletProjection:
             raise ValueError(
                 "LSI loadings and inverse document frequencies must be finite"
             )
-        if len(coordinates.shape) != 2 or coordinates.shape[1] != values.shape[1]:
-            raise ValueError("LSI coordinates must hold one column per LSI dimension")
         self.loadings = np.ascontiguousarray(values)
         self.idf = weights
-        self.normalization = TfIdfFit(weights)
-        self.coordinates = coordinates
-        self.renormalize_subset = bool_argument(
-            renormalize_subset, "renormalize_subset"
-        )
         self.n_dims = int(values.shape[1])
 
     def resident_bytes(self) -> int:
         return self.loadings.nbytes + self.idf.nbytes
 
     def row_bytes(self, counts: csr_matrix) -> int:
-        # A doublet holds at most its two parents' values: their float64 term
-        # frequencies and column indices, and a copy weighted by the IDF,
-        # beside its coordinates.
+        # A doublet holds at most its two parents' values: their float64
+        # weighted values and column indices, and one float64 temporary of
+        # the weighting or scaling, beside its coordinates.
         values = 2 * int(np.diff(counts.indptr).max(initial=0))
         return values * (2 * 8 + 8) + self.n_dims * 16 + 64
 
@@ -1257,8 +1282,107 @@ class LsiDoubletProjection:
         *,
         source: str,
     ) -> NDArray[np.floating]:
-        values = normalize_rows(self.normalization, summed, denominators, source=source)
-        return np.asarray(values @ self.loadings)
+        if denominators is not None:
+            raise ValueError(
+                f"{source} normalizes over the selected peaks alone and takes no totals"
+            )
+        return np.asarray(_unit_tfidf_rows(summed, self.idf) @ self.loadings)
+
+
+def lsi_fit_positions(n_cells: int, random_seed: int) -> NDArray[np.int64]:
+    """Return the positions of the selected cells that the doublet LSI is fitted to.
+
+    Every cell when there are at most :data:`LSI_FIT_CELLS`, and otherwise
+    :data:`LSI_FIT_CELLS` of them drawn without replacement by
+    ``numpy.random.default_rng(random_seed)``, in increasing order.
+    """
+    cells = integer_argument(n_cells, "n_cells", minimum=1)
+    if cells <= LSI_FIT_CELLS:
+        return np.arange(cells, dtype=np.int64)
+    drawn = np.random.default_rng(random_seed).choice(
+        cells, LSI_FIT_CELLS, replace=False
+    )
+    return np.sort(drawn).astype(np.int64, copy=False)
+
+
+def fit_lsi_doublet_projection(
+    raw: ChunkedArray,
+    active_indices: np.ndarray,
+    feature_indices: np.ndarray,
+    idf: ArrayLike,
+    *,
+    n_components: int,
+    random_seed: int,
+    resources: ResourceBudget,
+    resident_bytes: int,
+) -> LsiDoubletProjection:
+    """Fit the LSI that an ATAC assay's cells and simulated doublets are scored on.
+
+    The LSI is an uncentered SVD of the selected cells' TF-IDF rows scaled to
+    unit length, with its first component kept. The graph's LSI skips that
+    component, which follows each cell's depth in rows that are not scaled;
+    in unit-length rows it measures how close a cell's profile is to the
+    cells' shared one, which a mixture of two profiles approaches. The cells
+    of :func:`lsi_fit_positions` are read in admitted blocks and held in
+    memory, and the streaming LSI's solver (:func:`fit_sparse_lsi`) fits
+    them on ``resources.workers`` threads, seeded by ``random_seed``.
+
+    Args:
+        raw: The assay's counts.
+        active_indices: Physical rows of the selected cells, in selection order.
+        feature_indices: Physical rows of the LSI's peaks.
+        idf: The inverse document frequency of each of those peaks among the
+            selected cells.
+        n_components: Components of the LSI, at most the number of peaks and
+            of cells fitted.
+        random_seed: The seed of the cells drawn and of the solver.
+        resources: The memory and worker budget.
+        resident_bytes: Bytes that the caller keeps meanwhile.
+
+    Returns:
+        The projection onto the fitted loadings.
+
+    Raises:
+        ValueError: If ``idf`` does not hold one finite value per peak, or
+            ``n_components`` exceeds the peaks or the cells fitted.
+        MemoryError: If the fitted cells' rows and the solver's workspace
+            exceed the memory budget.
+    """
+    weights = np.asarray(idf, dtype=np.float64)
+    if weights.shape != (len(feature_indices),) or not np.isfinite(weights).all():
+        raise ValueError(
+            "The inverse document frequencies must hold one finite value per peak"
+        )
+    positions = lsi_fit_positions(len(active_indices), random_seed)
+    resident = int(resident_bytes) + weights.nbytes + positions.nbytes
+    counts = _load_parent_counts(
+        raw,
+        np.asarray(active_indices)[positions],
+        feature_indices,
+        resources,
+        resident,
+        msg="Reading the cells that the doublet LSI is fitted to",
+    )
+    del positions
+    # The rows' float64 values and indices of at most 64 bits, and one
+    # float64 temporary of the weighting or scaling, beside the counts.
+    _admit(
+        resources,
+        block_bytes=24 * counts.nnz + 8 * (counts.shape[0] + 1),
+        resident_bytes=resident + sparse_matrix_bytes(counts),
+    )
+    rows = _unit_tfidf_rows(counts, weights)
+    del counts
+    _admit(
+        resources,
+        block_bytes=sparse_lsi_bytes(rows.shape[1], rows.shape[0], n_components),
+        resident_bytes=resident + sparse_matrix_bytes(rows),
+    )
+    with process_thread_limit(resources.workers):
+        loadings = fit_sparse_lsi(
+            rows, n_components=n_components, random_state=random_seed
+        )
+    return LsiDoubletProjection(loadings, weights)
 
 
 def _simulate_sample(
@@ -1278,15 +1402,21 @@ def _simulate_sample(
     resources: ResourceBudget,
     resident_bytes: int,
     room: _ScoringRoom | None = None,
-) -> tuple[np.ndarray, np.ndarray, float]:
+    map_cells: bool = False,
+) -> tuple[np.ndarray | None, np.ndarray, np.ndarray, float]:
     """Simulate one sample's doublets and project them with ``projection``.
 
-    Each step also waits for its bytes in ``room``, when one is given.
+    With ``map_cells``, for a projection without coordinates, the sample's
+    cells are mapped from their own counts too, so the counts of every cell
+    of the sample are read, not only those of the cells that may parent
+    doublets. Each step also waits for its bytes in ``room``, when one is
+    given.
 
     Returns:
-        The float32 coordinates of the doublets, the positions of their two
-        parents among the selected cells, and the heterotypic fraction used:
-        0 when every parent has the same cluster label.
+        The float32 coordinates of the sample's cells, or None without
+        ``map_cells``; the float32 coordinates of the doublets; the positions
+        of their two parents among the selected cells; and the heterotypic
+        fraction used: 0 when every parent has the same cluster label.
     """
     member_labels = labels[members]
     if cluster_sample_fraction >= 1 and max_cells_per_cluster is None:
@@ -1311,21 +1441,34 @@ def _simulate_sample(
     left, right = simulate_doublet_pairs(pool_labels, plan.simulated, fraction, rng)
     pool_positions = members[pool]
     parents = np.column_stack((pool_positions[left], pool_positions[right]))
-    del pool, pool_labels
+    if map_cells:
+        # The counts read are those of every cell of the sample, among which
+        # the pool's cells are at their positions in the sample.
+        rows = members
+        left, right = pool[left], pool[right]
+    else:
+        rows = pool_positions
+    del pool, pool_labels, pool_positions
     resident = resident_bytes + left.nbytes + right.nbytes + parents.nbytes
-    resident += pool_positions.nbytes
+    resident += rows.nbytes
     counts = _load_parent_counts(
         assay.rawData,
-        active_indices[pool_positions],
+        active_indices[rows],
         feature_indices,
         resources,
         resident,
         room,
     )
-    totals = None if cell_totals is None else cell_totals[pool_positions]
+    totals = None if cell_totals is None else cell_totals[rows]
     coordinates = np.empty((plan.simulated, projection.n_dims), dtype=np.float32)
+    observed = (
+        np.empty((len(rows), projection.n_dims), dtype=np.float32)
+        if map_cells
+        else None
+    )
     resident += coordinates.nbytes + sparse_matrix_bytes(counts)
     resident += 0 if totals is None else totals.nbytes
+    resident += 0 if observed is None else observed.nbytes
     row_bytes = _pair_row_bytes(counts) + projection.row_bytes(counts)
     preferred = row_band(
         array_geometry(assay.rawData._backing), unit="chunk", fallback=1_000
@@ -1333,6 +1476,7 @@ def _simulate_sample(
     batch_rows = _doublet_batch_rows(
         resources, min(preferred, plan.simulated), row_bytes, resident, room=room
     )
+    source = f"The doublet simulation of {assay.name}"
     with process_thread_limit(resources.workers):
         for start in range(0, plan.simulated, batch_rows):
             stop = min(start + batch_rows, plan.simulated)
@@ -1342,10 +1486,19 @@ def _simulate_sample(
                 simulated,
                 # A doublet's library is the libraries of its two parents.
                 None if totals is None else totals[first] + totals[second],
-                source=f"The doublet simulation of {assay.name}",
+                source=source,
             )
             del simulated
-    return coordinates, parents, fraction
+        if observed is not None:
+            # A cell holds at most the values of a doublet, so it fits a batch.
+            for start in range(0, len(rows), batch_rows):
+                stop = min(start + batch_rows, len(rows))
+                observed[start:stop] = projection.project(
+                    counts[start:stop],
+                    None if totals is None else totals[start:stop],
+                    source=source,
+                )
+    return observed, coordinates, parents, fraction
 
 
 def score_synthetic_doublets(
@@ -1377,12 +1530,13 @@ def score_synthetic_doublets(
     ``projection``, with each doublet's denominator the sum of its parents'
     ``cell_totals`` unless the projection normalizes over the selected
     features alone. The sample's observed coordinates are its rows of the
-    projection's coordinates. Each observed cell and simulated doublet is scored
-    by :func:`doublet_likelihood` on its neighbors in the sample
-    (:func:`count_simulated_neighbors`), and a cell is called a doublet when
-    its score is above the sample's threshold: ``threshold``, or the one
-    :func:`doublet_threshold` chooses from the scores of the sample's
-    simulated doublets and cells.
+    projection's coordinates or, for a projection without coordinates, its
+    cells' own counts mapped as the doublets' are. Each observed cell and
+    simulated doublet is scored by :func:`doublet_likelihood` on its
+    neighbors in the sample (:func:`count_simulated_neighbors`), and a cell
+    is called a doublet when its score is above the sample's threshold:
+    ``threshold``, or the one :func:`doublet_threshold` chooses from the
+    scores of the sample's simulated doublets and cells.
 
     Samples are scored ``resources.workers`` at a time, fewer when the memory
     budget holds fewer of the largest sample's points, index and query block
@@ -1399,8 +1553,8 @@ def score_synthetic_doublets(
         assay: The assay whose counts the parents are read from.
         projection: The map from summed counts to the coordinates of the
             selected cells: :class:`PcaDoubletProjection` for the PCA of an
-            RNA assay or :class:`LsiDoubletProjection` for the LSI of an
-            ATAC assay.
+            RNA assay or :class:`LsiDoubletProjection` for the LSI that
+            :func:`fit_lsi_doublet_projection` fits to an ATAC assay.
         active_indices: Physical rows of the selected cells, in selection order.
         labels: The cluster label of each selected cell.
         sample_codes: The sample of each selected cell, from 0 to the number of
@@ -1455,7 +1609,7 @@ def score_synthetic_doublets(
         raise ValueError("Cell totals must hold one value per selected cell")
     dims = projection.n_dims
     coordinates = projection.coordinates
-    if coordinates.shape != (n_cells, dims):
+    if coordinates is not None and coordinates.shape != (n_cells, dims):
         raise ValueError("Reference coordinates do not match the selected cells")
     n_simulated = sum(plan.simulated for plan in plans)
     resident = projection.resident_bytes() + sum(
@@ -1496,7 +1650,7 @@ def score_synthetic_doublets(
         heterotypic fraction used."""
         plan = plans[code]
         members = np.flatnonzero(codes == code)
-        simulated, parents, fraction = _simulate_sample(
+        observed, simulated, parents, fraction = _simulate_sample(
             assay,
             projection,
             np.random.default_rng(seeds[code]),
@@ -1512,7 +1666,10 @@ def score_synthetic_doublets(
             resources=resources,
             resident_bytes=resident + members.nbytes,
             room=room,
+            map_cells=coordinates is None,
         )
+        # The cells' coordinates, read or mapped, and their copy beside the
+        # doublets' in the sample's points.
         observed_bytes = plan.cells * dims * 4
         _admit(
             resources,
@@ -1520,9 +1677,10 @@ def score_synthetic_doublets(
             resident_bytes=resident + members.nbytes + simulated.nbytes,
             room=room,
         )
-        observed = np.asarray(
-            read_array_rows_chunkwise(coordinates, members), dtype=np.float32
-        )
+        if observed is None:
+            observed = np.asarray(
+                read_array_rows_chunkwise(coordinates, members), dtype=np.float32
+            )
         points = np.concatenate((observed, simulated))
         return members, points, parents, fraction
 

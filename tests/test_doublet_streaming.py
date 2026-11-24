@@ -125,7 +125,9 @@ def test_simulated_doublets_keep_every_pair_and_add_parent_libraries(
                 resident_bytes=0,
             )
         )
-    coordinates, parents, fraction = results[0]
+    observed, coordinates, parents, fraction = results[0]
+    # The cells' coordinates are the PCA's own.
+    assert observed is None
     assert coordinates.shape == (plan.simulated, 3) == (3 * len(counts), 3)
     assert coordinates.dtype == np.float32
     assert fraction == 0.0
@@ -140,7 +142,82 @@ def test_simulated_doublets_keep_every_pair_and_add_parent_libraries(
         - model.center
     ) @ model.loadings
     np.testing.assert_allclose(coordinates, expected, rtol=1e-5, atol=1e-5)
-    for repeated, repeated_parents, _ in results[1:]:
+    for _, repeated, repeated_parents, _ in results[1:]:
+        np.testing.assert_array_equal(repeated, coordinates)
+        np.testing.assert_array_equal(repeated_parents, parents)
+
+
+def test_an_lsi_projection_maps_each_cell_and_doublet_of_a_sample_from_its_counts(
+    monkeypatch,
+):
+    # Twelve cells of two clusters over nine peaks, selected in an order of
+    # their own; the sample is seven of them, and half of each cluster may
+    # parent doublets, so the parents are read among every cell of the sample.
+    rng = np.random.default_rng(29)
+    counts = rng.poisson(1.5, size=(12, 9)).astype(np.uint16)
+    counts[4] = 0
+    active = np.array([11, 3, 0, 7, 5, 9, 1, 2, 10, 4, 6, 8])
+    members = np.array([0, 2, 3, 5, 6, 8, 9])
+    labels = np.array([0, 1] * 6)
+    features = np.array([0, 2, 3, 5, 6, 8])
+    loadings = rng.normal(size=(len(features), 3))
+    idf = rng.uniform(0.5, 3.0, len(features))
+    assay = SimpleNamespace(rawData=ChunkedArray.from_numpy(counts), name="ATAC")
+    (plan,) = doublets.plan_doublet_samples(
+        [len(members)], simulation_ratio=2.0, n_neighbors=2
+    )
+
+    def unit(rows: np.ndarray) -> np.ndarray:
+        weighted = rows[:, features] * idf
+        lengths = np.linalg.norm(weighted, axis=1, keepdims=True)
+        return np.divide(
+            weighted, lengths, out=np.zeros_like(weighted), where=lengths > 0
+        )
+
+    original = doublets._doublet_batch_rows
+    results = []
+    for rows in (1, 3, 100):
+        monkeypatch.setattr(
+            doublets,
+            "_doublet_batch_rows",
+            lambda *args, rows=rows, **kwargs: min(rows, original(*args, **kwargs)),
+        )
+        results.append(
+            doublets._simulate_sample(
+                assay,
+                doublets.LsiDoubletProjection(loadings, idf),
+                np.random.default_rng(5),
+                members,
+                plan,
+                active_indices=active,
+                labels=labels,
+                feature_indices=features,
+                cell_totals=None,
+                cluster_sample_fraction=0.5,
+                max_cells_per_cluster=None,
+                heterotypic_fraction=0.0,
+                resources=ResourceBudget(1_000_000, 1),
+                resident_bytes=0,
+                map_cells=True,
+            )
+        )
+
+    observed, coordinates, parents, _fraction = results[0]
+    # The cells of the sample, in its order, and each doublet of the parents
+    # recorded, as positions among the selected cells.
+    physical = counts[active].astype(np.float64)
+    np.testing.assert_allclose(
+        observed, unit(physical[members]) @ loadings, rtol=1e-5, atol=1e-6
+    )
+    summed = physical[parents[:, 0]] + physical[parents[:, 1]]
+    np.testing.assert_allclose(
+        coordinates, unit(summed) @ loadings, rtol=1e-5, atol=1e-6
+    )
+    # Half of each cluster of the sample parents every doublet.
+    assert set(parents.ravel()) <= set(members)
+    assert len(set(parents.ravel())) <= 4
+    for repeated_observed, repeated, repeated_parents, _ in results[1:]:
+        np.testing.assert_array_equal(repeated_observed, observed)
         np.testing.assert_array_equal(repeated, coordinates)
         np.testing.assert_array_equal(repeated_parents, parents)
 

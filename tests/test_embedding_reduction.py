@@ -6,6 +6,7 @@ import warnings
 import numpy as np
 import pytest
 import scipy.linalg
+import scipy.sparse
 from scipy.linalg import subspace_angles
 from sklearn.decomposition import TruncatedSVD
 
@@ -15,8 +16,10 @@ from cytearc.embeddings.reduction import (
     _streaming_lsi_resident_bytes,
     fit_lsi,
     fit_pca,
+    fit_sparse_lsi,
     lsi_settings,
     pca_solver,
+    sparse_lsi_bytes,
 )
 from cytearc.matrix import ChunkedArray
 from cytearc.storage.budget import ResourceBudget
@@ -638,6 +641,7 @@ import sys
 import numpy as np
 # Loads scipy's BLAS, so the check below sees it.
 import scipy.linalg
+import scipy.sparse
 from threadpoolctl import threadpool_info
 
 from cytearc.embeddings.reduction import fit_pca
@@ -948,6 +952,65 @@ def test_streaming_lsi_reserves_accumulators_and_block_temporaries():
     expected = _streaming_lsi_resident_bytes(data, width=6)
     assert data.resident_bytes == [expected, expected, expected]
     assert expected + data._block_owned_bytes() <= resources.memoryBytes
+
+
+def test_sparse_lsi_is_the_streaming_solver_on_rows_in_memory():
+    rng = np.random.default_rng(19)
+    left, _ = np.linalg.qr(rng.normal(size=(60, 5)))
+    right, _ = np.linalg.qr(rng.normal(size=(20, 5)))
+    values = left @ np.diag([20.0, 12.0, 7.0, 3.0, 1.0]) @ right.T
+    values += 0.05 * rng.normal(size=values.shape)
+    values[values < 0.1] = 0
+
+    observed = fit_sparse_lsi(
+        scipy.sparse.csr_matrix(values), n_components=4, random_state=11
+    )
+
+    # The leading right singular vectors of the rows, each with its largest
+    # entry positive.
+    _, _, right_vectors = np.linalg.svd(values, full_matrices=False)
+    expected = right_vectors[:4].T
+    largest = np.argmax(np.abs(expected), axis=0)
+    expected *= np.sign(expected[largest, np.arange(4)])
+    np.testing.assert_allclose(observed, expected, rtol=0, atol=1e-9)
+    # The streaming LSI's solver at its defaults, which reads the same rows
+    # in blocks, and dense rows give the same loadings.
+    streamed = fit_lsi(
+        ChunkedArray.from_numpy(values, block_size=7),
+        dims=4,
+        skip_first=False,
+        params={},
+        random_state=11,
+        nthreads=1,
+    )
+    np.testing.assert_allclose(observed, streamed, rtol=0, atol=1e-12)
+    np.testing.assert_allclose(
+        fit_sparse_lsi(values, n_components=4, random_state=11),
+        observed,
+        rtol=0,
+        atol=1e-12,
+    )
+
+
+def test_sparse_lsi_refuses_more_components_than_its_rows_hold_and_values_not_finite():
+    values = np.ones((6, 4))
+
+    with pytest.raises(
+        ValueError, match="6 rows of 4 features has at most 4 components, not 5"
+    ):
+        fit_sparse_lsi(values, n_components=5, random_state=0)
+    with pytest.raises(ValueError, match="n_components must be at least 1"):
+        fit_sparse_lsi(values, n_components=0, random_state=0)
+    values[2, 1] = np.inf
+    with pytest.raises(ValueError, match="only finite values"):
+        fit_sparse_lsi(scipy.sparse.csr_matrix(values), n_components=2, random_state=0)
+
+
+def test_sparse_lsi_bytes_count_its_bases_and_products_by_hand():
+    # 100 features and 3 components fit a basis of 3 + 10 columns: three
+    # float64 copies of it, two 13 x 13 matrices, and two products of the
+    # 7 rows with it.
+    assert sparse_lsi_bytes(100, 7, 3) == (3 * 100 * 13 + 2 * 13 * 13 + 2 * 7 * 13) * 8
 
 
 def test_materialized_lsi_preserves_sklearn_compatibility():
