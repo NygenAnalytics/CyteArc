@@ -110,13 +110,17 @@ _MEASURED_TOTALS = "The totals over the genes that every source of the cells mea
 def _band_totals_kernel(
     values: np.ndarray, value_rows: np.ndarray, local: np.ndarray, out: np.ndarray
 ) -> None:
-    """Write each selected cell's sum of the rows ``value_rows`` of ``values`` into ``out``."""
+    """Write each selected cell's sum of the rows ``value_rows`` of ``values`` into ``out``.
+
+    Each row is read along its cells, as the band stores it, and adds to
+    each cell's total in the order of ``value_rows``.
+    """
     for cell in range(local.shape[0]):
-        column = local[cell]
-        total = 0.0
-        for k in range(value_rows.shape[0]):
-            total += np.float64(values[value_rows[k], column])
-        out[cell] = total
+        out[cell] = 0.0
+    for k in range(value_rows.shape[0]):
+        row = value_rows[k]
+        for cell in range(local.shape[0]):
+            out[cell] += np.float64(values[row, local[cell]])
 
 
 @njit(cache=True, nogil=True)
@@ -472,7 +476,8 @@ def grouped_moments(
         library_size: Whether to summarize library-size normalized values.
         totals: Each selected cell's total, in place of its prepared total,
             such as its total over the features that every source of a
-            merged store measured.
+            merged store measured. A float64 array is overwritten with the
+            inverse totals, so the caller holds no second copy.
 
     Returns:
         The statistics, each with a row per batch and a column per feature.
@@ -493,7 +498,7 @@ def grouped_moments(
                 copy=False,
             )
             if totals is None
-            else library_size_divisors(totals, source=_MEASURED_TOTALS)
+            else library_size_divisors(totals, source=_MEASURED_TOTALS, copy=False)
         )
         np.reciprocal(inverse_totals, out=inverse_totals)
     else:

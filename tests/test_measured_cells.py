@@ -3547,24 +3547,28 @@ def test_hvgs_leave_out_genes_that_a_source_of_their_cells_did_not_measure(
         )
 
 
+@pytest.mark.parametrize("batch", [None, "study"])
 def test_hvgs_of_another_normalizer_take_the_measured_genes_totals(
-    rna_sources, tmp_path
+    rna_sources, tmp_path, batch
 ) -> None:
     from cytearc.assay.normalization import norm_lib_size_log
     from cytearc.storage.artifacts import callable_identity
 
     # The cytearc flavor of a normalizer other than norm_lib_size normalizes
     # over each cell's total of the shared genes, as the intersection merge
-    # normalizes its own genes. Copies keep these selections from the stores
-    # that other tests select from.
+    # normalizes its own genes, in one batch or in each source's. Copies keep
+    # these selections from the stores that other tests select from.
     store = rna_sources.copy(tmp_path)
     intersection = rna_sources.copy(tmp_path, "intersection")
     store.RNA.normMethod = norm_lib_size_log
     intersection.RNA.normMethod = norm_lib_size_log
+    options = {**_HVG_OPTIONS, "batch": batch}
     with pytest.warns(UserWarning, match="features.hvgs leaves out 40 genes"):
-        ref = store.features.hvgs(store.snapshot_cell_selection("I"), **_HVG_OPTIONS)
+        ref = store.features.hvgs(store.snapshot_cell_selection("I"), **options)
+    # A batch-aware selection of the intersection merge records no normalizer,
+    # so it is computed again rather than taken from the copied store.
     expected = intersection.features.hvgs(
-        intersection.snapshot_cell_selection("I"), **_HVG_OPTIONS
+        intersection.snapshot_cell_selection("I"), invalidate_cache=True, **options
     )
     # The selection records the normalizer, so it is not the library-size
     # selection of the same cells, which the stores may already hold.
