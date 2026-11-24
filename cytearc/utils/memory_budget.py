@@ -15,6 +15,7 @@ tables.
 """
 
 import sys
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -25,6 +26,7 @@ __all__ = [
     "fixed_text_bytes",
     "hash_table_bytes",
     "held_array_bytes",
+    "least_admitted_budget",
     "memory_refusal",
     "object_array_bytes",
     "python_text_bytes",
@@ -287,6 +289,48 @@ def fixed_text_bytes(n_values: int, width: int) -> int:
 def object_array_bytes(n_values: int) -> int:
     """Return the bytes of an object array's references to ``n_values`` values, beside the values."""
     return 8 * int(n_values)
+
+
+# The most times that a step's named need is raised before its refusal is
+# passed on: a need that grows with its budget passes within a few.
+_ADMISSION_CLIMBS = 64
+
+
+def least_admitted_budget(
+    admit: Callable[[int], object], refused: MemoryBudgetError
+) -> int:
+    """Return the least budget at which ``admit`` passes a step that it ``refused``.
+
+    ``admit(budget)`` checks the step at ``budget``, planning it but running
+    nothing, and raises :class:`MemoryBudgetError` for a budget that it
+    refuses. A step whose need grows with its budget, as shares of the
+    budget do, can refuse the budget that its refusal names: the budget is
+    raised to each larger need that a refusal names until the step passes.
+    The least budget that passes, above the refused one, is then found by
+    bisection.
+
+    A step that refuses each need that it names, 64 times over, keeps the
+    need that its refusal named, as one that passes at no budget would.
+    """
+    low, high = int(refused.budget_bytes), int(refused.needed_bytes)
+    for _ in range(_ADMISSION_CLIMBS):
+        try:
+            admit(high)
+        except MemoryBudgetError as error:
+            low, high = high, max(int(error.needed_bytes), high + 1)
+        else:
+            break
+    else:
+        return int(refused.needed_bytes)
+    while high - low > 1:
+        middle = (low + high) // 2
+        try:
+            admit(middle)
+        except MemoryBudgetError:
+            low = middle
+        else:
+            high = middle
+    return high
 
 
 def held_array_bytes(values: np.ndarray) -> int:

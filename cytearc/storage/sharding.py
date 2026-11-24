@@ -49,7 +49,11 @@ from ..utils.arrays import (
     sparse_matrix_bytes,
 )
 from ..utils.logging import logger
-from ..utils.memory_budget import MemoryBudgetError, refusal_words
+from ..utils.memory_budget import (
+    MemoryBudgetError,
+    least_admitted_budget,
+    refusal_words,
+)
 
 if TYPE_CHECKING:
     from .identity import CountSummary
@@ -1855,9 +1859,9 @@ def fit_count_layout(
         MemoryBudgetError: If ``requested`` is None and nothing fits, not even
             count shards of one row.
     """
-    resources = ResourceBudget(int(memoryBytes), 1)
 
-    def admit(policy: CountMatrixPolicy) -> None:
+    def admit(policy: CountMatrixPolicy, budget: int = int(memoryBytes)) -> None:
+        resources = ResourceBudget(int(budget), 1)
         plans = {
             name: plan_count_matrix_pair(
                 nCells, width, dtype, policy=policy, profile=profile
@@ -1874,6 +1878,14 @@ def fit_count_layout(
                 policy=policy,
             )
 
+    def least_budget(policy: CountMatrixPolicy, error: MemoryBudgetError) -> int:
+        """Return the least budget that writes ``policy``, which ``error`` refused.
+
+        The writes' shares grow with the budget, so the need that a refusal
+        names can be refused again.
+        """
+        return least_admitted_budget(lambda budget: admit(policy, budget), error)
+
     row_bytes = max(
         [1, *(width * np.dtype(dtype).itemsize for width, dtype in assays.values())]
     )
@@ -1885,12 +1897,13 @@ def fit_count_layout(
                 admit(policy)
             except MemoryBudgetError as error:
                 if policy.unitBytes < 2 * row_bytes:
+                    needed = least_budget(policy, error)
                     raise MemoryBudgetError(
                         f"{subject} does not fit mem_budget even with count "
                         f"shards of one row. Increase mem_budget. "
                         f"{refusal_words(error).rstrip('.')}. It needs at least "
-                        f"{error.needed_bytes} bytes.",
-                        needed_bytes=error.needed_bytes,
+                        f"{needed} bytes.",
+                        needed_bytes=needed,
                         budget_bytes=int(memoryBytes),
                         item="count shards of one row",
                     ) from error
@@ -1921,12 +1934,13 @@ def fit_count_layout(
             kind = (
                 "default" if requested == DEFAULT_COUNT_MATRIX_POLICY else "requested"
             )
+            needed = least_budget(requested, error)
             raise CountLayoutMemoryError(
                 f"The {kind} count-matrix policy (unitBytes={requested.unitBytes}, "
                 f"chunkBytes={requested.chunkBytes}) does not fit mem_budget. "
                 f"{refusal_words(error).rstrip('.')}. {advice} It needs at least "
-                f"{error.needed_bytes} bytes.",
-                needed_bytes=error.needed_bytes,
+                f"{needed} bytes.",
+                needed_bytes=needed,
                 budget_bytes=int(memoryBytes),
                 item=f"the {kind} count-matrix policy",
                 fittingPolicy=smaller,

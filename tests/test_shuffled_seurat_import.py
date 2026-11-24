@@ -874,6 +874,64 @@ def test_a_seurat_import_charges_its_counts_t_write_with_its_sources(
     assert set(charged) == {held}
 
 
+def test_a_shuffled_import_names_the_least_budget_of_its_count_layout(
+    tmp_path,
+) -> None:
+    from tests.test_memory_refusals import named_budget_runs
+
+    source = _write_object(tmp_path / "object.rds", n_cells=3)
+    attempts = iter(range(100))
+    layout = "the default count-matrix policy"
+
+    def refusal(budget: int) -> MemoryBudgetError | None:
+        with SeuratReader(source, temp_dir=tmp_path) as reader:
+            try:
+                SeuratToZarr(
+                    reader,
+                    str(tmp_path / f"store-{next(attempts)}.zarr"),
+                    mem_budget=budget,
+                    nthreads=1,
+                    shuffle_cells=True,
+                )
+            except MemoryBudgetError as error:
+                return error
+        return None
+
+    def at_budget(budget: int) -> None:
+        refused = refusal(budget)
+        if refused is not None and refused.item == layout:
+            raise refused
+
+    # The refusals of the earlier steps lead from 900 bytes to the layout's.
+    budget = 900
+    refused = refusal(budget)
+    while refused is not None and refused.item != layout:
+        budget = refused.needed_bytes
+        refused = refusal(budget)
+    # The layout's writes take shares that grow with the budget, so the need
+    # computed at the refused budget is refused again at itself; the refusal
+    # names the least budget that writes the layout.
+    named_budget_runs(at_budget, budget, item=layout)
+
+
+def test_a_source_preparation_names_the_least_budget_that_prepares_one_cell(
+    tmp_path,
+) -> None:
+    from tests.test_memory_refusals import named_budget_runs
+
+    source = _write_object(tmp_path / "object.rds", n_cells=40)
+    with SeuratReader(source, temp_dir=tmp_path) as reader:
+
+        def prepare(budget: int) -> None:
+            reader._prepare_assay("RNA", max_bytes=budget)
+
+        # RNA's sources hold no resident data, and one cell's block grows with
+        # the limit that the budget sets, so the need computed at a refused
+        # budget can be refused again. The refusal names the least budget
+        # that prepares one cell.
+        named_budget_runs(prepare, 1, item="preparing one cell of a Seurat source")
+
+
 def test_a_budget_without_room_for_the_shuffle_is_refused_before_it_runs(
     tmp_path, monkeypatch
 ) -> None:

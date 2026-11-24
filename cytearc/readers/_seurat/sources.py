@@ -19,7 +19,11 @@ from .errors import MatrixSourceError, ResourceLimitError
 from .values import decode_text_values, read_window
 from .._sparse import ROW_BYTES, SparseRowStore
 from ...utils.arrays import cumulative_nnz, has_duplicates
-from ...utils.memory_budget import MemoryBudgetError, refusal_words
+from ...utils.memory_budget import (
+    MemoryBudgetError,
+    least_admitted_budget,
+    refusal_words,
+)
 
 
 type MatrixBlock = NDArray[Any] | coo_matrix | csr_matrix
@@ -196,15 +200,27 @@ def prepare_matrix_sources(source: MatrixSource, max_bytes: int | None = None) -
                 limits, maxBlockBytes=min(limits.maxBlockBytes, available)
             )
             try:
-                estimate = current.estimate_read_memory(0, min(1, current.n_cells))
-                if estimate.blockBytes > available:
-                    needed = source.resident_bytes + estimate.blockBytes
+                one_cell = _one_cell_refusal(source, current, limits, int(max_bytes))
+                if one_cell is not None:
+                    # One cell's block grows with the limit that the budget
+                    # sets, so the need that the refusal names can be refused
+                    # again.
+                    def admit(
+                        budget: int,
+                        current: BaseMatrixSource = current,
+                        limits: SourceLimits = limits,
+                    ) -> None:
+                        found = _one_cell_refusal(source, current, limits, budget)
+                        if found is not None:
+                            raise found
+
+                    needed = least_admitted_budget(admit, one_cell)
                     raise MemoryBudgetError(
                         "Seurat source preparation exceeds mem_budget. It needs "
                         f"at least {needed} bytes.",
                         needed_bytes=needed,
                         budget_bytes=int(max_bytes),
-                        item="preparing one cell of a Seurat source",
+                        item=one_cell.item,
                     )
                 current._prepare_for_read()
             except ResourceLimitError as error:
@@ -216,6 +232,39 @@ def prepare_matrix_sources(source: MatrixSource, max_bytes: int | None = None) -
                 raise refusal from error
         finally:
             current._limits = limits
+
+
+def _one_cell_refusal(
+    source: MatrixSource,
+    current: "BaseMatrixSource",
+    limits: "SourceLimits",
+    max_bytes: int,
+) -> MemoryBudgetError | None:
+    """Return the refusal of preparing one cell of ``current`` within ``max_bytes``, or None.
+
+    The block of one cell is estimated with the block limit that the budget
+    sets beside the sources' resident data, within the configured
+    ``limits``, and the source keeps the limits it had.
+    """
+    available = max_bytes - source.resident_bytes
+    previous = current._limits
+    current._limits = replace(
+        limits, maxBlockBytes=min(limits.maxBlockBytes, max(1, available))
+    )
+    try:
+        estimate = current.estimate_read_memory(0, min(1, current.n_cells))
+    finally:
+        current._limits = previous
+    if estimate.blockBytes <= available:
+        return None
+    needed = source.resident_bytes + estimate.blockBytes
+    return MemoryBudgetError(
+        "Seurat source preparation exceeds mem_budget. It needs at least "
+        f"{needed} bytes.",
+        needed_bytes=needed,
+        budget_bytes=int(max_bytes),
+        item="preparing one cell of a Seurat source",
+    )
 
 
 def _budget_block_refusal(

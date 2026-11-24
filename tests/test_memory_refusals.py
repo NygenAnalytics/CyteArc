@@ -158,6 +158,77 @@ def named_budget_runs(
     return refusal
 
 
+def _growing_step(base: int, share: int) -> Callable[[int], None]:
+    """Return a step that needs ``base`` bytes and a ``share``-th of its budget beside them."""
+
+    def admit(budget: int) -> None:
+        needed = base + budget // share
+        if needed > budget:
+            raise MemoryBudgetError(
+                "The step does not fit.",
+                needed_bytes=needed,
+                budget_bytes=budget,
+                item="the step",
+            )
+
+    return admit
+
+
+def test_the_least_admitted_budget_climbs_past_needs_that_grow_with_the_budget() -> (
+    None
+):
+    from cytearc.utils.memory_budget import least_admitted_budget
+
+    # A step that needs 1,000 bytes and a quarter of its budget refuses 1,000
+    # bytes naming 1,250, which it refuses naming 1,312, and so on; it passes
+    # from 1,333 bytes, whose quarter, 333, leaves 1,000, and refuses 1,332.
+    admit = _growing_step(1_000, 4)
+    with pytest.raises(MemoryBudgetError) as first:
+        admit(1_000)
+    assert first.value.needed_bytes == 1_250
+    assert least_admitted_budget(admit, first.value) == 1_333
+    admit(1_333)
+    with pytest.raises(MemoryBudgetError):
+        admit(1_332)
+
+
+def test_the_least_admitted_budget_bisects_below_a_need_that_shrinks_with_the_budget() -> (
+    None
+):
+    from cytearc.utils.memory_budget import least_admitted_budget
+
+    # A step that needs 3,000 bytes less a tenth of its budget passes from
+    # 2,728 bytes, where 3,000 less 272 leaves 2,728, below the 2,900 that
+    # it names at 1,000 bytes.
+    def admit(budget: int) -> None:
+        needed = 3_000 - budget // 10
+        if needed > budget:
+            raise MemoryBudgetError(
+                "The step does not fit.",
+                needed_bytes=needed,
+                budget_bytes=budget,
+                item="the step",
+            )
+
+    with pytest.raises(MemoryBudgetError) as first:
+        admit(1_000)
+    assert first.value.needed_bytes == 2_900
+    assert least_admitted_budget(admit, first.value) == 2_728
+
+
+def test_the_least_admitted_budget_of_a_step_that_never_passes_is_its_first_need() -> (
+    None
+):
+    from cytearc.utils.memory_budget import least_admitted_budget
+
+    # A step that needs its budget and a byte more refuses each need that it
+    # names, so it keeps the one that it named first.
+    admit = _growing_step(1, 1)
+    with pytest.raises(MemoryBudgetError) as first:
+        admit(10)
+    assert least_admitted_budget(admit, first.value) == first.value.needed_bytes == 11
+
+
 # The storage planner.
 
 
