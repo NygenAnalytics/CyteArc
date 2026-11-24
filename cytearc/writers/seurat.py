@@ -1485,13 +1485,19 @@ class SeuratToZarr:
                     scan = rows * n_features * (itemsize + 2)
                 return held + scan
 
+            def sent_bytes(spill: RowSpillPlan, rows: int) -> int:
+                return read_bytes(rows) + spill.batch_bytes(read_peaks(rows)[1])
+
+            def one_cell(spill: RowSpillPlan) -> int:
+                # A budget must read one cell and send it to its bucket. One
+                # that reads and sends every cell at once does, which spares
+                # an estimate of each cell's read.
+                if sent_bytes(spill, n_cells) <= spill.maxBytes:
+                    return 0
+                return sent_bytes(spill, 1)
+
             def planned(budget: int) -> RowSpillPlan:
-                # A budget must read one cell and send it to its bucket.
-                return self._row_spill_plan(
-                    source,
-                    budget,
-                    lambda spill: read_bytes(1) + spill.batch_bytes(read_peaks(1)[1]),
-                )
+                return self._row_spill_plan(source, budget, one_cell)
 
             # A shuffled import also sends each block to its rows' buckets.
             plan = None

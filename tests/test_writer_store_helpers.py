@@ -33,11 +33,11 @@ def _third_missing(n_rows: int) -> np.ndarray:
         # copies dwarf what else the write holds.
         (np.full(20_000, "n" * 200), _third_missing(20_000)),
         (np.full(20_000, "n" * 200), np.zeros(20_000, dtype=bool)),
-        # Narrow text, numbers and flags.
-        (np.full(200_000, "ab"), _third_missing(200_000)),
-        (np.arange(200_000, dtype=np.float64), _third_missing(200_000)),
-        (np.arange(200_000, dtype=np.float64), np.zeros(200_000, dtype=bool)),
-        (np.arange(200_000) % 2 == 0, np.zeros(200_000, dtype=bool)),
+        # Narrow text, numbers and flags, each a stored chunk of 100,000 rows.
+        (np.full(100_000, "ab"), _third_missing(100_000)),
+        (np.arange(100_000, dtype=np.float64), _third_missing(100_000)),
+        (np.arange(100_000, dtype=np.float64), np.zeros(100_000, dtype=bool)),
+        (np.arange(100_000) % 2 == 0, np.zeros(100_000, dtype=bool)),
     ],
     ids=["text", "text-none-missing", "narrow", "float", "float-none-missing", "flags"],
 )
@@ -50,17 +50,18 @@ def test_a_column_write_holds_what_its_size_helper_charges(values, missing) -> N
         lambda _ledger: write_metadata_column(_group(), "column", values, missing)
     ).held
     # Beside the column and its mask, which the caller holds, the write holds
-    # the charge, within Zarr's objects of the new array and of its writes,
-    # which the charge leaves out.
-    zarr_objects = 64 * 1024
-    assert charge - zarr_objects <= held <= charge + zarr_objects
+    # the charge, within what the charge leaves out: Zarr's objects of the
+    # new array and of its writes, about 40 KB, and what a coverage tracer
+    # records of the lines that the write runs.
+    left_out = 128 * 1024
+    assert charge - left_out <= held <= charge + left_out
 
 
 def test_a_column_of_blank_text_holds_less_than_the_charge_of_missing_rows() -> None:
     # Text that is missing in every row has no present values to copy, so
     # its write holds less than the charge, which counts them.
-    values, missing = np.full(200_000, ""), np.ones(200_000, dtype=bool)
-    charge = metadata_column_write_bytes(200_000, 4, missing=True)
+    values, missing = np.full(100_000, ""), np.ones(100_000, dtype=bool)
+    charge = metadata_column_write_bytes(100_000, 4, missing=True)
     held = traced_charge(
         lambda _ledger: write_metadata_column(_group(), "column", values, missing)
     ).held

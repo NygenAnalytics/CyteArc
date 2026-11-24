@@ -1044,6 +1044,28 @@ def test_a_budget_without_room_for_the_shuffle_is_refused_before_it_runs(
     assert _no_temporary_files(tmp_path)
 
 
+def test_a_10x_import_beside_a_reader_that_reports_no_arrays_names_only_its_order(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(CrH5Reader, "_sparse_import_resident_bytes", lambda _: 0)
+    run, expected = _source(tmp_path, "10x-cutoff")
+    cells = next(iter(expected.values())).shape[0]
+    # In the file's order the import holds nothing beside the scan, so its
+    # refusal is the reader's own.
+    with pytest.raises(MemoryBudgetError) as plain:
+        run(tmp_path / "plain.zarr", {"shuffle_cells": False, "mem_budget": 1})
+    assert plain.value.item.endswith("values of the longest compressed vector")
+    # Shuffled, the spill runs beside the order and its inverse alone, 8
+    # bytes a cell each, at the budget that the shuffle names, 24 bytes a cell.
+    with pytest.raises(MemoryBudgetError) as shuffled:
+        _spill_attempts(tmp_path, run)(24 * cells)
+    assert shuffled.value.item == (
+        f"the row spill of a cell shuffle beside the {16 * cells} bytes of its "
+        "cell order"
+    )
+    assert _no_temporary_files(tmp_path)
+
+
 def test_a_shuffled_10x_import_of_many_cells_names_the_least_budget_of_its_spill(
     tmp_path,
 ) -> None:
