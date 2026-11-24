@@ -1,6 +1,7 @@
 """Offline tests for the cached, rate-limit-aware Hugging Face store reader."""
 
 import asyncio
+import concurrent.futures
 import json
 import re
 import socket
@@ -297,7 +298,7 @@ def test_read_store_handles_failure_after_its_reader_is_cancelled(
         store.close()
 
 
-def test_a_fetch_that_fails_after_a_close_keeps_the_fetch_that_followed_it(
+def test_a_close_stops_the_fetch_in_flight_and_keeps_the_fetch_after_it(
     tmp_path, monkeypatch
 ):
     calls = []
@@ -306,31 +307,29 @@ def test_a_fetch_that_fails_after_a_close_keeps_the_fetch_that_followed_it(
 
     async def check():
         started = [asyncio.Event(), asyncio.Event()]
-        release = [asyncio.Event(), asyncio.Event()]
+        release = asyncio.Event()
 
         async def read(self, key, prototype, byte_range=None):
             calls.append(key)
-            fetch = len(calls) - 1
-            started[fetch].set()
-            await release[fetch].wait()
-            if fetch == 0:
-                raise OSError("The first transfer failed")
+            started[len(calls) - 1].set()
+            await release.wait()
             return prototype.buffer.from_bytes(b"metadata")
 
         monkeypatch.setattr(FsspecStore, "get", read)
         before = asyncio.create_task(store.get("zarr.json", prototype))
         await asyncio.wait_for(started[0].wait(), timeout=5)
-        # Closing forgets the fetch in flight, so the next reader starts its
-        # own, which the readers after it share.
+        # Closing stops the fetch in flight, so the next reader starts its own,
+        # which the readers after it share.
         store.close()
         after = asyncio.create_task(store.get("zarr.json", prototype))
         await asyncio.wait_for(started[1].wait(), timeout=5)
-        release[0].set()
-        with pytest.raises(OSError, match="The first transfer failed"):
-            await before
-        release[1].set()
+        # The reader of the stopped fetch stops, whether that fetch settles
+        # before or after the next one starts.
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(before, timeout=5)
+        release.set()
         assert (await after).to_bytes() == b"metadata"
-        # The failed fetch did not drop the one that replaced it.
+        # The stopped fetch did not drop the one that replaced it.
         assert (await store.get("zarr.json", prototype)).to_bytes() == b"metadata"
 
     try:
@@ -338,6 +337,27 @@ def test_a_fetch_that_fails_after_a_close_keeps_the_fetch_that_followed_it(
         assert calls == ["zarr.json", "zarr.json"]
     finally:
         store.close()
+
+
+def test_a_close_skips_a_fetch_whose_event_loop_closed(tmp_path, monkeypatch):
+    # An event loop that closes before its fetch ends runs that fetch no
+    # more, so the close leaves it, rather than raise for the closed loop.
+    prototype = default_buffer_prototype()
+    store = huggingface.HfReadStore.from_url(str(tmp_path), read_only=True)
+    started = threading.Event()
+
+    async def read_metadata(self, key, prototype):
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(huggingface.HfReadStore, "_read_metadata", read_metadata)
+    loop = asyncio.new_event_loop()
+    reader = loop.create_task(store.get("zarr.json", prototype))
+    while not started.is_set():
+        loop.run_until_complete(asyncio.sleep(0))
+    loop.close()
+    store.close()
+    assert not reader.done()
 
 
 @pytest.mark.parametrize(
@@ -836,7 +856,7 @@ def test_a_writable_store_sends_its_requests_on_the_host_threads(
     requests: list[tuple[str, int | None]] = []
 
     with recorded_codec_pools(host_threads=4) as pools:
-        for name in ("_file_entry", "_read_file", "_list_store", "_list_folder"):
+        for name in ("_file_entry", "_read_file", "_resolved_path", "_tree_page"):
             send = getattr(huggingface, name)
 
             def recorded(*args, name=name, send=send):
@@ -863,12 +883,12 @@ def test_a_writable_store_sends_its_requests_on_the_host_threads(
         ["0", "1"],
     )
     # The requests wait on the network, so they run on the host's four threads.
+    # Each listing looks its folder up and then asks for its one page.
     assert requests == [
         ("_file_entry", 4),
         ("_read_file", 4),
         ("_file_entry", 4),
-        ("_list_store", 4),
-        ("_list_folder", 4),
+        *[("_resolved_path", 4), ("_tree_page", 4)] * 2,
     ]
 
 
@@ -1120,22 +1140,109 @@ def test_writable_store_lists_every_page_of_a_listing(loopback_hub, uri):
     assert _tree_pages(loopback_hub) == [*map(str, range(entries)), "0", "1"]
 
 
-def test_read_store_lists_again_from_the_first_page_after_a_page_fails(
-    loopback_hub, monkeypatch
+@pytest.mark.parametrize("read_only", [True, False])
+def test_a_listing_asks_again_only_for_the_page_that_failed(
+    loopback_hub, monkeypatch, read_only
 ):
-    store = _loopback_store(loopback_hub)
-    loopback_hub.page_size = 2
-    loopback_hub.plan["tree"] = ["serve", 503]
+    store = _loopback_store(loopback_hub, read_only=read_only)
+    loopback_hub.page_size = 1
+    # The third page fails twice and the fourth is rate limited once.
+    loopback_hub.plan["tree"] = [
+        "serve",
+        "serve",
+        503,
+        503,
+        "serve",
+        (429, {"Retry-After": "7"}),
+    ]
     sleeps = _record_sleeps(monkeypatch)
     try:
-        values = zarr.open_array(store=store, mode="r")[:]
+        keys = sync(_names(store.list()), timeout=GUARD_SECONDS)
     finally:
         store.close()
-    np.testing.assert_array_equal(values, np.arange(64).reshape(8, 8))
-    # The second of three pages fails, and the store's next attempt lists all
-    # three, as huggingface_hub's retry of the one page would not.
-    assert sleeps == [2.0]
-    assert _tree_pages(loopback_hub) == ["0", "2", "0", "2", "4"]
+    published = loopback_hub.root / "data.zarr"
+    assert keys == sorted(
+        path.relative_to(published).as_posix()
+        for path in published.rglob("*")
+        if path.is_file()
+    )
+    # Each failed page is asked for again after the store's waits, of 2 and
+    # 4 s and of the 7 s that the rate limit asks, and every other page once.
+    assert sleeps == [2.0, 4.0, 7.0]
+    assert _tree_pages(loopback_hub) == ["0", "1", "2", "2", "2", "3", "3", "4"]
+
+
+@pytest.mark.parametrize("read_only", [True, False])
+def test_a_listing_names_the_page_whose_retries_ran_out(
+    loopback_hub, monkeypatch, read_only
+):
+    store = _loopback_store(loopback_hub, read_only=read_only, retry_timeout=30)
+    loopback_hub.page_size = 1
+    loopback_hub.plan["tree"] = ["serve", "serve", *[503] * 10]
+    sleeps = _record_sleeps(monkeypatch)
+    try:
+        with pytest.raises(TimeoutError) as raised:
+            sync(_names(store.list()), timeout=GUARD_SECONDS)
+    finally:
+        store.close()
+    # The third page has the store's 30 s: waits of 2, 4, 8 and 16 s, and a
+    # fifth, of 32 s, would end past them.
+    assert str(raised.value).startswith(
+        f"Listing {LOOPBACK_URI} at page 3 did not succeed within 30 s: 5 "
+        "attempts failed, the last with HTTP 503."
+    )
+    assert sleeps == [2.0, 4.0, 8.0, 16.0]
+    assert _tree_pages(loopback_hub) == ["0", "1", *["2"] * 5]
+
+
+@pytest.mark.parametrize("read_only", [True, False])
+def test_a_listing_longer_than_an_attempt_completes_an_attempt_a_page(
+    loopback_hub, monkeypatch, read_only
+):
+    # Each of the store's six pages takes 0.25 s, so its listing takes 1.5 s,
+    # half again the store's attempt of 1 s, which each page fits by 0.75 s.
+    # The attempt cannot be retried, since a retry would wait past its 1 s.
+    store = _loopback_store(
+        loopback_hub, read_only=read_only, request_timeout=1, retry_timeout=1
+    )
+    (loopback_hub.root / "data.zarr" / "notes").write_bytes(b"x")
+    loopback_hub.page_size = 1
+    serve = _LoopbackHandler.do_GET
+
+    def slow_page(handler):
+        if "/tree" in urlsplit(handler.path).path:
+            time.sleep(0.25)
+        serve(handler)
+
+    monkeypatch.setattr(_LoopbackHandler, "do_GET", slow_page)
+    started = time.monotonic()
+    try:
+        keys = sync(_names(store.list()), timeout=GUARD_SECONDS)
+    finally:
+        store.close()
+    published = loopback_hub.root / "data.zarr"
+    assert keys == sorted(
+        path.relative_to(published).as_posix()
+        for path in published.rglob("*")
+        if path.is_file()
+    )
+    assert time.monotonic() - started >= 1.5
+    assert _tree_pages(loopback_hub) == ["0", "1", "2", "3", "4", "5"]
+
+
+def _listed_entries(store, resolved, path, *, recursive):
+    """Return the entries of each page of the store's listing of the folder at ``path``."""
+
+    async def entries():
+        return [
+            entry
+            async for page in store._tree_pages(
+                store._hf_fs(), "Listing", resolved, path, recursive=recursive
+            )
+            for entry in page
+        ]
+
+    return sync(entries(), timeout=GUARD_SECONDS)
 
 
 @pytest.mark.parametrize("uri", [LOOPBACK_URI, REPOSITORY_URI])
@@ -1146,19 +1253,16 @@ def test_a_listing_sends_each_page_as_huggingface_hub_does(
     # The store lists a tree without huggingface_hub's retries, so each page
     # it requests is compared with what huggingface_hub's listing of the same
     # folder requests.
-    _loopback_store(loopback_hub).close()
+    store = _loopback_store(loopback_hub, uri=uri, token="hf_test")
     loopback_hub.page_size = 1
-    fs = huggingface.HfFileSystem(
-        endpoint=loopback_hub.endpoint, token="hf_test", skip_instance_cache=True
-    )
-    resolved = fs.resolve_path(f"{uri.removeprefix('hf://')}/c")
+    resolved = store._hf_fs().resolve_path(f"{uri.removeprefix('hf://')}/c")
     api = HfApi(endpoint=loopback_hub.endpoint, token="hf_test")
 
     def sent(listing):
         targets, tokens = len(loopback_hub.targets), len(loopback_hub.authorizations)
         paths = [
             entry["path"] if isinstance(entry, dict) else entry.path
-            for entry in listing
+            for entry in listing()
         ]
         return (
             paths,
@@ -1166,16 +1270,19 @@ def test_a_listing_sends_each_page_as_huggingface_hub_does(
             loopback_hub.authorizations[tokens:],
         )
 
-    ours = sent(
-        huggingface._list_tree(
-            fs, resolved, resolved.path, recursive=recursive, timeout=GUARD_SECONDS
+    try:
+        ours = sent(
+            lambda: _listed_entries(store, resolved, resolved.path, recursive=recursive)
         )
-    )
+    finally:
+        store.close()
     theirs = sent(
-        api.list_bucket_tree(BUCKET_ID, "data.zarr/c", recursive=recursive)
-        if uri == LOOPBACK_URI
-        else api.list_repo_tree(
-            REPOSITORY_ID, "data.zarr/c", recursive=recursive, repo_type="dataset"
+        lambda: (
+            api.list_bucket_tree(BUCKET_ID, "data.zarr/c", recursive=recursive)
+            if uri == LOOPBACK_URI
+            else api.list_repo_tree(
+                REPOSITORY_ID, "data.zarr/c", recursive=recursive, repo_type="dataset"
+            )
         )
     )
     assert ours == theirs
@@ -1193,18 +1300,15 @@ def test_a_repository_listing_names_its_revision_as_huggingface_hub_does(
     # whose name holds slashes is compared with huggingface_hub's.
     from huggingface_hub.hf_file_system import HfFileSystemResolvedRepositoryPath
 
-    fs = huggingface.HfFileSystem(
-        endpoint=loopback_hub.endpoint, token=False, skip_instance_cache=True
-    )
+    store = _loopback_store(loopback_hub, uri=REPOSITORY_URI)
     resolved = HfFileSystemResolvedRepositoryPath(
         "dataset", REPOSITORY_ID, "refs/pr/1", "data.zarr"
     )
-    with pytest.raises(HfHubHTTPError):
-        list(
-            huggingface._list_tree(
-                fs, resolved, resolved.path, recursive=True, timeout=GUARD_SECONDS
-            )
-        )
+    try:
+        with pytest.raises(HfHubHTTPError):
+            _listed_entries(store, resolved, resolved.path, recursive=True)
+    finally:
+        store.close()
     with pytest.raises(HfHubHTTPError):
         list(
             HfApi(endpoint=loopback_hub.endpoint, token=False).list_repo_tree(
@@ -1223,15 +1327,37 @@ def test_a_repository_listing_names_its_revision_as_huggingface_hub_does(
 
 
 @pytest.mark.parametrize("read_only", [True, False])
-def test_a_listing_that_outlasts_its_attempt_sends_no_page_after_the_store_raises(
-    loopback_hub, monkeypatch, read_only
+def test_a_listing_raises_naming_a_page_that_stalls_past_its_attempts(
+    loopback_hub, read_only
 ):
-    # Each page of the store's five takes 0.3 s, so the one attempt of 0.5 s
-    # gets the first page and gives up on the second; a listing that went on
-    # without the store would ask for the others at about 0.6, 0.9 and 1.2 s.
+    # The second page gets no answer within the store's one attempt of 1 s,
+    # and a wait of 2 s would end past the store's 1.5 s.
     store = _loopback_store(
-        loopback_hub, read_only=read_only, request_timeout=0.5, retry_timeout=0.5
+        loopback_hub, read_only=read_only, request_timeout=1, retry_timeout=1.5
     )
+    loopback_hub.page_size = 1
+    loopback_hub.plan["tree"] = ["serve", "stall"]
+    try:
+        with pytest.raises(TimeoutError) as raised:
+            sync(_names(store.list()), timeout=GUARD_SECONDS)
+    finally:
+        store.close()
+    assert str(raised.value).startswith(
+        f"Listing {LOOPBACK_URI} at page 2 did not succeed within 1.5 s: 1 attempt "
+        "failed, the last with no answer within 1 s."
+    )
+    assert _tree_pages(loopback_hub) == ["0", "1"]
+
+
+def test_closing_a_read_store_stops_the_listing_that_an_interrupt_left_running(
+    loopback_hub, monkeypatch
+):
+    # Zarr's sync leaves its coroutine running when its caller stops waiting,
+    # as an interrupt does, and the store's shared listing goes on for its
+    # later readers until the store is closed.
+    store = _loopback_store(loopback_hub)
+    for index in range(5):
+        (loopback_hub.root / "data.zarr" / f"notes{index}").write_bytes(b"x")
     loopback_hub.page_size = 1
     pages: list[float] = []
     serve = _LoopbackHandler.do_GET
@@ -1239,46 +1365,58 @@ def test_a_listing_that_outlasts_its_attempt_sends_no_page_after_the_store_raise
     def slow_page(handler):
         if "/tree" in urlsplit(handler.path).path:
             pages.append(time.monotonic())
-            time.sleep(0.3)
+            time.sleep(0.25)
         serve(handler)
 
     monkeypatch.setattr(_LoopbackHandler, "do_GET", slow_page)
+    # Ten pages of 0.25 s, which nobody waits for once the second is asked.
+    listing = asyncio.run_coroutine_threadsafe(_names(store.list()), _get_loop())
     try:
-        with pytest.raises(TimeoutError, match="did not succeed within 0.5 s"):
-            sync(_names(store.list()), timeout=GUARD_SECONDS)
-        raised = time.monotonic()
-        time.sleep(0.8)
+        deadline = time.monotonic() + GUARD_SECONDS
+        while len(pages) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        asked = len(pages)
     finally:
         store.close()
-    assert len(pages) == 2
-    assert [sent for sent in pages if sent > raised] == []
+    # The listing's reader raises, rather than list again.
+    with pytest.raises(concurrent.futures.CancelledError):
+        listing.result(timeout=GUARD_SECONDS)
+    # A listing that went on would ask for four more pages in this second; a
+    # page asked for just before the close may reach the hub just after it.
+    time.sleep(1)
+    assert 2 <= asked < 10
+    assert len(pages) <= asked + 1
 
 
-def test_a_listing_raises_instead_of_asking_for_a_page_past_its_time(
+def test_a_listing_refuses_a_page_that_links_back_to_an_earlier_one(
     loopback_hub, monkeypatch
 ):
-    # The listing's clock reads 100 s when it starts and asks for the first
-    # page, and 106 s when it would ask for the second, past its 5 s.
-    _loopback_store(loopback_hub).close()
-    loopback_hub.page_size = 1
-    readings = iter([100.0, 100.0, 106.0])
-    monkeypatch.setattr(
-        huggingface, "time", SimpleNamespace(monotonic=lambda: next(readings))
+    store = _loopback_store(loopback_hub)
+    asked: list[str] = []
+
+    def page(fs, url, timeout):
+        asked.append(url)
+        # The first page links to a second, which links back to the first.
+        if len(asked) == 1:
+            entry = {"type": "file", "path": "data.zarr/c/0/0", "size": 1}
+            return [entry], f"{url}&cursor=1"
+        return [{"type": "file", "path": "data.zarr/zarr.json", "size": 1}], asked[0]
+
+    monkeypatch.setattr(huggingface, "_tree_page", page)
+    try:
+        with pytest.raises(OSError) as raised:
+            sync(_names(store.list()), timeout=GUARD_SECONDS)
+    finally:
+        store.close()
+    assert type(raised.value) is OSError
+    assert str(raised.value) == (
+        f"Listing {LOOPBACK_URI} stopped after page 2: Hugging Face's API linked "
+        "it back to page 1, so the listing would not end"
     )
-    fs = huggingface.HfFileSystem(
-        endpoint=loopback_hub.endpoint, token=False, skip_instance_cache=True
-    )
-    resolved = fs.resolve_path(f"buckets/{BUCKET_ID}/data.zarr")
-    entries = iter(
-        huggingface._list_tree(fs, resolved, resolved.path, recursive=True, timeout=5)
-    )
-    assert next(entries)["path"] == "data.zarr/c/0/0"
-    with pytest.raises(TimeoutError, match=r"took more than 5 s$"):
-        next(entries)
-    assert _tree_pages(loopback_hub) == ["0"]
+    assert len(asked) == 2
 
 
-def test_each_page_of_a_listing_waits_for_the_time_left_of_its_attempt(
+def test_each_page_of_a_listing_waits_for_the_store_request_timeout(
     loopback_hub, monkeypatch
 ):
     store = _loopback_store(loopback_hub, request_timeout=5)
@@ -1300,10 +1438,9 @@ def test_each_page_of_a_listing_waits_for_the_time_left_of_its_attempt(
         keys = sync(_names(store.list()), timeout=GUARD_SECONDS)
     finally:
         store.close()
-    # A page for each of the five files, each given what the 5 s left.
-    assert len(keys) == len(timeouts) == 5
-    assert 4 < timeouts[0] <= 5
-    assert all(later < earlier for earlier, later in zip(timeouts, timeouts[1:]))
+    # A page for each of the five files, each an attempt of its own.
+    assert len(keys) == 5
+    assert timeouts == [5.0] * 5
 
 
 def test_a_writable_store_lists_a_folder_within_its_request_timeout(
@@ -1311,13 +1448,13 @@ def test_a_writable_store_lists_a_folder_within_its_request_timeout(
 ):
     store = _loopback_store(loopback_hub, read_only=False, request_timeout=7)
     given: list[float] = []
-    list_folder = huggingface._list_folder
+    tree_page = huggingface._tree_page
 
-    def recorded(fs, path, timeout):
+    def recorded(fs, url, timeout):
         given.append(timeout)
-        return list_folder(fs, path, timeout)
+        return tree_page(fs, url, timeout)
 
-    monkeypatch.setattr(huggingface, "_list_folder", recorded)
+    monkeypatch.setattr(huggingface, "_tree_page", recorded)
     try:
         names = sync(_names(store.list_dir("c")), timeout=GUARD_SECONDS)
     finally:
@@ -1622,15 +1759,15 @@ def test_read_store_shares_its_listing_across_callers_and_event_loops(
         threading.Event(),
     )
     calls = []
-    list_store = huggingface._list_store
+    tree_page = huggingface._tree_page
 
-    def held(fs, path, *rest):
-        calls.append(path)
+    def held(fs, url, timeout):
+        calls.append(urlsplit(url).path)
         started.set()
         assert release.wait(GUARD_SECONDS)
-        return list_store(fs, path, *rest)
+        return tree_page(fs, url, timeout)
 
-    monkeypatch.setattr(huggingface, "_list_store", held)
+    monkeypatch.setattr(huggingface, "_tree_page", held)
     results: dict[str, object] = {}
 
     async def first_caller_cancelled():
@@ -1671,7 +1808,7 @@ def test_read_store_shares_its_listing_across_callers_and_event_loops(
         "first": True,
         "other": (published / "zarr.json").stat().st_size,
     }
-    assert calls == [store.path]
+    assert calls == [f"/api/buckets/{BUCKET_ID}/tree/data.zarr"]
     assert len(clone_keys) == 5
     assert _received(loopback_hub, "tree") == [("data.zarr", "recursive")]
 
@@ -2294,24 +2431,50 @@ def test_writable_store_lists_a_prefix_as_a_folder_or_a_key(loopback_hub, uri):
     assert absent == []
 
 
+def test_writable_store_retries_the_lookup_of_a_key_that_a_repository_tree_misses(
+    loopback_hub, monkeypatch
+):
+    # A repository's tree lists folders only, so the store looks a key up by
+    # its path, a request of the store with its own retries.
+    store = _loopback_store(loopback_hub, read_only=False, uri=REPOSITORY_URI)
+    loopback_hub.plan["paths-info"] = [503]
+    sleeps = _record_sleeps(monkeypatch)
+    try:
+        keys = sync(_names(store.list_prefix("zarr.json")), timeout=GUARD_SECONDS)
+    finally:
+        store.close()
+    assert keys == ["zarr.json"]
+    assert sleeps == [2.0]
+    assert [kind for kind, _ in loopback_hub.requests].count("paths-info") == 2
+
+
 def test_writable_store_lists_a_folder_without_the_folders_that_share_its_name(
-    monkeypatch,
+    loopback_hub, monkeypatch
 ):
     # huggingface_hub notes that a bucket matches a listed prefix as text, so
-    # that listing "logs" also names "logs_existing/...".
-    def tree(fs, resolved, path, *, recursive, timeout):
-        assert (path, recursive, timeout) == ("data.zarr/c/1", False, 7.0)
-        return [
+    # that listing "logs" also names "logs_existing/...". The loopback hub
+    # lists a folder's own entries, so the page is the Hub's answer.
+    store = _loopback_store(loopback_hub, read_only=False, request_timeout=7)
+    asked = []
+
+    def page(fs, url, timeout):
+        asked.append((urlsplit(url).path, urlsplit(url).query, timeout))
+        entries = [
             {"type": "file", "path": "data.zarr/c/1/0", "size": 1},
             {"type": "directory", "path": "data.zarr/c/10"},
             {"type": "file", "path": "data.zarr/c/1/1", "size": 1},
         ]
+        return entries, None
 
-    monkeypatch.setattr(huggingface, "_list_tree", tree)
-    fs = huggingface.HfFileSystem(token=False, skip_instance_cache=True)
-    fs._bucket_exists_cache[BUCKET_ID] = (True, None)
-    names = huggingface._list_folder(fs, f"buckets/{BUCKET_ID}/data.zarr/c/1", 7.0)
+    monkeypatch.setattr(huggingface, "_tree_page", page)
+    try:
+        names = sync(_names(store.list_dir("c/1")), timeout=GUARD_SECONDS)
+    finally:
+        store.close()
     assert names == ["0", "1"]
+    assert asked == [
+        (f"/api/buckets/{BUCKET_ID}/tree/data.zarr%2Fc%2F1", "recursive=false", 7.0)
+    ]
 
 
 @pytest.mark.parametrize(
