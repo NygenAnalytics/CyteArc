@@ -172,6 +172,63 @@ def test_doublet_parent_pool_is_read_in_admitted_blocks(monkeypatch):
         doublets._load_parent_counts(raw, rows, every, ResourceBudget(100, 1), 0)
 
 
+def test_doublet_parents_charge_each_block_the_shards_of_its_parents(
+    tmp_path, monkeypatch
+):
+    import zarr
+
+    from cytearc.storage.geometry import array_geometry
+    from cytearc.storage.partition import row_read_parts
+    from tests.memory_helpers import traced_selection_read
+
+    # 30,000 cells by 20 features of random counts in shards of 100 cells,
+    # and one feature of a parent from each of 300 shards, in a shuffled
+    # order, read in blocks of a row chunk, 100 parents, each in 100 shards.
+    rng = np.random.default_rng(6)
+    values = rng.integers(1, 1 << 16, size=(30_000, 20), dtype=np.uint16)
+    counts = zarr.open_group(str(tmp_path / "store.zarr"), mode="w").create_array(
+        "counts",
+        shape=values.shape,
+        chunks=(100, 10),
+        shards=(100, 20),
+        dtype=np.uint16,
+    )
+    counts[:] = values
+    parents = rng.permutation(np.arange(300) * 100 + 7)
+    feature = np.array([4])
+    charged: list[tuple[int, tuple[int, int]]] = []
+    blocks: list[np.ndarray] = []
+    read_block = doublets._read_block
+
+    def recorded_parts(*args, **kwargs):
+        parts = row_read_parts(*args, **kwargs)
+        charged.append((kwargs.get("shards", 1), parts))
+        return parts
+
+    def recorded_read(array, rows, columns):
+        blocks.append(np.array(rows))
+        return read_block(array, rows, columns)
+
+    monkeypatch.setattr(doublets, "row_read_parts", recorded_parts)
+    monkeypatch.setattr(doublets, "_read_block", recorded_read)
+    result = doublets._load_parent_counts(
+        ChunkedArray(counts), parents, feature, ResourceBudget(1 << 30, 1), 0
+    )
+    np.testing.assert_array_equal(result.toarray(), values[parents][:, [4]])
+    # Each block's parents fall in 100 shards, as many as its charge counts.
+    assert [block.size for block in blocks] == [100, 100, 100]
+    assert {len(set((block // 100).tolist())) for block in blocks} == {100}
+    shards, (fixed, per_row) = charged[-1]
+    assert shards == 100
+    read, peak = traced_selection_read(counts, blocks[0], feature)
+    assert peak <= read.nbytes + fixed + blocks[0].size * per_row
+    # A charge of one shard's task falls short of the read.
+    one_fixed, one_per_row = row_read_parts(
+        array_geometry(counts), feature, rows_contiguous=False
+    )
+    assert peak > read.nbytes + one_fixed + blocks[0].size * one_per_row
+
+
 @pytest.mark.parametrize("power", [1, 2, 5])
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
 def test_doublet_smoothing_matches_powered_diffusion_with_hub_and_isolate(power, dtype):

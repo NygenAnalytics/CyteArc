@@ -1406,7 +1406,8 @@ def test_one_aligned_row_names_its_bytes_beside_the_resident_data() -> None:
         stream = object.__new__(mapping_features.AlignedFeatureStream)
         stream._query_cell_indices = np.array([0, 1])
         stream._resident_bytes = 10
-        stream._decode_bytes = 4
+        # The read of a block holds 4 bytes for its decode and 2 a row.
+        stream._read_parts = lambda rows: (4, 2)
         stream._resources = ResourceBudget(memory, 1)
         stream._source_geometry = None
         return stream._plan_rows(bytes_per_row=3)
@@ -1414,7 +1415,7 @@ def test_one_aligned_row_names_its_bytes_beside_the_resident_data() -> None:
     refusal = named_budget_runs(
         plan, 10, item="one aligned row beside the resident data"
     )
-    assert refusal.needed_bytes == 10 + 3 + 4
+    assert refusal.needed_bytes == 10 + 3 + 2 + 4
 
 
 def test_a_diffusion_step_and_its_load_refuse_budgets_too_small_for_them(

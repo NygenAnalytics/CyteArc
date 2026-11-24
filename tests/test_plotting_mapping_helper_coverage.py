@@ -1024,7 +1024,7 @@ def test_mapping_feature_helper_validation_and_lightweight_methods() -> None:
     stream = object.__new__(mapping_features.AlignedFeatureStream)
     stream._query_cell_indices = np.array([0])
     stream._resident_bytes = 10
-    stream._decode_bytes = 0
+    stream._read_parts = lambda rows: (0, 0)
     stream._resources = ResourceBudget(10, 1)
     stream._source_geometry = None
     with pytest.raises(MemoryError, match="One aligned row"):

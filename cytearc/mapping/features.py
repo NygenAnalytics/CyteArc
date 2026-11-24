@@ -33,6 +33,7 @@ from ..storage.geometry import ArrayGeometry, array_geometry
 from ..storage.parallel import stream_shards
 from ..storage.partition import (
     affordable_width,
+    band_shards,
     checked_indices,
     contiguous_ranges,
     is_contiguous,
@@ -374,11 +375,7 @@ class AlignedFeatureStream:
             scalars.setflags(write=False)
             self._cell_scalars = scalars
 
-        self._decode_bytes, read_row_bytes = row_read_parts(
-            self._source_geometry,
-            self._query_index_map,
-            rows_contiguous=is_contiguous(self._query_cell_indices),
-        )
+        self._cells_contiguous = is_contiguous(self._query_cell_indices)
         self._resident_bytes = self._calculate_resident_bytes() + int(
             reserved_resident_bytes
         )
@@ -396,7 +393,6 @@ class AlignedFeatureStream:
             + (normalized_bytes if self.renormalize_subset else 0)
             + np.dtype(bool).itemsize
             + int(reserved_per_row_bytes)
-            + read_row_bytes
         )
         block_rows, boundaries, io_concurrency = self._plan_rows(
             bytes_per_row=self._stream_row_bytes,
@@ -448,6 +444,20 @@ class AlignedFeatureStream:
             arrays.append(self._cell_scalars)
         return sum(array.nbytes for array in arrays) + np.dtype(np.float64).itemsize
 
+    def _read_parts(self, rows: int) -> tuple[int, int]:
+        """Return what the read of a block of ``rows`` query cells holds beside its values, per decode and per cell.
+
+        The read holds the tasks of the shards that the block's cells fall
+        in, as ``row_read_parts`` charges them.
+        """
+        return row_read_parts(
+            self._source_geometry,
+            self._query_index_map,
+            rows_contiguous=self._cells_contiguous,
+            shards=band_shards(self._source_geometry, self._query_cell_indices, rows),
+            band_rows=rows,
+        )
+
     def _plan_rows(
         self,
         *,
@@ -464,15 +474,18 @@ class AlignedFeatureStream:
             ),
         )
 
+        def held(rows: int) -> tuple[int, int]:
+            """The bytes of a block of ``rows`` cells, and those that its read decodes."""
+            decode, read_row = self._read_parts(rows)
+            return rows * (max(1, int(bytes_per_row)) + read_row), decode
+
         def fits(rows: int) -> bool:
-            return (
-                resident + rows * max(1, int(bytes_per_row)) + self._decode_bytes
-                <= self._resources.memoryBytes
-            )
+            block, decode = held(rows)
+            return resident + block + decode <= self._resources.memoryBytes
 
         block_rows = affordable_width(fits, preferred)
         if block_rows < 1:
-            minimum = resident + max(1, int(bytes_per_row)) + self._decode_bytes
+            minimum = resident + sum(held(1))
             raise MemoryBudgetError(
                 f"One aligned row needs about {minimum} bytes, but the operation "
                 f"limit is {self._resources.memoryBytes} bytes",
@@ -481,11 +494,12 @@ class AlignedFeatureStream:
                 item="one aligned row beside the resident data",
             )
         boundaries = tuple(contiguous_ranges(n_rows, block_rows))
+        block, decode = held(block_rows)
         admission = admit_stream(
             self._resources,
             nBlocks=1,
-            blockBytes=max(1, block_rows * int(bytes_per_row)),
-            decodeBytes=self._decode_bytes,
+            blockBytes=block,
+            decodeBytes=decode,
             residentBytes=resident,
             requested=1,
         )
