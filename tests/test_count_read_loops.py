@@ -746,10 +746,12 @@ def _read_errors_left(timeout: float = 10.0) -> list[BaseException]:
     """
     deadline = time.monotonic() + timeout
     while True:
+        # The type, not isinstance, which asks a dead weak proxy among the
+        # collector's objects for its class and raises ReferenceError.
         left = [
             item
             for item in gc.get_objects()
-            if isinstance(item, BaseException)
+            if issubclass(type(item), BaseException)
             and "the store could not read" in str(item)
         ]
         if not left or time.monotonic() > deadline:
