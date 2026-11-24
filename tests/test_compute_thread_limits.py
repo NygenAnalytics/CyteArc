@@ -2,6 +2,7 @@ import ast
 import threading
 import types
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -18,6 +19,7 @@ from cytearc.utils.compute import (
 )
 from tests.thread_helpers import (
     blas_threads,
+    clear_active_thread_limits,
     load_openmp_runtime,
     openmp_threads,
     raised_threads,
@@ -144,13 +146,10 @@ def test_a_blas_only_limit_leaves_the_openmp_runtimes_as_they_were():
         assert openmp_threads() == {3}
 
 
-def _on_another_thread(read):
-    seen = []
-    thread = threading.Thread(target=lambda: seen.append(read()))
-    thread.start()
-    thread.join(10)
-    assert not thread.is_alive()
-    return seen[0]
+def _on_another_thread(call: Callable[[], Any]) -> Any:
+    """Run ``call`` on a new thread, and return its result or raise its error."""
+    with ThreadPoolExecutor(1) as pool:
+        return pool.submit(call).result(timeout=60)
 
 
 def test_an_openmp_limit_sets_the_count_of_its_own_thread_only():
@@ -213,6 +212,44 @@ def test_overlapping_limits_on_two_threads_restore_what_the_first_recorded(
         assert worker["inside"] == ({1}, {1})
         assert worker["after"] == worker["before"]
         assert compute._active_thread_limits == {}
+
+
+@pytest.mark.parametrize("begins_on_a_worker", [False, True])
+def test_a_limit_ends_on_another_thread_than_it_began_on(
+    two_blas_threads, begins_on_a_worker
+):
+    # This thread's threadpoolctl limit controls an OpenBLAS pool that serves
+    # the whole process, which threadpoolctl 3.8 lets one thread set. A limit
+    # held by a generator ends on whichever thread closes it.
+    if begins_on_a_worker:
+        token = _on_another_thread(lambda: enter_thread_limit(1, user_api="blas"))
+        assert blas_threads() == {1}
+        exit_thread_limit(token)
+    else:
+        token = enter_thread_limit(1, user_api="blas")
+        assert blas_threads() == {1}
+        _on_another_thread(lambda: exit_thread_limit(token))
+    assert blas_threads() == {2}
+
+
+def test_a_limit_on_a_thread_that_stays_alive_leaves_other_threads_their_limits(
+    two_blas_threads,
+):
+    def limited() -> set[int]:
+        with process_thread_limit(1, user_api="blas"):
+            return blas_threads()
+
+    with ThreadPoolExecutor(1) as pool:
+        assert pool.submit(limited).result(timeout=60) == {1}
+        assert blas_threads() == {2}
+        # The pool's thread is still alive, and controls no BLAS pool, so the
+        # limits of this thread, threadpoolctl's own among them, still apply.
+        with threadpool_limits(limits=3, user_api="blas"):
+            assert blas_threads() == {3}
+            with process_thread_limit(1, user_api="blas"):
+                assert blas_threads() == {1}
+            assert blas_threads() == {3}
+        assert blas_threads() == {2}
 
 
 def test_a_limit_without_a_count_leaves_the_limits_before_it(two_blas_threads):
@@ -321,6 +358,83 @@ def test_a_blas_only_limit_leaves_the_other_runtimes_of_the_process(monkeypatch)
     exit_thread_limit(blas_only)
     assert (blas.threads, reader.threads) == (8, 0)
     assert reader.history == [0, 3, 0]
+
+
+class _SinglePoolLibrary(_FakeLibrary):
+    """A library whose one thread pool serves the whole process, controlled as
+    threadpoolctl 3.8 controls such an OpenBLAS: the first thread to set the
+    count takes control, the calls of other threads do nothing while it is
+    alive, and ``clear_controlling_thread`` gives control up."""
+
+    def __init__(self, filepath: str, threads: int, refused: int | None = None):
+        super().__init__(filepath, threads, refused)
+        self.controlling_thread: threading.Thread | None = None
+
+    def clear_controlling_thread(self, force: bool = False) -> None:
+        if force or self.controlling_thread is threading.current_thread():
+            self.controlling_thread = None
+
+    def set_num_threads(self, threads: int) -> None:
+        controller = self.controlling_thread
+        if controller is None or not controller.is_alive():
+            self.controlling_thread = controller = threading.current_thread()
+        if controller is threading.current_thread():
+            super().set_num_threads(threads)
+
+
+def test_limits_set_a_single_pool_from_any_thread_and_leave_none_in_control(
+    monkeypatch,
+):
+    pool = _SinglePoolLibrary("openblas.so", 8)
+    _with_libraries(monkeypatch, [pool])
+    # This thread sets the count first, as threadpoolctl's own limit does, and
+    # so controls the pool.
+    pool.set_num_threads(4)
+
+    def limited() -> int:
+        with process_thread_limit(2):
+            return pool.threads
+
+    assert _on_another_thread(limited) == 2
+    assert pool.threads == 4
+    assert pool.controlling_thread is None
+    # A limit that begins here can end on another thread.
+    token = enter_thread_limit(1)
+    assert pool.controlling_thread is None
+    _on_another_thread(lambda: exit_thread_limit(token))
+    assert pool.history == [8, 4, 2, 4, 1, 4]
+    assert pool.controlling_thread is None
+
+
+def test_a_single_pool_that_refuses_a_count_is_left_without_a_thread_in_control(
+    monkeypatch,
+):
+    pool = _SinglePoolLibrary("openblas.so", 4, refused=1)
+    _with_libraries(monkeypatch, [pool])
+
+    with pytest.raises(RuntimeError, match="^openblas.so refused 1 threads$"):
+        enter_thread_limit(1)
+    assert pool.controlling_thread is None
+    assert pool.history == [4]
+    assert compute._active_thread_limits == {}
+
+
+def test_a_limit_left_active_is_forgotten_with_the_counts_it_recorded(monkeypatch):
+    blas = _FakeLibrary("openblas.so", 8)
+    openmp = _FakeLibrary("libomp.so", 8, user_api="openmp")
+    _with_libraries(monkeypatch, [blas, openmp])
+    left = enter_thread_limit(2)
+
+    assert list(clear_active_thread_limits()) == [left]
+    assert compute._active_thread_limits == {}
+    assert compute._original_threads == {}
+    assert compute._original_openmp_threads == {}
+    # The counts stay as the forgotten limit set them, and the next limit
+    # restores those, not the counts that the forgotten limit recorded.
+    with process_thread_limit(1):
+        assert (blas.threads, openmp.threads) == (1, 1)
+    assert (blas.threads, openmp.threads) == (2, 2)
+    assert clear_active_thread_limits() == {}
 
 
 def test_a_limit_names_only_blas_or_every_runtime():
@@ -881,11 +995,14 @@ def test_each_family_limits_threads_without_a_controller_of_its_own(
     assert compute._active_thread_limits == {}
 
 
+@pytest.mark.parametrize("thread", ["caller", "worker"])
 @pytest.mark.parametrize(
     "family",
     _family_params(name for name, family in _FAMILIES.items() if family.work),
 )
-def test_each_family_limits_the_runtimes_it_limits(family, tmp_path, monkeypatch):
+def test_each_family_limits_the_runtimes_it_limits(
+    family, thread, tmp_path, monkeypatch
+):
     import importlib
 
     load_openmp_runtime()
@@ -910,7 +1027,21 @@ def test_each_family_limits_the_runtimes_it_limits(family, tmp_path, monkeypatch
     monkeypatch.setattr(owner, attribute, watched)
     # Three threads outside, apart from each family's count and from one.
     with raised_threads(blas=3, openmp=3):
-        run()
+        if thread == "worker":
+            # This thread's threadpoolctl limit controls an OpenBLAS pool that
+            # serves the whole process, and the family runs on another thread,
+            # as it does when a caller runs CyteArc from a thread pool. OpenMP
+            # counts are that thread's own.
+            def on_a_worker() -> tuple[set[int], set[int]]:
+                before = openmp_threads()
+                run()
+                return before, openmp_threads()
+
+            outside, after = _on_another_thread(on_a_worker)
+            assert after == outside
+        else:
+            outside = {3}
+            run()
         assert (blas_threads(), openmp_threads()) == ({3}, {3})
-    expected = ({chosen.blas}, {chosen.blas} if chosen.openmp else {3})
+    expected = ({chosen.blas}, {chosen.blas} if chosen.openmp else outside)
     assert seen and all(counts == expected for counts in seen)

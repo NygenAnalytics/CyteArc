@@ -4,6 +4,8 @@ The package limits threads only through ``cytearc.utils.compute`` and
 ``cytearc.utils.numba``; these helpers read the counts with threadpoolctl's own
 controllers, so a test checks the package against an independent reading.
 BLAS counts apply to the whole process and OpenMP counts to the calling thread.
+``clear_active_thread_limits`` forgets the package's limits that a test leaves
+active, so they cannot reach the next test.
 """
 
 from collections.abc import Iterator
@@ -51,3 +53,20 @@ def raised_threads(blas: int = 2, openmp: int | None = None) -> Iterator[None]:
 def load_openmp_runtime() -> None:
     """Load scikit-learn's OpenMP runtime, as the operations that use it do."""
     import sklearn.cluster  # noqa: F401
+
+
+def clear_active_thread_limits() -> dict[int, object]:
+    """Forget the limits of ``cytearc.utils.compute`` still active, and return them.
+
+    The counts stay as they are: a test that fails inside its own threadpoolctl
+    limit has those counts restored when the limit ends, while restoring what
+    its CyteArc limits recorded would set the counts in force inside it.
+    """
+    from cytearc.utils import compute
+
+    left = dict(compute._active_thread_limits)
+    if left:
+        compute._active_thread_limits.clear()
+        compute._original_threads.clear()
+        compute._original_openmp_threads.clear()
+    return left

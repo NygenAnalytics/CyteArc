@@ -145,6 +145,24 @@ def _sigint_handler_restored() -> None:
 
 
 @pytest.fixture(autouse=True)
+def _thread_limits_ended() -> None:
+    """Fail a test that leaves a native thread limit active, and forget the limit.
+
+    The limits of ``cytearc.utils.compute`` set counts for the whole process,
+    and every later limit applies around the ones still active, so a limit
+    that a failed test leaves active would change the counts of each later
+    test of its worker. The limit is forgotten before the failure, so the
+    test that left it is the only one to fail.
+    """
+    from tests.thread_helpers import clear_active_thread_limits
+
+    yield
+    left = clear_active_thread_limits()
+    if left:
+        pytest.fail(f"The test left native thread limits active: {left}")
+
+
+@pytest.fixture(autouse=True)
 def _reset_zarr_runtime() -> None:
     from tests.storage_helpers import reset_zarr_runtime
 
