@@ -310,8 +310,6 @@ class CSVtoZarr:
         from ..storage.identity import CountSummary
 
         columns, largest = self._cell_column_bytes()
-        if not largest:
-            return
         order = 0 if self._cellOrder is None else int(self._cellOrder.nbytes)
         held = (
             self._id_bytes()
