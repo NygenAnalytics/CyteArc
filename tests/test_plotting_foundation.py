@@ -2510,6 +2510,53 @@ def test_composition_orders_missing_category_and_labels_segments(
             plt.close(figure_number)
 
 
+@pytest.mark.parametrize("sample_by", [None, "sample"])
+def test_composition_labels_each_segment_in_its_higher_contrast_color(sample_by):
+    from matplotlib.colors import to_hex
+
+    from tests.color_helpers import LABEL_CONTRASTS, higher_contrast_text
+
+    colors = list(LABEL_CONTRASTS)
+    names = [f"c{at:02d}" for at in range(len(colors))]
+    # One cell of each category in each of two samples, so each segment holds
+    # a twentieth of its bar.
+    samples = ("s1", "s2")
+    store = _ArrayStore(
+        {
+            "I": np.ones(len(samples) * len(names), dtype=bool),
+            "category": np.array(names * len(samples), dtype=object),
+            "sample": np.repeat(samples, len(names)).astype(object),
+        },
+        np.zeros((len(samples) * len(names), 2)),
+    )
+    result = splt.composition(
+        store,
+        category_by="category",
+        sample_by=sample_by,
+        categorical_scale=splt.CategoricalScale(
+            order=tuple(names), palette=dict(zip(names, colors, strict=True))
+        ),
+        show_percent_labels=True,
+        label_min_fraction=0.0,
+        show=False,
+    )
+    try:
+        ax = result.axes["composition"]
+        # Each category's segments and their labels follow the categories'
+        # order, one for each bar.
+        n_bars = 1 if sample_by is None else len(samples)
+        segments = [to_hex(patch.get_facecolor()) for patch in ax.patches]
+        assert segments == [color for color in colors for _ in range(n_bars)]
+        labels = [to_hex(text.get_color()) for text in ax.texts]
+        assert labels == [higher_contrast_text(color) for color in segments]
+        # Each label reaches WCAG's 4.5:1 on its segment.
+        for label, segment in zip(labels, segments, strict=True):
+            _luminance, black, white = LABEL_CONTRASTS[segment]
+            assert (black if label == "#000000" else white) >= 4.5
+    finally:
+        result.close()
+
+
 def test_per_sample_composition_preserves_missing_categories(
     synthetic_plot_store,
 ):

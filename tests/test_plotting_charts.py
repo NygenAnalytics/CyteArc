@@ -805,14 +805,16 @@ def test_heatmaps_color_through_their_scale_and_blank_the_diagonal(ax) -> None:
     layer = missing.get_array()
     assert tuple(layer[1, 2]) == tuple(layer[2, 1]) == to_rgba("#ff00ff")
     assert layer[0, 0][3] == layer[1, 1][3] == 0.0 and layer[0, 1][3] == 0.0
-    # Each colored value is printed, dark on the light top of viridis and
-    # light on its dark bottom.
+    # Each colored value is printed, black on the light top of viridis and
+    # white on its dark bottom.
     texts = {text.get_position(): text for text in ax.texts}
     # The four pairs off the diagonal with a value, by column and row.
     assert sorted(texts) == [(0, 1), (0, 2), (1, 0), (2, 0)]
     assert texts[(0, 1)].get_text() == "0" and texts[(0, 2)].get_text() == "1"
-    assert texts[(2, 0)].get_text() == "1" and texts[(2, 0)].get_color() == "black"
-    assert texts[(1, 0)].get_text() == "0" and texts[(1, 0)].get_color() == "white"
+    assert texts[(2, 0)].get_text() == "1"
+    assert to_hex(texts[(2, 0)].get_color()) == "#000000"
+    assert texts[(1, 0)].get_text() == "0"
+    assert to_hex(texts[(1, 0)].get_color()) == "#ffffff"
     # The color bar names the value and the result reports its limits.
     colorbar = ax.figure.axes[-1]
     assert colorbar.get_ylabel() == "Jaccard index"
@@ -836,6 +838,65 @@ def test_heatmaps_take_their_scales_limits_and_center(ax) -> None:
     assert image.norm(1.5) == pytest.approx(0.75)
     # Without the legend, no color bar is drawn.
     assert len(ax.figure.axes) == 1
+
+
+def test_heatmaps_print_each_value_in_its_higher_contrast_color(
+    ax, registered_colormap
+) -> None:
+    from matplotlib.colors import ListedColormap
+
+    from tests.color_helpers import LABEL_CONTRASTS, higher_contrast_text
+
+    colors = list(LABEL_CONTRASTS)
+    registered_colormap(ListedColormap(colors, name="cytearc_label_backgrounds"))
+    # Two rows of the values 0 to 19, each colored by its own entry of the map.
+    draw_matrix(
+        ax,
+        pd.DataFrame(np.arange(len(colors), dtype=np.float64).reshape(2, -1)),
+        color_scale=ColorScale(
+            cmap="cytearc_label_backgrounds", vmin=0.0, vmax=len(colors) - 1.0
+        ),
+        value_label="",
+        show_legend=False,
+    )
+    image = ax.images[0]
+    assert [to_hex(image.cmap(image.norm(at))) for at in range(len(colors))] == colors
+    labels = {int(text.get_text()): to_hex(text.get_color()) for text in ax.texts}
+    assert labels == {
+        at: higher_contrast_text(color) for at, color in enumerate(colors)
+    }
+    # Each value reaches WCAG's 4.5:1 on its color.
+    for at, color in enumerate(colors):
+        _luminance, black, white = LABEL_CONTRASTS[color]
+        assert (black if labels[at] == "#000000" else white) >= 4.5
+
+
+def test_heatmaps_print_values_black_from_viridis_index_111() -> None:
+    # Each value from 0 to 255 takes viridis' color of that index; the two
+    # heatmaps of 12 rows and columns overlap from 112 to 143.
+    labels = {}
+    for first in (0, 112):
+        figure, ax = plt.subplots()
+        try:
+            draw_matrix(
+                ax,
+                pd.DataFrame(
+                    np.arange(first, first + 144, dtype=np.float64).reshape(12, 12)
+                ),
+                color_scale=ColorScale(cmap="viridis", vmin=0.0, vmax=255.0),
+                value_label="",
+                show_legend=False,
+            )
+            labels.update(
+                {int(text.get_text()): to_hex(text.get_color()) for text in ax.texts}
+            )
+        finally:
+            plt.close(figure)
+    # viridis' colors at indices 110 and 111 round to #27808e and #26818e of
+    # LABEL_CONTRASTS, where white leads black at 4.60 to 4.56:1 and black
+    # leads white at 4.61 to 4.55:1. On the 46 colors from 113 to 158, white
+    # falls below 4.5:1, down to 2.86:1, where black reaches 4.69 to 7.34.
+    assert labels == {at: "#ffffff" if at < 111 else "#000000" for at in range(256)}
 
 
 @pytest.mark.parametrize("n_groups", [MAX_PRINTED_VALUES, MAX_PRINTED_VALUES + 1])
