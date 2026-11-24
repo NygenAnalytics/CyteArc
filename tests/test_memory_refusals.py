@@ -932,12 +932,13 @@ def test_a_sparse_matrix_import_names_the_budget_of_its_scan_beside_the_matrix(
 
 
 def _notes_csv(path: Path, n_cells: int) -> Path:
-    """Write a CSV of three genes and a cell column of notes 300 characters long."""
+    """Write a CSV of three genes and 300-character notes, the middle cell's of 400."""
     rng = np.random.default_rng(8)
     lines = ["cell,g0,g1,g2,note"]
     for row in range(n_cells):
         counts = ",".join(str(value) for value in rng.integers(0, 5, 3))
-        lines.append(f"cell-{row},{counts},{'n' * 299}{row % 10}")
+        width = 400 if row == n_cells // 2 else 300
+        lines.append(f"cell-{row},{counts},{'n' * (width - 1)}{row % 10}")
     path.write_text("\n".join(lines) + "\n")
     return path
 
@@ -955,7 +956,11 @@ def test_a_csv_import_refuses_a_budget_without_room_for_its_cell_column_writes(
     def construct(budget: int) -> None:
         CSVtoZarr(
             CSVReader(
-                str(path), id_column=0, cell_data_cols=["note"], temp_dir=str(tmp_path)
+                str(path),
+                id_column=0,
+                cell_data_cols=["note"],
+                batch_size=8,
+                temp_dir=str(tmp_path),
             ),
             str(tmp_path / f"store-{budget}.zarr"),
             "RNA",
@@ -967,11 +972,12 @@ def test_a_csv_import_refuses_a_budget_without_room_for_its_cell_column_writes(
     # After the counts write, the notes are joined from their parts and, for
     # a shuffle, gathered in the order: twice the column beside itself. The
     # import then holds the reader's IDs, NumPy text of 4 bytes a character of
-    # cell-39; the notes, text of 4 bytes a character of 300 and a missing
-    # mark a cell; the count summary, 40 bytes a cell and 16 a gene; and a
-    # shuffle's order, 8 bytes a cell.
+    # cell-39; the notes, text of 4 bytes a character of the widest, 400 in
+    # the middle one of the reader's chunks of 8 rows, and a missing mark a cell;
+    # the count summary, 40 bytes a cell and 16 a gene; and a shuffle's
+    # order, 8 bytes a cell.
     ids = n_cells * 4 * len(f"cell-{n_cells - 1}")
-    column = n_cells * (4 * 300 + 1)
+    column = n_cells * (4 * 400 + 1)
     order = 8 * n_cells if shuffle_cells else 0
     held = ids + column + 40 * n_cells + 16 * 3 + order
     needed = held + (2 if shuffle_cells else 1) * column
@@ -992,13 +998,14 @@ def test_a_csv_import_charges_its_counts_write_beside_its_ids_and_cell_columns(
 
     n_cells = 40
     path = _notes_csv(tmp_path / "counts.csv", n_cells)
-    reader = CSVReader(str(path), id_column=0, cell_data_cols=["note"])
+    reader = CSVReader(str(path), id_column=0, cell_data_cols=["note"], batch_size=8)
     writer = CSVtoZarr(reader, MemoryStore(), "RNA", nthreads=1, shuffle_cells=False)
     resident, _batches = writer._count_import_requirements()
     # The count summary, 40 bytes a cell and 16 a gene, beside the reader's
-    # IDs and the notes, which the write gathers as it reads each chunk.
+    # IDs and the notes, which the write gathers as it reads each chunk, at
+    # the width of the widest note, 400 characters.
     ids = n_cells * 4 * len(f"cell-{n_cells - 1}")
-    column = n_cells * (4 * 300 + 1)
+    column = n_cells * (4 * 400 + 1)
     assert resident == 40 * n_cells + 16 * 3 + ids + column
 
 
@@ -1385,6 +1392,49 @@ def test_a_10x_scan_names_the_longest_barcode_of_every_run(tmp_path: Path) -> No
         item,
     )
     assert not (tmp_path / "refused.zarr").exists()
+
+
+def test_a_10x_scan_of_barcodes_without_values_holds_nothing_beside_the_readers_arrays(
+    tmp_path: Path,
+) -> None:
+    from cytearc.readers import CrH5Reader
+    from cytearc.writers import CrToZarr
+
+    # Five barcodes without values, whose reader holds the indexes of the 5
+    # barcodes, the file's 6 row pointers and their 6 cumulative values, 8
+    # bytes each: more than the budget.
+    path = tmp_path / "empty.h5"
+    with h5py.File(path, "w") as h5:
+        group = h5.create_group("matrix")
+        group.create_dataset("data", data=np.zeros(0, dtype=np.int32))
+        group.create_dataset("indices", data=np.zeros(0, dtype=np.int64))
+        group.create_dataset("indptr", data=np.zeros(6, dtype=np.int64))
+        group.create_dataset("shape", data=np.array([3, 5], dtype=np.int32))
+        group.create_dataset(
+            "barcodes", data=np.array([f"c{i}".encode() for i in range(5)])
+        )
+        features = group.create_group("features")
+        names = np.array([f"g{j}".encode() for j in range(3)])
+        features.create_dataset("id", data=names)
+        features.create_dataset("name", data=names)
+        features.create_dataset("feature_type", data=np.array([b"Gene Expression"] * 3))
+    reader = CrH5Reader(str(path))
+    try:
+        assert reader._sparse_import_resident_bytes() == 8 * 5 + 8 * 6 + 8 * 6 > 100
+        refusal = refused(
+            lambda: CrToZarr(
+                reader,
+                str(tmp_path / "refused.zarr"),
+                mem_budget=100,
+                nthreads=1,
+                shuffle_cells=False,
+            )
+        )
+    finally:
+        reader.close()
+    # The scan reads no values, so it needs nothing beside the arrays, and a
+    # later step refuses for itself.
+    assert "compressed vector" not in refusal.item
 
 
 # Algorithm checks that state their own peak.
