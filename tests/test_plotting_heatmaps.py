@@ -15,6 +15,7 @@ from matplotlib.colors import ListedColormap
 import cytearc.plotting as splt
 from cytearc.storage.artifacts import ArtifactRef
 from cytearc.plotting.cluster_tree import _hierarchy_positions
+from tests.color_helpers import COLORBLIND_TEXT_COLORS, wcag_contrast
 from cytearc.plotting._heatmap_utils import (
     annotation_colors,
     normalize_annotations,
@@ -2021,9 +2022,7 @@ def test_pseudotime_heatmap_colors_modules(options, colors, palette_name):
             result.axes["feature_clusters"].texts, colors, strict=True
         ):
             other = "#ffffff" if to_hex(text.get_color()) == "#000000" else "#000000"
-            assert _wcag_contrast(text.get_color(), color) > _wcag_contrast(
-                other, color
-            )
+            assert wcag_contrast(text.get_color(), color) > wcag_contrast(other, color)
         scale = result.scales[1]
         assert scale.order == (0, 1)
         assert scale.palette == dict(zip((0, 1), colors, strict=True))
@@ -2032,45 +2031,11 @@ def test_pseudotime_heatmap_colors_modules(options, colors, palette_name):
         result.close()
 
 
-def _wcag_contrast(first: object, second: object) -> float:
-    """The contrast ratio of two colors, (L1 + 0.05) / (L2 + 0.05), by WCAG 2.2's relative luminance."""
-    from matplotlib.colors import to_rgb
-
-    def luminance(color: object) -> float:
-        channels = np.asarray(to_rgb(color))
-        linear = np.where(
-            channels <= 0.04045, channels / 12.92, ((channels + 0.055) / 1.055) ** 2.4
-        )
-        return float(linear @ np.array([0.2126, 0.7152, 0.0722]))
-
-    lighter, darker = sorted((luminance(first), luminance(second)), reverse=True)
-    return (lighter + 0.05) / (darker + 0.05)
-
-
-# The twelve colors of the colorblind palette and the color of a module's
-# number on each, the one of higher WCAG contrast: white on blue, black, the
-# purples and brown, black on the others. Module 8 takes the palette's black.
-_MODULE_NUMBER_COLORS = {
-    "#0072B2": "#ffffff",
-    "#E69F00": "#000000",
-    "#009E73": "#000000",
-    "#D55E00": "#000000",
-    "#CC79A7": "#000000",
-    "#56B4E9": "#000000",
-    "#F0E442": "#000000",
-    "#000000": "#ffffff",
-    "#6F4E7C": "#ffffff",
-    "#2E8B57": "#000000",
-    "#A05195": "#ffffff",
-    "#8C564B": "#ffffff",
-}
-
-
 @pytest.mark.parametrize("theme", ["notebook", "dark"])
 def test_pseudotime_heatmap_numbers_read_on_every_module_color(theme):
     from matplotlib.colors import to_hex
 
-    n_modules = len(_MODULE_NUMBER_COLORS)
+    n_modules = len(COLORBLIND_TEXT_COLORS)
     store = _pseudotime_store(
         data=np.arange(2 * n_modules, dtype=np.float64).reshape(n_modules, 2),
         feature_indices=np.arange(n_modules),
@@ -2085,15 +2050,15 @@ def test_pseudotime_heatmap_numbers_read_on_every_module_color(theme):
     try:
         bars = result.axes["feature_clusters"]
         assert [to_hex(color) for color in bars.images[0].cmap.colors] == [
-            color.lower() for color in _MODULE_NUMBER_COLORS
+            color.lower() for color in COLORBLIND_TEXT_COLORS
         ]
         numbers = {int(text.get_text()): text.get_color() for text in bars.texts}
         assert {module: to_hex(color) for module, color in numbers.items()} == dict(
-            enumerate(_MODULE_NUMBER_COLORS.values(), start=1)
+            enumerate(COLORBLIND_TEXT_COLORS.values(), start=1)
         )
         # Every number reaches WCAG's 4.5:1 for text on its bar.
-        for module, bar in enumerate(_MODULE_NUMBER_COLORS, start=1):
-            assert _wcag_contrast(numbers[module], bar) >= 4.5
+        for module, bar in enumerate(COLORBLIND_TEXT_COLORS, start=1):
+            assert wcag_contrast(numbers[module], bar) >= 4.5
     finally:
         result.close()
 
