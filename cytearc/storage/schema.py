@@ -741,7 +741,8 @@ def _stored_cell_dtype(values: Any, block_rows: int) -> tuple[np.dtype[Any], boo
     Unicode text keeps its width, and numbers their dtype. Byte strings
     and objects are as wide as their longest text, at least one character,
     measured a block of rows at a time, as :func:`~cytearc.storage.arrays.text_needs_python`
-    finds how they become text.
+    finds how they become text: ASCII bytes and Python strings by their
+    lengths, and other values by their text, one at a time.
     """
     from .arrays import _text_width, text_needs_python
 
@@ -751,8 +752,14 @@ def _stored_cell_dtype(values: Any, block_rows: int) -> tuple[np.dtype[Any], boo
     width, python = 0, False
     for start in range(0, len(values), block_rows):
         block = np.asarray(values[start : start + block_rows])
-        width = max(width, _text_width(block))
-        python = python or text_needs_python(block)
+        if text_needs_python(block):
+            python = True
+            block_width = _text_width(block)
+        elif block.dtype.kind == "S":
+            block_width = int(np.strings.str_len(block).max(initial=0))
+        else:
+            block_width = max(map(len, block.flat), default=0)
+        width = max(width, block_width)
     return np.dtype(f"U{max(1, width)}"), python
 
 

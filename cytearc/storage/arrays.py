@@ -227,7 +227,7 @@ def text_needs_python(values: np.ndarray) -> bool:
         if kinds <= {str}:
             return False
         if kinds <= {bytes, np.bytes_}:
-            return not _is_ascii(values.astype(np.bytes_))
+            return not all(bytes(value).isascii() for value in values.flat)
     return True
 
 

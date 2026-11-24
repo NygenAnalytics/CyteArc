@@ -33,20 +33,28 @@ from ..utils.matrix_values import ImportValues
 def _identifiers(values: Any, label: str) -> np.ndarray:
     """Return identifiers as text after rejecting missing, blank, and repeated ones.
 
-    Byte strings are decoded as UTF-8, as every reader decodes them.
+    Byte strings are decoded as UTF-8, as every reader decodes them, and
+    unicode text is checked as it is.
     """
-    array = np.asarray(values, dtype=object)
-    if array.ndim != 1:
-        raise ValueError(f"{label} must be one-dimensional")
-    texts = np.asarray(
-        [
-            ""
-            if value is None or (isinstance(value, float) and value != value)
-            else (decode_text(value) if isinstance(value, str | bytes) else str(value))
-            for value in array
-        ],
-        dtype=str,
-    )
+    if isinstance(values, np.ndarray) and values.dtype.kind == "U":
+        if values.ndim != 1:
+            raise ValueError(f"{label} must be one-dimensional")
+        texts = values
+    else:
+        array = np.asarray(values, dtype=object)
+        if array.ndim != 1:
+            raise ValueError(f"{label} must be one-dimensional")
+        texts = np.asarray(
+            [
+                ""
+                if value is None or (isinstance(value, float) and value != value)
+                else (
+                    decode_text(value) if isinstance(value, str | bytes) else str(value)
+                )
+                for value in array
+            ],
+            dtype=str,
+        )
     if texts.size and bool(np.any(np.char.strip(texts) == "")):
         raise ValueError(f"{label} must contain non-empty values")
     if has_duplicates(texts):
@@ -57,14 +65,14 @@ def _identifiers(values: Any, label: str) -> np.ndarray:
 def _identifier_check_bytes(values: Any) -> int:
     """Return the most that :func:`_identifiers` holds beside ``values`` as it checks them.
 
-    It makes an object array of the values, with a Python object of each
-    value that an array of another dtype holds, and a list of their text,
-    which it copies into NumPy text as wide as the longest value, four
-    bytes a character; it then holds a stripped or sorted copy of that text
-    and a mark for each value. Unicode text gives its strings exactly, and
-    Python strings are referred to as they are; text made from bytes or
-    other values is counted at four bytes a character of its widest, its
-    strings at the widest kind of character.
+    Unicode text is checked as it is: a stripped or sorted copy of it and a
+    mark for each value. Other values become an object array, with a Python
+    object of each value that an array of another dtype holds, and a list
+    of their text, which is copied into NumPy text as wide as the longest
+    value, four bytes a character, and checked the same way. Python strings
+    are referred to as they are; text made from bytes or other values is
+    counted at four bytes a character of its widest, its strings at the
+    widest kind of character.
     """
     from ..storage.arrays import _text_width
     from ..utils.memory_budget import (
@@ -76,33 +84,27 @@ def _identifier_check_bytes(values: Any) -> int:
     array = values if isinstance(values, np.ndarray) else None
     n_values = len(values)
     if array is not None and array.dtype.kind == "U":
-        width = array.dtype.itemsize // 4
-        characters = int(np.strings.str_len(array).sum()) if n_values else 0
-        widest = int(np.ascontiguousarray(array).view(np.uint32).max(initial=0))
-        # The object array's strings, which the list refers to again.
-        made = python_text_bytes(n_values, characters, widest=widest)
-        converted = 0
-    else:
-        kind = "O" if array is None else array.dtype.kind
-        objects = np.asarray(values, dtype=object) if kind == "O" else None
-        width = (
-            array.dtype.itemsize
-            if objects is None and array is not None and kind == "S"
-            else _text_width(np.asarray(values, dtype=object))
-        )
-        # Bytes become a Python bytes object each, and numbers a Python
-        # number of up to 32 bytes; text made from them is a new string,
-        # where Python strings are their own text.
-        made = (
-            n_values * (33 + width)
-            if kind == "S"
-            else (32 * n_values if kind in "iufc" else 0)
-        )
-        converted = (
-            0
-            if objects is not None and set(map(type, objects.flat)) <= {str}
-            else python_text_bytes(n_values, n_values * width, widest=0x10FFFF)
-        )
+        return fixed_text_bytes(n_values, array.dtype.itemsize // 4) + n_values
+    kind = "O" if array is None else array.dtype.kind
+    objects = np.asarray(values, dtype=object) if kind == "O" else None
+    width = (
+        array.dtype.itemsize
+        if objects is None and array is not None and kind == "S"
+        else _text_width(np.asarray(values, dtype=object))
+    )
+    # Bytes become a Python bytes object each, and numbers a Python number of
+    # up to 32 bytes; text made from them is a new string, where Python
+    # strings are their own text.
+    made = (
+        n_values * (33 + width)
+        if kind == "S"
+        else (32 * n_values if kind in "iufc" else 0)
+    )
+    converted = (
+        0
+        if objects is not None and set(map(type, objects.flat)) <= {str}
+        else python_text_bytes(n_values, n_values * width, widest=0x10FFFF)
+    )
     references = 0 if array is not None and array.dtype.kind == "O" else n_values
     text = fixed_text_bytes(n_values, max(1, width))
     building = converted + object_array_bytes(n_values) + text

@@ -923,12 +923,11 @@ def test_a_sparse_matrix_import_refuses_a_budget_of_one_byte_at_its_first_step(
     )
     # The check of the cell IDs refuses first, in either order, beside the
     # matrix and the import's copy of the IDs, NumPy text of 4 bytes a
-    # character of the longest, c29. It holds a reference to each ID and an
-    # ASCII Python string of it, 41 bytes and one a character, and the IDs
-    # twice as NumPy text beside a mark each.
+    # character of the longest, c29. It holds a copy of that text and a mark
+    # for each ID.
     matrix_bytes = matrix.data.nbytes + matrix.indices.nbytes + matrix.indptr.nbytes
     held = matrix_bytes + 30 * 4 * 3
-    check = 8 * 30 + sum(41 + len(f"c{i}") for i in range(30)) + 2 * 30 * 12 + 30
+    check = 30 * 12 + 30
     assert (refusal.item, refusal.needed_bytes) == (
         f"checking the cell IDs beside the {held} bytes of the matrix and the cell IDs",
         held + check,
@@ -973,21 +972,16 @@ def test_a_sparse_matrix_import_names_the_budget_of_its_scan_beside_the_matrix(
             shuffle_cells=shuffle_cells,
         )
 
-    # The budget that passes the check of the cell IDs, which the check of
-    # the feature IDs and a shuffle of 24 bytes a cell pass too, leaves no
-    # room to scan the matrix: the check holds a reference to each ID and an
-    # ASCII Python string of it, 41 bytes and one a character, and the IDs
-    # twice as NumPy text beside a mark each, beside the matrix and the IDs.
-    # The feature IDs are Python strings already, which their check refers
-    # to. The scan reads every row's 50 values at 72 bytes each.
-    budget = (
-        matrix_bytes
-        + 30 * 12
-        + 8 * 30
-        + sum(41 + len(f"c{i}") for i in range(30))
-        + 2 * 30 * 12
-        + 30
-    )
+    # The budget that passes the check of the feature IDs leaves no room to
+    # scan the matrix. Beside the matrix and the cell IDs, the check of the
+    # cell IDs holds a copy of their text and a mark each, and a shuffle 24
+    # bytes a cell, both less than the check of the 50 feature IDs, which
+    # are Python strings already: a reference to each in an object array,
+    # and their text twice as NumPy text of 4 bytes a character of f49,
+    # beside a mark each. The scan reads every row's 50 values at 72 bytes
+    # each.
+    budget = matrix_bytes + 30 * 12 + 50 * 8 + 2 * 50 * 12 + 50
+    assert budget - matrix_bytes - 30 * 12 > max(30 * 12 + 30, 24 * 30)
     refusal = refused(lambda: construct(budget))
     item = (
         f"the 50 values of the longest compressed vector beside the {held} bytes "
@@ -1017,10 +1011,9 @@ def _forty_character_ids(n_ids: int) -> list[str]:
 @pytest.mark.parametrize(
     ("kind", "expected"),
     [
-        # 20,000 IDs of 40 ASCII characters: a reference to each and a Python
-        # string of it, 41 bytes and one a character, and the IDs twice as
-        # NumPy text of 160 bytes each beside a mark each.
-        ("unicode", 8 * 20_000 + 81 * 20_000 + 2 * 160 * 20_000 + 20_000),
+        # 20,000 IDs of 40 characters as NumPy text, checked as they are: a
+        # copy of the text, 160 bytes each, and a mark each.
+        ("unicode", 160 * 20_000 + 20_000),
         # Python strings already, in an array of them, which the check refers
         # to; a list of them first becomes such an array.
         ("objects", 2 * 160 * 20_000 + 20_000),
@@ -1097,11 +1090,11 @@ def test_an_in_memory_import_names_the_budget_that_checks_its_ids(
 
     # The matrix holds 1,200 uint32 values, their int32 columns and 401
     # int32 row pointers, and the import its copy of the IDs, NumPy text of
-    # 160 bytes each. Checking them holds a reference to each and a Python
-    # string of it, 41 bytes and 40 more, and the IDs twice as NumPy text
-    # beside a mark each, more than the check of the three feature IDs.
+    # 160 bytes each. Checking them holds a copy of that text and a mark
+    # each, more than the check of the three feature IDs and a shuffle of 24
+    # bytes a cell.
     held = 1_200 * 4 + 1_200 * 4 + 401 * 4 + 400 * 160
-    check = 400 * 8 + 400 * 81 + 2 * 400 * 160 + 400
+    check = 400 * 160 + 400
     item = (
         f"checking the cell IDs beside the {held} bytes of the matrix and the cell IDs"
     )

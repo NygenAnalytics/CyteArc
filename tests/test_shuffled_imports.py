@@ -1026,16 +1026,10 @@ def test_a_budget_without_room_for_the_shuffle_is_refused_before_it_runs(
     needed = held + 24 * n_cells
     if kind.startswith("sparse"):
         # The in-memory import first checks its cell IDs, which needs more
-        # than the shuffle: a reference to each ID and an ASCII Python string
-        # of it, 41 bytes and one a character, and the IDs twice as NumPy
-        # text of 4 bytes a character of the longest, cell-156, beside a
-        # mark each. At the budget that the check names the shuffle passes.
-        check = (
-            8 * _N_CELLS
-            + sum(41 + len(f"cell-{row}") for row in range(_N_CELLS))
-            + 2 * 4 * len(f"cell-{_N_CELLS - 1}") * _N_CELLS
-            + _N_CELLS
-        )
+        # than the shuffle: a copy of their NumPy text, 4 bytes a character
+        # of the longest, cell-156, and a mark each. At the budget that the
+        # check names the shuffle passes.
+        check = 4 * len(f"cell-{_N_CELLS - 1}") * _N_CELLS + _N_CELLS
         assert check > 24 * n_cells
         needed = held + check
     drawn = drawn_shuffles(monkeypatch)

@@ -275,7 +275,10 @@ def _admit_one_cell(source: "BaseMatrixSource", resident: int, max_bytes: int) -
 
     Raises:
         MemoryBudgetError: Naming what the resident data and the read of one
-            cell hold at ``max_bytes``.
+            cell hold at ``max_bytes``, or the budget that a block the
+            budget's limit refuses needs.
+        ResourceLimitError: If a block passes a limit that the source's
+            ``SourceLimits`` set.
     """
     limits = source._limits
     available = int(max_bytes) - int(resident)
@@ -284,6 +287,14 @@ def _admit_one_cell(source: "BaseMatrixSource", resident: int, max_bytes: int) -
     )
     try:
         estimate = source.estimate_read_memory(0, min(1, source.n_cells))
+    except ResourceLimitError as error:
+        # A block that the budget's limit refuses, as preparing it would.
+        refusal = _budget_block_refusal(
+            error, int(max_bytes), available, limits.maxBlockBytes
+        )
+        if refusal is None:
+            raise
+        raise refusal from error
     finally:
         source._limits = limits
     if estimate.blockBytes > available:
