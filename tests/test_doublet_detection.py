@@ -386,12 +386,16 @@ def test_doublet_threshold_keeps_a_minimum_only_where_its_doublet_rate_is_at_mos
 ):
     # Two blocks of 50 doublets at the ends of the range: the minimum leaves
     # half of them on each side. 25 of 100 cells above it estimate a doublet
-    # rate of 50%, and 26 of 52%, as in a sample of mostly doublets.
+    # rate of 50%, and 26 of 52%, as in a sample of mostly doublets. Otsu's
+    # threshold, in the first bin, splits the doublets and cells alike.
     values = np.repeat([0.0, 1.0], [50, 50])
     cells = np.repeat([0.0, 1.0], [100 - called, called])
     minimum = doublets.histogram_minimum_threshold(values)
     assert minimum is not None and np.mean(values > minimum) == 0.5
     assert np.mean(cells > minimum) == called / 100
+    otsu = doublets.otsu_threshold(values)
+    assert otsu < minimum and np.mean(values > otsu) == 0.5
+    assert np.mean(cells > otsu) == called / 100
 
     threshold, chosen = doublets.doublet_threshold(values, cell_scores=cells)
 
@@ -400,7 +404,7 @@ def test_doublet_threshold_keeps_a_minimum_only_where_its_doublet_rate_is_at_mos
     )
 
 
-def test_doublet_threshold_has_none_where_its_minimum_would_call_too_many_cells():
+def test_doublet_threshold_takes_otsu_where_its_minimum_would_call_too_many_cells():
     # A low mode of 7% of the simulated doublets in the first ten bins, ten
     # empty bins, and a main mode that rises to bin 40 and thins out to the
     # last bins, whose heights fall by one so that none is a maximum.
@@ -415,15 +419,15 @@ def test_doublet_threshold_has_none_where_its_minimum_would_call_too_many_cells(
     assert 0.05 < np.mean(values <= minimum) < 0.1
     otsu = doublets.otsu_threshold(values)
     assert otsu > 100
-    # Most cells score in the main mode below Otsu's threshold: the minimum
-    # estimates a doublet rate of 75%, Otsu's threshold 0%.
-    cells = np.repeat([0.5, 30.5], [30, 70])
+    # Most cells score in the main mode, and two in its tail: the minimum
+    # would call 72 of 102 cells, an estimate of 76%, and Otsu's threshold
+    # the two, an estimate of 5%.
+    cells = np.repeat([0.5, 30.5, 200.5], [30, 70, 2])
     assert np.mean(cells > minimum) / np.mean(values > minimum) > 0.7
-    assert not np.any(cells > otsu)
+    assert np.flatnonzero(cells > otsu).tolist() == [100, 101]
+    assert np.mean(cells > otsu) / np.mean(values > otsu) < 0.1
 
-    # The rule chose the minimum, so the sample has no threshold, whatever
-    # Otsu's threshold would estimate.
-    assert doublets.doublet_threshold(values, cell_scores=cells) == (None, "none")
+    assert doublets.doublet_threshold(values, cell_scores=cells) == (otsu, "otsu")
 
 
 def test_doublet_threshold_has_none_when_doublets_look_like_the_cells():
@@ -2686,6 +2690,10 @@ _FEW_DETECTABLE = (
     "the automatic threshold leaves fewer than 1% of the simulated doublets "
     "above it, so it calls almost no cell"
 )
+_SET_THRESHOLD = (
+    "The scores still rank the cells; pass threshold, which applies to every "
+    "sample, to call those that score above it"
+)
 
 
 def test_a_threshold_that_calls_almost_no_doublet_warns_when_computed_and_reused(
@@ -2717,10 +2725,7 @@ def test_a_threshold_that_calls_almost_no_doublet_warns_when_computed_and_reused
     monkeypatch.undo()
     reused = [_warned(lambda: score(**options), where) for options, where in cases]
 
-    suffix = (
-        ". The scores still rank the cells; pass threshold to call those that "
-        "score above it"
-    )
+    suffix = f". {_SET_THRESHOLD}"
     expected = [
         f"In each of 2 samples {_FEW_DETECTABLE}: (sample='A'), (sample='B'){suffix}",
         f"In 1 sample {_FEW_DETECTABLE}{suffix}",
@@ -2778,17 +2783,14 @@ def test_the_warning_still_fires_when_only_otsus_threshold_splits_the_doublets(
     assert sample["thresholdMethod"] == "otsu"
     assert sample["detectableDoubletFraction"] == 1 / sample["simulatedDoublets"]
     assert sample["predictedDoublets"] == 0
-    expected = (
-        f"In 1 sample {_FEW_DETECTABLE}. The scores still rank the cells; pass "
-        "threshold to call those that score above it"
-    )
+    expected = f"In 1 sample {_FEW_DETECTABLE}. {_SET_THRESHOLD}"
     assert texts == again_texts == [expected]
 
 
 _NO_THRESHOLD = (
-    "the automatic threshold would estimate a doublet rate above 50%, as when "
-    "the simulated doublets look like the cells, so the sample has no threshold "
-    "and calls no cell"
+    "every automatic threshold would estimate a doublet rate above 50%, as in a "
+    "sample of one cell type, whose doublets look like its cells, so the sample "
+    "has no threshold and calls no cell"
 )
 
 
@@ -2833,14 +2835,13 @@ def test_a_sample_without_a_threshold_calls_no_cell_and_warns_when_computed_and_
         # Otsu's threshold splits cells and simulated doublets alike.
         otsu = doublets.otsu_threshold(sample_simulated)
         assert np.mean(cells > otsu) / np.mean(sample_simulated > otsu) > 0.5
-        # The sample records no threshold: the threshold above every score,
-        # no call, no detectable doublet, and so no estimate.
+        # The sample records no threshold, no call, no detectable doublet,
+        # and so no estimate.
         assert sample["labels"] == {"sample": label}
-        assert (sample["thresholdMethod"], sample["threshold"]) == ("none", 1.0)
+        assert (sample["thresholdMethod"], sample["threshold"]) == ("none", None)
         assert sample["predictedDoublets"] == 0
         assert sample["detectableDoubletFraction"] == 0.0
         assert sample["estimatedDoubletRate"] is None
-        assert np.all(cells < sample["threshold"])
     calls = payload["predicted_doublets"][:]
     assert not calls.any()
     # Every scored cell is a singlet that select_cells keeps.
@@ -2856,47 +2857,19 @@ def test_a_sample_without_a_threshold_calls_no_cell_and_warns_when_computed_and_
         )
     ) == len(calls)
     expected = (
-        f"In each of 2 samples {_NO_THRESHOLD}: (sample='A'), (sample='B'). The "
-        "scores still rank the cells; pass threshold to call those that score "
-        "above it"
+        f"In each of 2 samples {_NO_THRESHOLD}: (sample='A'), (sample='B'). "
+        f"{_SET_THRESHOLD}"
     )
     for diagnostic, messages in ((first, first_texts), (warned, texts)):
         assert messages == [expected]
         (warning,) = diagnostic
         assert (warning.operation, warning.diagnostic, warning.value) == (
             "run_doublet_detection",
-            "thresholdMethod",
-            ["none", "none"],
+            "noThresholdSamples",
+            2,
         )
 
 
-@pytest.mark.filterwarnings("ignore:In 1 sample the automatic threshold")
-def test_a_sample_without_a_threshold_calls_no_cell_whatever_threshold_it_records(
-    small_captures, tmp_path, monkeypatch
-):
-    # The calls of a sample without a threshold are none by construction, not
-    # the scores above the threshold that it records: recorded below every
-    # score, it still calls no cell.
-    opened = _open_synthetic(small_captures, tmp_path)
-    monkeypatch.setattr(doublets, "count_simulated_neighbors", _counts_alike)
-    monkeypatch.setattr(doublets, "MAX_DOUBLET_SCORE", 0.0)
-
-    ref = opened.store.qc.doublets(opened.clusters, opened.graph, random_seed=3)
-
-    payload = _payload(opened.store, ref)
-    (sample,) = payload.attrs["samples"]
-    assert (sample["thresholdMethod"], sample["threshold"]) == ("none", 0.0)
-    assert np.all(payload["values"][:] > 0.0)
-    assert not payload["predicted_doublets"][:].any()
-    assert (sample["predictedDoublets"], sample["detectableDoubletFraction"]) == (
-        0,
-        0.0,
-    )
-
-
-# The RNA sample's histogram minimum would estimate a doublet rate of 63%, so
-# it has no threshold.
-@pytest.mark.filterwarnings("ignore:In 1 sample the automatic threshold")
 @pytest.mark.parametrize("assay", ["RNA", "ATAC"])
 def test_a_cosine_graph_scores_rna_by_its_metric_and_atac_by_euclidean_distances(
     small_captures, one_capture_peaks, tmp_path, assay
@@ -2927,6 +2900,45 @@ def test_a_cosine_graph_scores_rna_by_its_metric_and_atac_by_euclidean_distances
     # An RNA sample's index takes the graph's metric, and an ATAC sample's
     # Euclidean distances in the LSI whatever the graph's metric.
     assert same == ([True, True] if assay == "ATAC" else [False, False])
+
+
+@pytest.mark.parametrize(("rate", "planted"), [(0.05, 1), (0.3, 8)])
+def test_otsus_threshold_calls_planted_doublets_where_the_minimum_calls_most_cells(
+    small_captures, tmp_path, rate, planted
+):
+    # The two captures pooled into one sample and scored on a cosine graph:
+    # the histogram minimum leaves 5% or more of the simulated doublets on
+    # each side but lies below most cells, singlets among them.
+    opened = _open_synthetic(small_captures, tmp_path)
+    store = opened.store
+    coordinates = _graph_pca(store, opened.graph)
+    cosine = store.graph.connectivity(
+        store.graph.neighbors(
+            store.graph.ann_index(coordinates, ann_metric="cosine"),
+            coordinates=coordinates,
+            k=10,
+        )
+    )
+
+    ref = store.qc.doublets(opened.clusters, cosine, expected_doublet_rate=rate)
+
+    payload = _payload(store, ref)
+    (sample,) = payload.attrs["samples"]
+    simulated, scores = payload["simulated_scores"][:], payload["values"][:]
+    minimum = doublets.histogram_minimum_threshold(simulated)
+    assert minimum is not None
+    above = np.mean(simulated > minimum)
+    assert min(above, 1 - above) >= 0.05
+    assert np.mean(scores > minimum) > 0.5
+    assert np.mean(scores > minimum) / above > 0.5
+    # Otsu's threshold estimates a plausible rate and calls planted doublets
+    # of two types alone; a sample without a threshold would call none.
+    calls = payload["predicted_doublets"][:]
+    assert sample["thresholdMethod"] == "otsu"
+    assert sample["estimatedDoubletRate"] <= 0.5
+    truth = small_captures.truth
+    assert np.all(truth[calls] == 1)
+    assert np.count_nonzero(calls) >= planted
 
 
 def test_a_harmony_graph_scores_each_sample_on_the_lsi_it_corrected(
@@ -3184,7 +3196,7 @@ def test_rna_doublets_of_one_cluster_call_no_cell_and_warn(
     assert np.mean(scores > otsu) > 0.2
     # The sample has no threshold and calls no cell, and the stage warns of
     # it and its summary shows it.
-    assert (sample["thresholdMethod"], sample["threshold"]) == ("none", 1.0)
+    assert (sample["thresholdMethod"], sample["threshold"]) == ("none", None)
     assert sample["detectableDoubletFraction"] == 0.0
     assert sample["predictedDoublets"] == 0
     assert not np.asarray(run.cells.fetch("predicted_doublet"), dtype=bool).any()
@@ -3193,16 +3205,13 @@ def test_rna_doublets_of_one_cluster_call_no_cell_and_warn(
         for record in load_pipeline_stage_records(store.zw, run.run_id)
         if record.stage == "doublets"
     ]
-    assert stage.warnings == (
-        f"In 1 sample {_NO_THRESHOLD}. The scores still rank the cells; pass "
-        "threshold to call those that score above it",
-    )
+    assert stage.warnings == (f"In 1 sample {_NO_THRESHOLD}. {_SET_THRESHOLD}",)
     assert stage.summary is not None
     assert stage.summary["samples"] == [
         {
             "labels": {},
             "cells": sample["cells"],
-            "threshold": 1.0,
+            "threshold": None,
             "thresholdMethod": "none",
             "predictedDoublets": 0,
         }
@@ -3241,7 +3250,7 @@ def test_rna_doublets_of_one_cluster_beside_a_low_outlier_call_no_cell(
     otsu = doublets.otsu_threshold(simulated)
     assert np.mean(scores > otsu) / np.mean(simulated > otsu) > 0.5
     # The sample has no threshold and calls no cell, and the stage warns.
-    assert (sample["thresholdMethod"], sample["threshold"]) == ("none", 1.0)
+    assert (sample["thresholdMethod"], sample["threshold"]) == ("none", None)
     assert sample["predictedDoublets"] == 0
     assert not np.asarray(run.cells.fetch("predicted_doublet"), dtype=bool).any()
     (stage,) = [
@@ -3249,7 +3258,4 @@ def test_rna_doublets_of_one_cluster_beside_a_low_outlier_call_no_cell(
         for record in load_pipeline_stage_records(store.zw, run.run_id)
         if record.stage == "doublets"
     ]
-    assert stage.warnings == (
-        f"In 1 sample {_NO_THRESHOLD}. The scores still rank the cells; pass "
-        "threshold to call those that score above it",
-    )
+    assert stage.warnings == (f"In 1 sample {_NO_THRESHOLD}. {_SET_THRESHOLD}",)

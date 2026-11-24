@@ -145,13 +145,12 @@ def test_doublet_summary_shows_each_samples_threshold_and_its_method() -> None:
             "simulatedDoublets": 4,
             "estimatedDoubletRate": 0.5,
         },
-        # A sample without a threshold shows its method beside the threshold
-        # that calls no cell.
+        # A sample without a threshold shows its method beside no threshold.
         {
             **shown,
             "labels": {"sample": "B"},
             "predictedDoublets": 0,
-            "threshold": 1.0,
+            "threshold": None,
             "thresholdMethod": "none",
             "detectableDoubletFraction": 0.0,
         },
@@ -165,7 +164,7 @@ def test_doublet_summary_shows_each_samples_threshold_and_its_method() -> None:
             **shown,
             "labels": {"sample": "B"},
             "predictedDoublets": 0,
-            "threshold": 1.0,
+            "threshold": None,
             "thresholdMethod": "none",
         },
     ]

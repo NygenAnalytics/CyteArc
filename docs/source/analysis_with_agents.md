@@ -215,16 +215,7 @@ singlets = ds.select_cells(first["doublets"], value="predicted_doublets", includ
 second = ds.pipeline.rna(cells=singlets, doublets=False, label="singlets")
 ```
 
-The second run rebuilds the highly variable genes, PCA, graph, and clusters without the doublets.
-With ambient RNA correction, score doublets in the run over the corrected counts and remove them
-in a run after it. Doublets form among the cells of one capture whatever their hashtags, so score
-them within each capture with `doublets={"sample_column": "<capture column>"}`, never within each
-hashtag; a run with Harmony scores within its batches unless `doublets` names another
-`sample_column`. Report the predicted doublet rate of each sample from the stage summary and
-compare it with the rate that the capture's loading leads one to expect. A doublet of two cells of
-one type looks like a singlet and is rarely called. Cells between two populations, such as an
-intermediate state, can also score high, so check the markers of a cluster that is rich in
-predicted doublets before removing it as an artifact.
+The second run rebuilds the highly variable genes, PCA, graph, and clusters without the doublets. With ambient RNA correction, score doublets in the run over the corrected counts and remove them in a run after it. Doublets form among the cells of one capture whatever their hashtags, so score them within each capture with `doublets={"sample_column": "<capture column>"}`, never within each hashtag; a run with Harmony scores within its batches unless `doublets` names another `sample_column`. Report the predicted doublet rate of each sample from the stage summary and compare it with the rate that the capture's loading leads one to expect. A sample whose `thresholdMethod` is `"none"` calls no cell by design, not because it holds no doublets: every automatic threshold would have estimated a doublet rate above 50%, as in a sample of one cell type, so report it as unscored and set `threshold` from its scores if its doublets matter. A doublet of two cells of one type looks like a singlet and is rarely called. Cells between two populations, such as an intermediate state, can also score high, so check the markers of a cluster that is rich in predicted doublets before removing it as an artifact.
 
 An ATAC run scores doublets only when asked, with `doublets=True`, and removes nothing either. Its score ranks doublets of two distinct cell types, such as a T cell and a monocyte, well above singlets, and doublets of two similar types, such as two T cell subsets, less well than SnapATAC2's Scrublet does on the same data ([Doublet detection](reference/methods.md#doublet_method)). A doublet that holds the fragments of both its cells also has more accessible peaks than a singlet, so read `ATAC_nFeatures` beside the score, and in a multiome dataset compare the calls of the RNA and ATAC runs of the same cells before removing any.
 

@@ -336,11 +336,11 @@ _OPERATION_REVISIONS: dict[str, tuple[OperationRevision, ...]] = {
             revision=4,
             release="1.5.0",
             change=(
-                "A sample whose automatic threshold, the histogram minimum or "
-                "Otsu's threshold, would estimate a doublet rate above 50% has "
-                "no threshold: it calls no cell and records the threshold method "
-                "'none' and a threshold of 1; affects scores with an automatic "
-                "threshold"
+                "An automatic threshold is taken only where it estimates a "
+                "doublet rate of at most 50%: the histogram minimum, else Otsu's "
+                "threshold, else none, and a sample without one calls no cell and "
+                "records the threshold method 'none' and a threshold of None; "
+                "affects scores with an automatic threshold"
             ),
             applies=_chooses_its_doublet_thresholds,
         ),
