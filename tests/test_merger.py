@@ -9300,6 +9300,78 @@ def test_held_rows_give_the_head_of_the_first_cells_shard_last_without_its_windo
     np.testing.assert_array_equal(np.vstack(pieces), np.r_[values[530:], values[:530]])
 
 
+@pytest.mark.parametrize(
+    ("keep_head", "windows"),
+    [(True, [(400, 1000), (0, 400)]), (False, [(400, 1000), (0, 800)])],
+    ids=["head_kept", "head_read_again"],
+)
+def test_held_rows_read_no_shard_again_after_the_source_wraps_round(
+    tmp_path, keep_head, windows
+):
+    from cytearc import DataStore
+    from cytearc.merge.writer import _chunk_column_runs, _HeldSourceRows
+
+    location = str(tmp_path / "source.zarr")
+    values = _csr_window_source(location, "uint16", 0.05)
+    counts = DataStore(location, default_assay="Counts", nthreads=1).Counts.rawData
+    # Windows of three of the source's shards of 400 cells, which a source
+    # of larger shards would set, from the first cell 530.
+    held = _HeldSourceRows(
+        counts,
+        _chunk_column_runs(counts),
+        1200,
+        1,
+        first_row=530,
+        keep_head=keep_head,
+    )
+    refills = []
+    refill = held._refill
+
+    def recorded(row):
+        refill(row)
+        refills.append((held._start, held._stop))
+
+    held._refill = recorded
+    pieces = []
+    for first, stop in ((530, 1000), (0, 530)):
+        for start in range(first, stop, 50):
+            taken = held.take(start, min(50, stop - start))
+            pieces.extend(rows.copy() for _, rows in taken)
+    # Once the source has wrapped round, its window stops at the first
+    # cell's shard, whose cells before 530 it kept apart, or reads that shard
+    # again when it did not keep them; no window reads the last shard again.
+    assert refills == windows
+    np.testing.assert_array_equal(np.vstack(pieces), np.r_[values[530:], values[:530]])
+
+
+def test_a_merge_holding_dense_shards_of_two_sizes_decodes_each_source_chunk_once(
+    tmp_path, monkeypatch, sparse_column_sources
+):
+    merged = _merge_chunk_columns(
+        sparse_column_sources,
+        tmp_path / "merged.zarr",
+        monkeypatch,
+        sparse=False,
+        policy=_SPARSE_BAND_POLICY,
+    )
+
+    # Dense windows of 256 cells, the left source's shard, hold one of its
+    # three shards and two of the right source's four shards of 128 cells.
+    # The right source's first cell, 249, lies in its second shard, so once
+    # the source has wrapped round its window stops before that shard, whose
+    # cells before 249 the write kept apart: each chunk is decoded once.
+    from cytearc.merge.row_plan import build_row_plan
+
+    assert build_row_plan([600, 500], ["left", "right"], seed=42).firstCells[1] == 249
+    decodes, _ = _shard_chunk_reads(sparse_column_sources)
+    assert not merged["sparse"]
+    assert merged["held_rows"] == 256
+    assert merged["heads"] == {True}
+    assert merged["decodes"] == decodes
+    stored = zarr.open_group(str(tmp_path / "merged.zarr"), mode="r")
+    assert _rows_by_id(stored, "Counts/counts") == _source_rows(sparse_column_sources)
+
+
 def test_held_rows_of_a_source_of_one_shard_wrap_round_within_a_window(
     chunk_column_sources,
 ):

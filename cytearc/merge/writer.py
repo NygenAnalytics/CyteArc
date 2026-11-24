@@ -1229,7 +1229,9 @@ class _HeldSourceRows:
         shard goes on from the source's first row once it reaches the last;
         a window of whole shards starts at the shard that holds it, so the
         window of the first row also holds the head. The head is kept apart
-        when that window moves on.
+        when that window moves on. Once the source has wrapped round, a
+        window of whole shards stops at the head's shard, or after it when
+        the head was not kept, so it reads no shard that it gave before.
         """
         if (
             self._head is None
@@ -1258,6 +1260,12 @@ class _HeldSourceRows:
         else:
             begin = row - row % shard
             stop = min(n_rows, begin + self._windowRows // shard * shard)
+            if row < self._firstRow:
+                # The head's shard is read again only for a head not kept.
+                read_head = self._headStop == self._headStart < self._firstRow
+                stop = min(stop, self._headStart + (shard if read_head else 0))
+        # A window that missed its row would leave the take without rows.
+        assert begin <= row < stop
         rows: Any = np.r_[begin:stop, 0:wrap] if wrap else slice(begin, stop)
         if self._sparse:
             values: Any = [

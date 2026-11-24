@@ -2266,9 +2266,11 @@ def merged_shuffle_seed(
     interleaves the sources at random and gives each source's cells in its
     order from a random first cell. A source's ``cellOrder`` record states
     that its order is uniform, and sources whose records name different
-    seeds are taken to be independent. Sources that share a seed list each
-    file row at about the same place, so their merge is only close to
-    uniform, and a source without the record gives None.
+    seeds are taken to be independent; a merged source records the seed of
+    its own interleave, so the import seeds beneath it are not compared.
+    Sources that share a seed list each file row at about the same place,
+    so their merge is only close to uniform, and a source without the
+    record gives None.
 
     Raises:
         ValueError: If a source's ``cellOrder`` record is malformed.
