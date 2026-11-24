@@ -642,8 +642,9 @@ def doublet_threshold(
     most ``THRESHOLD_MAX_DOUBLET_RATE``. A sample whose simulated doublets
     look like its cells has scores of one mode, which Otsu's threshold splits
     with as many cells as doublets above it, so it keeps the minimum, which
-    calls almost no cell. When the histogram never has two maxima, the
-    threshold is Otsu's.
+    calls almost no cell when the outlying doublets score above the rest and
+    almost every cell when they score below it. When the histogram never has
+    two maxima, the threshold is Otsu's.
 
     Args:
         simulated_scores: The doublet scores of the sample's simulated
