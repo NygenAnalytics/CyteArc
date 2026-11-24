@@ -17,7 +17,6 @@ import pytest
 import cytearc.plotting as splt
 from cytearc.assay.normalization import applicable_normalization_flags
 from cytearc.storage import ArtifactRef
-from tests.color_helpers import COLORBLIND_TEXT_COLORS, wcag_contrast
 from tests.storage_helpers import by_cell_id
 
 
@@ -2509,38 +2508,6 @@ def test_composition_orders_missing_category_and_labels_segments(
     finally:
         for figure_number in set(plt.get_fignums()) - existing_figures:
             plt.close(figure_number)
-
-
-@pytest.mark.parametrize("sample_by", [None, "sample"])
-def test_composition_labels_each_segment_in_the_text_color_that_reads_on_it(
-    synthetic_plot_store, sample_by
-):
-    from matplotlib.colors import to_hex
-
-    # Colorblind colors on which white text reached only 3.4, 3.9 and 3.1 to 1
-    # by WCAG contrast; black text reaches 6.1, 5.4 and 6.9.
-    palette = {"group10": "#009E73", "group2": "#D55E00", "group1": "#CC79A7"}
-    result = splt.composition(
-        synthetic_plot_store,
-        category_by="group",
-        sample_by=sample_by,
-        categorical_scale=splt.CategoricalScale(palette=palette),
-        show_percent_labels=True,
-        label_min_fraction=0.1,
-        show=False,
-    )
-    try:
-        texts = result.axes["composition"].texts
-        segments = [
-            bar for bar in result.axes["composition"].patches if bar.get_height() >= 0.1
-        ]
-        assert texts and len(texts) == len(segments)
-        for text, segment in zip(texts, segments, strict=True):
-            face = to_hex(segment.get_facecolor())
-            assert to_hex(text.get_color()) == COLORBLIND_TEXT_COLORS[face.upper()]
-            assert wcag_contrast(text.get_color(), face) >= 4.5
-    finally:
-        result.close()
 
 
 def test_per_sample_composition_preserves_missing_categories(

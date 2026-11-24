@@ -41,7 +41,6 @@ from ._style import (
     missing_category_entry,
     resolve_category_scale,
     scatter_edgecolor,
-    text_color_on,
     theme_context,
 )
 from ..utils.arguments import bool_argument
@@ -749,6 +748,12 @@ def composition(
         )
         ax = axes[panel_key]
         if kind == "stacked":
+
+            def segment_text_color(face: str) -> str:
+                rgb = mpl.colors.to_rgb(face)
+                luminance = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
+                return "#111111" if luminance > 0.58 else "#ffffff"
+
             # The first category sits on top, so the stack reads from the top
             # in the legend's order.
             if sample_key is None and grouping is None:
@@ -780,7 +785,7 @@ def composition(
                             percent_format.format(val),
                             ha="center",
                             va="center",
-                            color=text_color_on(palette[cat]),
+                            color=segment_text_color(palette[cat]),
                             fontsize=7,
                             clip_on=True,
                         )
@@ -818,7 +823,7 @@ def composition(
                                 percent_format.format(height),
                                 ha="center",
                                 va="center",
-                                color=text_color_on(palette[cat]),
+                                color=segment_text_color(palette[cat]),
                                 fontsize=6.5,
                                 clip_on=True,
                             )

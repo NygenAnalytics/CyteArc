@@ -29,7 +29,6 @@ from ._style import (
     continuous_norm,
     resolve_color_limits,
     scalable_values,
-    text_color_on,
 )
 
 __all__ = [
@@ -724,13 +723,15 @@ def draw_matrix(
     if n_rows <= MAX_PRINTED_VALUES and n_columns <= MAX_PRINTED_VALUES:
         for row, column in zip(*np.nonzero(colored), strict=True):
             value = values[row, column]
+            red, green, blue, _alpha = colormap(norm(value))
+            light = 0.299 * red + 0.587 * green + 0.114 * blue > 0.5
             ax.text(
                 column,
                 row,
                 format(value, value_format),
                 ha="center",
                 va="center",
-                color=text_color_on(colormap(norm(value))),
+                color="black" if light else "white",
                 fontsize="x-small",
             )
     if show_legend:
