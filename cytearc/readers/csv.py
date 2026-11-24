@@ -24,6 +24,9 @@ from ..utils.arguments import bool_argument, quoted_value
 # read_csv settings that, besides the separator and ``quoting``, decide how
 # pandas splits a line into fields. The field check splits with the same ones.
 _QUOTING_SETTINGS = ("quotechar", "doublequote", "escapechar", "skipinitialspace")
+# read_csv settings that open the file, which a handle that the reader opens
+# has applied, and which read_csv would apply again or refuse beside it.
+_OPENING_SETTINGS = frozenset({"compression", "memory_map", "storage_options"})
 # read_csv settings that split lines in ways Python's csv module cannot follow.
 _UNSUPPORTED_SETTINGS = frozenset({"comment", "dialect", "lineterminator"})
 # read_csv settings that the reader sets from its own arguments, with the
@@ -491,8 +494,32 @@ class CSVReader:
         return head
 
     def _get_streamer(self) -> Generator[pd.DataFrame, None, None]:
-        reader = pd.read_csv(self._fn, **self.pandas_kwargs)
-        yield from reader
+        kwargs = self.pandas_kwargs
+        if kwargs.get("encoding_errors") in (None, "strict"):
+            yield from pd.read_csv(self._fn, **kwargs)
+            return
+        # Where pandas' C engine reads a file's bytes itself, as for an
+        # encoding of utf-8 and, from pandas 3.1 on, for a file without one,
+        # it decodes the text that it hands a converter, as the ID column's,
+        # under strict errors whatever encoding_errors asks. The file is
+        # decoded here instead, as the field check decodes it.
+        with get_handle(
+            self._fn,
+            "r",
+            encoding=kwargs.get("encoding"),
+            compression=kwargs["compression"],
+            errors=kwargs["encoding_errors"],
+            memory_map=kwargs.get("memory_map", False),
+            storage_options=kwargs.get("storage_options"),
+        ) as handles:
+            yield from pd.read_csv(
+                handles.handle,
+                **{
+                    key: value
+                    for key, value in kwargs.items()
+                    if key not in _OPENING_SETTINGS
+                },
+            )
 
     def _read_text[T](self, read: Callable[[], T]) -> T:
         """Return what ``read`` returns from the file's text, refusing bytes that its encoding cannot decode.
