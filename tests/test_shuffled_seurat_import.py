@@ -39,6 +39,7 @@ from cytearc.storage.count_matrix import CountMatrixPolicy
 from cytearc.storage.refs import artifact_path
 from cytearc.utils.memory_budget import MemoryBudgetError
 from cytearc.writers.seurat import SeuratToZarr
+from tests.storage_helpers import drawn_shuffles, shuffle_refusal
 from tests.test_seurat_import import _ordered_factor
 from tests.test_seurat_reader import _Wire, _write_fragment_matrix_fixture
 
@@ -769,6 +770,53 @@ def test_a_budget_without_room_for_the_spill_is_refused_with_the_bytes_it_needs(
     )
     assert shuffled.needed_bytes - plain.needed_bytes == spill
     assert not (tmp_path / "refused.zarr").exists()
+    assert not list(tmp_path.glob("cytearc-sparse-*"))
+
+
+def test_a_budget_without_room_for_the_shuffle_is_refused_before_it_runs(
+    tmp_path, monkeypatch
+) -> None:
+    source = _write_object(tmp_path / "object.rds")
+    # The count sources that the import holds when it shuffles. RNA's
+    # dgCMatrix stays in the file. ADT's counts stitch its layer into the
+    # object's cells: the source keeps each protein and cell name, counted as
+    # its UTF-8 bytes and 8 more, and the layer maps each protein and each of
+    # its cells by an int64 index.
+    names = [*_PROTEINS, *_cells(_N_CELLS)]
+    held = (
+        sum(len(name.encode()) + 8 for name in names)
+        + 8 * len(_PROTEINS)
+        + 8 * len(_members(_N_CELLS))
+    )
+    # Drawing the order and its inverse holds 24 bytes a cell beside them.
+    needed = held + 24 * _N_CELLS
+    drawn = drawn_shuffles(monkeypatch)
+
+    def attempt(destination: Path, budget: int) -> None:
+        with SeuratReader(source, temp_dir=tmp_path) as reader:
+            SeuratToZarr(
+                reader,
+                str(destination),
+                mem_budget=budget,
+                nthreads=1,
+                shuffle_cells=True,
+            ).dump()
+
+    with pytest.raises(MemoryBudgetError) as caught:
+        attempt(tmp_path / "refused.zarr", needed - 1)
+    refusal = caught.value
+    assert (refusal.needed_bytes, refusal.budget_bytes) == (needed, needed - 1)
+    assert str(refusal) == shuffle_refusal(_N_CELLS, held, needed - 1)
+    # The import is refused before it draws the order or writes anything.
+    assert drawn == []
+    assert not (tmp_path / "refused.zarr").exists()
+    # With the budget it names, the import draws the order, and a later step
+    # of so small a budget refuses for itself, if at all.
+    try:
+        attempt(tmp_path / "admitted.zarr", needed)
+    except MemoryError as later:
+        assert "random order" not in str(later)
+    assert drawn == [_N_CELLS]
     assert not list(tmp_path.glob("cytearc-sparse-*"))
 
 

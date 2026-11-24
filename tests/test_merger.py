@@ -6663,16 +6663,17 @@ def test_a_row_plan_gives_the_most_cells_of_one_source_in_a_window():
 def test_building_a_row_plan_holds_no_more_than_its_charge():
     import tracemalloc
 
-    from cytearc.merge.row_plan import ROW_PLAN_BUILD_BYTES_PER_CELL, build_row_plan
+    from cytearc.merge.row_plan import build_row_plan
+    from cytearc.storage.cell_order import SHUFFLE_BYTES_PER_CELL
 
-    # Ordering 30,000 cells holds 24 bytes for each beside the plan: the
-    # shuffle's hashes as they are mixed, beside the two arrays of the
-    # mixing's steps; a source's selected rows count their sorted copies too.
-    # Arrays of 30,000 cells stay below the 256 KiB from which NumPy reuses
-    # the temporaries of an expression, which only some Python builds allow,
-    # so the trace counts what every build holds.
+    # Ordering 30,000 cells holds what the shuffle holds at its peak, 24 bytes
+    # for each beside the plan: the shuffle's hashes as they are mixed, beside
+    # the two arrays of the mixing's steps; a source's selected rows count
+    # their sorted copies too. Arrays of 30,000 cells stay below the 256 KiB
+    # from which NumPy reuses the temporaries of an expression, which only
+    # some Python builds allow, so the trace counts what every build holds.
     sizes = [18_000, 12_000]
-    needed = 30_000 * ROW_PLAN_BUILD_BYTES_PER_CELL
+    needed = 30_000 * SHUFFLE_BYTES_PER_CELL
     build_row_plan(sizes, ["a", "b"], seed=1)
     tracemalloc.start()
     try:

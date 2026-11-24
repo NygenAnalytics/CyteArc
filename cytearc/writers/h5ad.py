@@ -907,9 +907,9 @@ class H5adToZarr:
             the column and the row, or the category of a categorical.
         OSError: If ``shuffle_cells`` is True and the temporary disk lacks
             room for the shuffled rows.
-        MemoryBudgetError: If ``shuffle_cells`` is True and an embedding or
-            a key's cluster labels do not fit in memory beside what the
-            import holds.
+        MemoryBudgetError: If ``shuffle_cells`` is True and the shuffle of
+            the cells, before it runs, or an embedding or a key's cluster
+            labels do not fit in memory beside what the import holds.
 
     Attributes:
         h5ad: A h5ad object (h5 file with added AnnData structure).
@@ -951,6 +951,7 @@ class H5adToZarr:
         )
         self.shuffleCells = bool_argument(shuffle_cells, "shuffle_cells")
         from ..storage.cell_order import (
+            check_shuffle_fits,
             destination_rows,
             shuffle_seed_argument,
             shuffled_order,
@@ -1067,6 +1068,12 @@ class H5adToZarr:
         # shuffled import finds before it scans the matrix.
         self._clusterDtypes: dict[str, tuple[np.dtype[Any], bool]] = {}
         if self.shuffleCells:
+            # Drawing the order and its inverse runs beside the IDs, names and
+            # other arrays that the import holds throughout, and the reader's
+            # row counts or converted rows, which a reused reader holds.
+            check_shuffle_fits(
+                self.h5ad.nCells, self._resident_bytes(), self.resources.memoryBytes
+            )
             self._cellOrder = shuffled_order(self.h5ad.nCells, self.shuffleSeed)
             # Embeddings and cluster labels that do not fit in memory are
             # refused before anything is written.

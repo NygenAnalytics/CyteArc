@@ -1020,7 +1020,7 @@ def test_importers_replace_a_store_only_with_overwrite(
         pytest.raises(FileExistsError, match="is not empty"),
     ):
         # Importers that pass over their source refuse the destination first.
-        for writer in ("cellranger", "h5ad", "seurat"):
+        for writer in ("cellranger", "csv", "h5ad", "seurat", "sparse"):
             patch.setattr(f"cytearc.writers.{writer}.count_storage_dtype", _unread)
         _IMPORTERS[importer](destination, stack, tmp_path, False)
     assert _store_bytes(destination) == before

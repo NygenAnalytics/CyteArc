@@ -82,6 +82,11 @@ class CSVtoZarr:
             reader counted.
         OSError: If ``shuffle_cells`` is True and the temporary disk lacks
             room for the shuffled rows.
+        MemoryBudgetError: If ``shuffle_cells`` is True and ``mem_budget``
+            cannot hold the shuffle of the cells beside their IDs, before the
+            shuffle runs, or one chunk of rows and their spill beside the
+            order of the cells and its inverse, before the store is created.
+            Each names the budget that holds it.
 
     Attributes:
         csvr: A CSVReader object
@@ -112,7 +117,11 @@ class CSVtoZarr:
     ) -> None:
         overwrite = bool_argument(overwrite, "overwrite")
         self.shuffleCells = bool_argument(shuffle_cells, "shuffle_cells")
-        from ..storage.cell_order import shuffle_seed_argument, shuffled_order
+        from ..storage.cell_order import (
+            check_shuffle_fits,
+            shuffle_seed_argument,
+            shuffled_order,
+        )
 
         self.shuffleSeed = shuffle_seed_argument(shuffle_seed)
         from ..utils.matrix_values import import_values_argument
@@ -126,7 +135,7 @@ class CSVtoZarr:
             validate_assay_name,
         )
         from ..storage.async_execution import register_store_threads
-        from ..storage.destinations import create_destination
+        from ..storage.destinations import check_destination, create_destination
         from ..storage.sharding import count_layout_request
         from ..assay.classification import validate_assay_type
         from ._store import resolve_import_values
@@ -143,6 +152,11 @@ class CSVtoZarr:
         self.io = io
         self.workspace = workspace
         self.storage_options = storage_options
+        # A destination that would be refused fails before the passes over
+        # the file below; create_destination checks it again.
+        check_destination(
+            zarr_loc, overwrite=overwrite, storage_options=storage_options
+        )
         cell_ids = self.csvr.cell_ids()
         storage_dtype = count_storage_dtype(self.csvr.countDtype, self.csvr.countRange)
         self.values = resolve_import_values(
@@ -160,6 +174,12 @@ class CSVtoZarr:
         self._shuffledStore: "SparseRowStore | None" = None
         self._shuffledParts: dict[int, list[tuple[np.ndarray, np.ndarray]]] = {}
         if self.shuffleCells:
+            # Drawing the order and its inverse runs beside the cell IDs: the
+            # reader's and this import's copy of them.
+            held_ids = int(cell_ids.nbytes) + (
+                0 if self.csvr.cellIds is None else int(self.csvr.cellIds.nbytes)
+            )
+            check_shuffle_fits(self.csvr.nCells, held_ids, self.resources.memoryBytes)
             self._cellOrder = shuffled_order(self.csvr.nCells, self.shuffleSeed)
             self._spill_rows()
             cell_ids = cell_ids[self._cellOrder]

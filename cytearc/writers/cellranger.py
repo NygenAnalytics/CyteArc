@@ -91,11 +91,12 @@ class CrToZarr:
         ValueError: If ``shuffle_seed`` lies outside its range.
         OSError: If ``shuffle_cells`` is True and the temporary disk lacks
             room for the shuffled cells.
-        MemoryBudgetError: If ``mem_budget`` cannot hold the sorting of a
-            feature-major Matrix Market file's entries into rows of cells,
-            before the sorting starts and before the destination exists. It
-            names the budget that holds it and, when one fits, a smaller
-            ``lines_in_mem``.
+        MemoryBudgetError: If ``mem_budget`` cannot hold the shuffle of the
+            cells beside the reader's arrays, when ``shuffle_cells`` is True,
+            or the sorting of a feature-major Matrix Market file's entries
+            into rows of cells. Each is refused before it starts and before
+            the destination exists, naming the budget that holds it; the
+            sorting also names a smaller ``lines_in_mem`` when one fits.
 
     Attributes:
         cr: A CrReader object, containing the Cellranger data.
@@ -131,6 +132,7 @@ class CrToZarr:
         overwrite = bool_argument(overwrite, "overwrite")
         self.shuffleCells = bool_argument(shuffle_cells, "shuffle_cells")
         from ..storage.cell_order import (
+            check_shuffle_fits,
             destination_rows,
             shuffle_seed_argument,
             shuffled_order,
@@ -199,6 +201,12 @@ class CrToZarr:
             configure_lines = getattr(self.cr, "_set_sparse_import_lines_in_mem", None)
             if callable(configure_lines):
                 configure_lines(self.linesInMem)
+            # Drawing the order and its inverse runs beside the reader's arrays.
+            check_shuffle_fits(
+                self.cr.nCells,
+                self._reader_resident_bytes(),
+                self.resources.memoryBytes,
+            )
             self._cellOrder = shuffled_order(self.cr.nCells, self.shuffleSeed)
             scan_options["destinationRows"] = destination_rows(self._cellOrder)
             held = 2 * self._cellOrder.nbytes

@@ -232,6 +232,10 @@ class SparseToZarr:
             ``shuffle_cells`` is not a boolean, or ``shuffle_seed`` is not an
             integer.
         FileExistsError: If ``zarr_loc`` is not empty and may not be replaced.
+        MemoryBudgetError: If ``shuffle_cells`` is True and ``mem_budget``
+            cannot hold the shuffle of the cells beside the matrices and the
+            cell IDs, before the shuffle runs and before the destination
+            exists, naming the budget that holds them.
 
     Attributes:
         assayNames: The names of the output assays, in the order written.
@@ -271,7 +275,11 @@ class SparseToZarr:
     ) -> None:
         overwrite = bool_argument(overwrite, "overwrite")
         self.shuffleCells = bool_argument(shuffle_cells, "shuffle_cells")
-        from ..storage.cell_order import shuffle_seed_argument, shuffled_order
+        from ..storage.cell_order import (
+            check_shuffle_fits,
+            shuffle_seed_argument,
+            shuffled_order,
+        )
 
         self.shuffleSeed = shuffle_seed_argument(shuffle_seed)
         from ..utils.matrix_values import import_values_argument
@@ -285,7 +293,7 @@ class SparseToZarr:
             validate_assay_name,
         )
         from ..storage.async_execution import register_store_threads
-        from ..storage.destinations import create_destination
+        from ..storage.destinations import check_destination, create_destination
         from ..storage.sharding import count_layout_request
         from ..assay.classification import validate_assay_type
         from ..utils.matrix_values import DETECTION_CELLS
@@ -334,14 +342,24 @@ class SparseToZarr:
                 assay.feature_ids,
                 "Feature IDs" if single else f"Feature IDs of assay {assay.name!r}",
             )
+        # A destination that would be refused fails before the passes over
+        # the matrices below; create_destination checks it again.
+        check_destination(
+            zarr_loc, overwrite=overwrite, storage_options=storage_options
+        )
+        # The scans read windows beside the matrices, which stay held, as
+        # does a shuffled import's order of the cells, drawn beside them and
+        # the import's copy of the cell IDs.
+        held = sum(sparse_matrix_bytes(assay.matrix) for assay in assays)
+        if self.shuffleCells:
+            check_shuffle_fits(
+                self.nCells, held + int(cell_ids.nbytes), self.resources.memoryBytes
+            )
         # Row r of every per-cell array holds the matrices' row _cellOrder[r];
         # each batch of the counts write gathers its rows from them.
         self._cellOrder: np.ndarray | None = (
             shuffled_order(self.nCells, self.shuffleSeed) if self.shuffleCells else None
         )
-        # The scans read windows beside the matrices, which stay held, as
-        # does a shuffled import's order of the cells.
-        held = sum(sparse_matrix_bytes(assay.matrix) for assay in assays)
         if self._cellOrder is not None:
             held += int(self._cellOrder.nbytes)
         self._heldMatrixBytes = held

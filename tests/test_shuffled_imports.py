@@ -51,6 +51,7 @@ from cytearc.writers import (
     SparseToZarr,
     TapestriToZarr,
 )
+from tests.storage_helpers import drawn_shuffles, shuffle_refusal
 from tests.variant_truth import tapestri_truth, write_tapestri
 
 _N_CELLS = 157
@@ -234,10 +235,12 @@ def _write_csv(path: Path, counts: np.ndarray) -> Path:
 def _csv_reader(path: Path, **options: Any) -> CSVReader:
     return CSVReader(
         str(path),
-        id_column=0,
-        cell_data_cols=["label", "score", "count", "flag", SOURCE_ROW],
-        batch_size=40,
-        **options,
+        **{
+            "id_column": 0,
+            "cell_data_cols": ["label", "score", "count", "flag", SOURCE_ROW],
+            "batch_size": 40,
+            **options,
+        },
     )
 
 
@@ -409,18 +412,27 @@ def _source(
             ),
             lines_in_mem=50,
         ), {"RNA": counts[_source_rows(kind)][:, :9]}
-    if kind == "tapestri":
+    if kind.startswith("tapestri"):
         truth = tapestri_truth()
-        path = write_tapestri(truth, tmp_path / "run.dna+protein.h5")
+        # Every row of the truth, or its first eight.
+        rows = _tapestri_rows(kind)
+        path = write_tapestri(truth, tmp_path / "run.dna+protein.h5", rows=rows)
         return _cr_import(
             lambda: TapestriReader(str(path), temp_dir=scratch), TapestriToZarr
-        ), {"CNV": truth.amplicon_reads, "ADT": truth.protein_reads}
-    if kind == "csv":
+        ), {"CNV": truth.amplicon_reads[rows], "ADT": truth.protein_reads[rows]}
+    if kind.startswith("csv"):
         path = _write_csv(tmp_path / "counts.csv", counts)
+        # Without an ID column, the reader names the cells cell_0, cell_1 and
+        # so on, and the file's cell column is left out.
+        reader_options: dict[str, Any] = (
+            {"id_column": None, "skip_cols": ["cell"]}
+            if kind == "csv-without-ids"
+            else {}
+        )
 
         def csv_import(destination: Path, options: dict[str, Any]) -> Any:
             writer = CSVtoZarr(
-                _csv_reader(path, temp_dir=scratch),
+                _csv_reader(path, temp_dir=scratch, **reader_options),
                 str(destination),
                 "RNA",
                 **{"mem_budget": "256M", "nthreads": 1, **options},
@@ -459,6 +471,11 @@ def _source(
     return sparse_import, (
         {"RNA": counts[:, :9]} if kind == "sparse" else dict(by_assay)
     )
+
+
+def _tapestri_rows(kind: str) -> np.ndarray:
+    """Return the truth's rows that a Tapestri source of ``kind`` holds: all, or the first eight."""
+    return np.arange(8 if kind == "tapestri-8" else tapestri_truth().n_rows)
 
 
 def _source_rows(kind: str) -> np.ndarray:
@@ -914,25 +931,138 @@ def _spill_attempts(
     return at_budget
 
 
-@pytest.mark.parametrize("kind", ["10x-cutoff", "mtx-cellMajor-filtered", "tapestri"])
-def test_a_shuffled_import_of_a_reader_names_the_budget_that_passes_its_spill(
-    tmp_path, kind
+def _held_before_the_shuffle(kind: str) -> int:
+    """Return the bytes of the arrays that an import of ``kind`` holds when it shuffles.
+
+    A 10x HDF5 reader holds the indexes of the barcodes it keeps, the
+    file's int64 row pointers and the kept cells' cumulative values, and a
+    Matrix Market reader the indexes and cumulative values and, for an
+    unordered file, each kept cell's next slot, all of 8 bytes. A Tapestri
+    reader holds each cell's sample, barcode and ID as Python strings of
+    ASCII, 41 bytes and one a character, each beside a reference of 8, and
+    counts the cells' cumulative reads, 8 bytes a cell and one, before its
+    scan reads them. A CSV import holds the reader's IDs and its own copy,
+    NumPy text of 4 bytes a character of the longest ID, or without an ID
+    column only the names that it makes, and the in-memory import its
+    matrices and its copy of the cell IDs, as NumPy text too.
+    """
+    counts = _counts()
+    kept = _kept(counts, cutoff=kind.endswith("cutoff")).size
+    if kind.startswith("10x"):
+        return 8 * kept + 8 * (counts.shape[0] + 1) + 8 * (kept + 1)
+    if kind.startswith("mtx"):
+        slots = 8 * (kept + 1) if "unordered" in kind else 0
+        return 8 * kept + 8 * (kept + 1) + slots
+    if kind.startswith("tapestri"):
+        truth = tapestri_truth()
+        rows = _tapestri_rows(kind)
+        texts = [
+            *truth.samples[rows].tolist(),
+            *truth.barcodes[rows].tolist(),
+            *(truth.row_ids[row] for row in rows),
+        ]
+        return sum(8 + 41 + len(text) for text in texts) + 8 * (rows.size + 1)
+    if kind == "csv":
+        return 2 * 4 * len(f"cell-{_N_CELLS - 1}") * _N_CELLS
+    if kind == "csv-without-ids":
+        return 4 * len(f"cell_{_N_CELLS - 1}") * _N_CELLS
+    matrices = (
+        [csr_matrix(counts[:, :9])]
+        if kind == "sparse"
+        else [csr_matrix(counts[:, columns]) for columns in _ASSAY_COLUMNS.values()]
+    )
+    matrix_bytes = sum(
+        matrix.data.nbytes + matrix.indices.nbytes + matrix.indptr.nbytes
+        for matrix in matrices
+    )
+    return matrix_bytes + 4 * len(f"cell-{_N_CELLS - 1}") * _N_CELLS
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "10x-filtered",
+        "10x-cutoff",
+        "mtx-cellMajor-filtered",
+        "mtx-unordered-cutoff",
+        "tapestri",
+        "csv",
+        "csv-without-ids",
+        "sparse",
+        "sparse-assays",
+    ],
+)
+def test_a_budget_without_room_for_the_shuffle_is_refused_before_it_runs(
+    tmp_path, monkeypatch, kind
 ) -> None:
     run, expected = _source(tmp_path, kind)
-    at_budget = _spill_attempts(tmp_path, run)
+    n_cells = next(iter(expected.values())).shape[0]
+    held = _held_before_the_shuffle(kind)
+    # Drawing the order and its inverse holds 24 bytes a cell beside them.
+    needed = held + 24 * n_cells
+    drawn = drawn_shuffles(monkeypatch)
+    refused = tmp_path / "refused.zarr"
     with pytest.raises(MemoryBudgetError) as caught:
-        at_budget(4_000)
-    # The spill runs beside the order of the cells and its inverse, 8 bytes a
-    # cell each, and a Matrix Market reader's arrays, so the refusal names
-    # the import's budget beside them.
+        run(refused, {"shuffle_cells": True, "mem_budget": needed - 1})
+    refusal = caught.value
+    assert (refusal.needed_bytes, refusal.budget_bytes) == (needed, needed - 1)
+    assert str(refusal) == shuffle_refusal(n_cells, held, needed - 1)
+    # The import is refused before it draws the order or writes anything.
+    assert drawn == []
+    assert not refused.exists()
+    # With the budget it names, the import draws the order, and a later step
+    # of so small a budget refuses for itself, if at all.
+    try:
+        run(tmp_path / "admitted.zarr", {"shuffle_cells": True, "mem_budget": needed})
+    except MemoryError as later:
+        assert "random order" not in str(later)
+    assert drawn == [n_cells]
+    assert _no_temporary_files(tmp_path)
+
+
+def test_a_shuffled_tapestri_import_passes_its_shuffle_before_it_refuses_its_spill(
+    tmp_path,
+) -> None:
+    run, expected = _source(tmp_path, "tapestri-8")
     cells = next(iter(expected.values())).shape[0]
+    at_budget = _spill_attempts(tmp_path, run)
+    # Eight cells hold rows wide enough that the spill needs more than the
+    # shuffle's budget, 24 bytes a cell beside the reader's strings and the
+    # cells' cumulative reads.
+    start = _held_before_the_shuffle("tapestri-8") + 24 * cells
+    with pytest.raises(MemoryBudgetError) as caught:
+        at_budget(start)
     assert caught.value.item == (
         f"the row spill of a cell shuffle beside the {16 * cells} bytes of its "
         "cell order"
     )
-    assert caught.value.budget_bytes == 4_000
+    assert caught.value.budget_bytes == start
+    assert caught.value.needed_bytes > start
+    assert _no_temporary_files(tmp_path)
+
+
+@pytest.mark.parametrize("kind", ["10x-cutoff", "mtx-cellMajor-filtered"])
+def test_a_shuffled_import_of_a_reader_names_the_budget_that_passes_its_spill(
+    tmp_path, kind
+) -> None:
+    run, expected = _source(tmp_path, kind)
+    cells = next(iter(expected.values())).shape[0]
+    at_budget = _spill_attempts(tmp_path, run)
+    # The budget that the shuffle names, 24 bytes a cell beside the reader's
+    # arrays, passes the shuffle and not the spill.
+    start = _held_before_the_shuffle(kind) + 24 * cells
+    with pytest.raises(MemoryBudgetError) as caught:
+        at_budget(start)
+    # The spill runs beside the order of the cells and its inverse, 8 bytes a
+    # cell each, and a Matrix Market reader's arrays, so the refusal names
+    # the import's budget beside them.
+    assert caught.value.item == (
+        f"the row spill of a cell shuffle beside the {16 * cells} bytes of its "
+        "cell order"
+    )
+    assert caught.value.budget_bytes == start
     needed = caught.value.needed_bytes
-    assert needed > 4_000
+    assert needed > start
     # With the budget it names, the spill fits; one byte less is refused,
     # naming the same budget.
     at_budget(needed)
@@ -949,9 +1079,10 @@ def test_a_shuffled_csv_import_names_the_least_budget_that_passes_its_spill(
     at_budget = _spill_attempts(tmp_path, run)
     # A budget sizes the spill's buckets, and larger buckets need less beside
     # them, so what the spill needs depends on the budget. Whatever budget it
-    # refuses, the refusal names the least import budget that passes it.
+    # refuses, the refusal names the least import budget that passes it. The
+    # least budget tried passes the shuffle, 24 bytes a cell beside the IDs.
     named = set()
-    for budget in (4_000, 20_000, 40_000):
+    for budget in (_held_before_the_shuffle("csv") + 24 * _N_CELLS, 20_000, 40_000):
         with pytest.raises(MemoryBudgetError) as caught:
             at_budget(budget)
         # The order of the cells and its inverse, 8 bytes a cell each, are
@@ -975,6 +1106,28 @@ def test_a_shuffled_csv_import_names_the_least_budget_that_passes_its_spill(
         f"{below.value.item}, more than the memory budget of {needed - 1} bytes. "
         f"Raise mem_budget to at least {needed} bytes."
     )
+    assert _no_temporary_files(tmp_path)
+
+
+def test_a_shuffled_csv_import_refuses_an_occupied_destination_before_it_reads_the_rows(
+    tmp_path, monkeypatch
+) -> None:
+    reader = _csv_reader(
+        _write_csv(tmp_path / "counts.csv", _counts()), temp_dir=str(tmp_path)
+    )
+    occupied = tmp_path / "occupied"
+    occupied.mkdir()
+    (occupied / "notes.txt").write_text("not a store")
+    drawn = drawn_shuffles(monkeypatch)
+
+    def unread(*_args: Any) -> Any:
+        raise AssertionError("the file's rows were read before the destination check")
+
+    monkeypatch.setattr(CSVReader, "consume", unread)
+    with pytest.raises(FileExistsError, match="is not empty"):
+        CSVtoZarr(reader, str(occupied), "RNA", nthreads=1, shuffle_cells=True)
+    # Neither the order nor the spill of the rows was started.
+    assert drawn == []
     assert _no_temporary_files(tmp_path)
 
 

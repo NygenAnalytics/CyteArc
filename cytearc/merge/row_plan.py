@@ -6,7 +6,11 @@ from typing import Any
 import numpy as np
 
 from ..metadata.rows import read_metadata_rows_chunkwise
-from ..storage.cell_order import shuffle_seed_argument, shuffled_order
+from ..storage.cell_order import (
+    SHUFFLE_BYTES_PER_CELL,
+    shuffle_seed_argument,
+    shuffled_order,
+)
 from ..storage.partition import checked_indices
 from ..utils.digest import mix64_array
 from ..utils.memory_budget import memory_refusal
@@ -22,12 +26,6 @@ CELL_ORDER_MISMATCH = (
 # What a window of merged rows holds for each of its rows while it is in use:
 # the positions and source rows of its parts, and the sort that groups them.
 WINDOW_BYTES_PER_ROW = 24
-# What building a row plan holds for each merged cell beside the plan, at its
-# peak: the hashes of the shuffle that arranges the sources' turns as they are
-# mixed, beside the two arrays of the mixing's steps (mix64_array). Sorting the
-# hashes then holds them and their order, which NumPy's sort fills without a
-# buffer, and finding the sources' turns holds the order and each turn.
-ROW_PLAN_BUILD_BYTES_PER_CELL = 24
 # SplitMix64's increment, which spaces the counters of a stream.
 _GOLDEN = np.uint64(0x9E3779B97F4A7C15)
 # "MrgStart" in ASCII, mixed into the merge's seed, so the first cell of each
@@ -143,8 +141,9 @@ def build_row_plan(
     in any order, or None for every row. Each source gives its cells in
     their stored order from a random first cell, wrapping round, as
     :class:`RowPlan` describes. ``seed`` None draws a new order. Building
-    holds ``ROW_PLAN_BUILD_BYTES_PER_CELL`` bytes for each merged cell
-    beside the plan, which must fit ``memory_bytes`` when given.
+    holds what the shuffle that arranges the sources' turns holds at its
+    peak, ``SHUFFLE_BYTES_PER_CELL`` bytes for each merged cell, beside the
+    selected rows, which must fit ``memory_bytes`` when given.
 
     Raises:
         MemoryBudgetError: If building needs more than ``memory_bytes``.
@@ -171,7 +170,7 @@ def build_row_plan(
         chosen.append(rows)
         cells.append(int(rows.size))
     n_total = sum(cells)
-    needed = n_total * ROW_PLAN_BUILD_BYTES_PER_CELL + sum(
+    needed = n_total * SHUFFLE_BYTES_PER_CELL + sum(
         int(rows.nbytes) for rows in chosen if rows is not None
     )
     if memory_bytes is not None and needed > int(memory_bytes):
@@ -183,7 +182,9 @@ def build_row_plan(
         )
     # The concatenated cells of source s are the integers from the cells of
     # the sources before it up to its own last; a uniform permutation of them
-    # gives the turn of every merged row to the source of its cell.
+    # gives the turn of every merged row to the source of its cell. Finding
+    # them holds less than the shuffle: the order and the turns, 16 bytes a
+    # cell, and then the turns and their sources.
     owners = np.searchsorted(
         np.cumsum(cells), shuffled_order(n_total, seed), side="right"
     ).astype(np.min_scalar_type(max(0, len(cells) - 1)), copy=False)
