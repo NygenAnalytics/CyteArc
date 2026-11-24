@@ -4,6 +4,7 @@ import inspect
 import os
 import re
 import threading
+import time
 import weakref
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
@@ -424,13 +425,8 @@ def _held_locks() -> set[str]:
     return held
 
 
-def _locked_file(path: str, *, shared: bool) -> IO[str] | None:
+def _locked_file(fcntl: Any, path: str, *, shared: bool) -> IO[str] | None:
     """Return ``path`` opened and locked, or None where it cannot be locked."""
-    try:
-        import fcntl
-    except ImportError:
-        # Windows has no flock, so its processes share Numba caches unlocked.
-        return None
     try:
         handle = open(path, "a")
     except OSError as error:
@@ -445,6 +441,63 @@ def _locked_file(path: str, *, shared: bool) -> IO[str] | None:
     return handle
 
 
+def _locked_first_byte(msvcrt: Any, path: str) -> Callable[[], None] | None:
+    """Lock the first byte of the file at ``path`` with msvcrt, waiting while
+    another handle holds it, and return the function that unlocks it, or None
+    where it cannot be locked."""
+    try:
+        descriptor = os.open(path, os.O_RDWR | os.O_CREAT)
+    except OSError as error:
+        logger.debug(f"Numba cache lock {path} cannot be opened: {error}")
+        return None
+    pause = 0.001
+    while True:
+        try:
+            # The lock starts at the file's position, which opening leaves at
+            # the first byte.
+            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+            break
+        except PermissionError:
+            # Another handle holds the byte. LK_LOCK would give up after 10
+            # tries a second apart, so this tries again until the byte is free,
+            # as flock waits.
+            time.sleep(pause)
+            pause = min(2 * pause, 0.05)
+        except OSError as error:
+            os.close(descriptor)
+            logger.debug(f"Numba cache lock {path} cannot be taken: {error}")
+            return None
+
+    def unlock() -> None:
+        # Windows also unlocks the byte when the file closes, but at a time
+        # that depends on the system's resources, so the byte is unlocked first.
+        try:
+            msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+        finally:
+            os.close(descriptor)
+
+    return unlock
+
+
+def _directory_lock(directory: str, *, shared: bool) -> Callable[[], None] | None:
+    """Take a cache directory's lock and return the function that releases
+    it, or None where the lock cannot be taken."""
+    path = os.path.join(directory, _LOCK_FILE_NAME)
+    try:
+        import fcntl
+    except ImportError:
+        try:
+            import msvcrt
+        except ImportError:
+            return None
+        # Windows has no flock, and msvcrt has no shared locks, so every block
+        # holds the lock alone.
+        return _locked_first_byte(msvcrt, path)
+    handle = _locked_file(fcntl, path, shared=shared)
+    # Closing the file releases its lock.
+    return None if handle is None else handle.close
+
+
 @contextmanager
 def cache_directory_lock(directory: str, *, shared: bool = False) -> Iterator[None]:
     """Hold a Numba cache directory's lock, which every process shares, in the block.
@@ -454,20 +507,19 @@ def cache_directory_lock(directory: str, *, shared: bool = False) -> Iterator[No
     then the data, without a lock. Processes that save entries of one function
     at once can leave the index pointing one entry at another's machine code,
     so that every later load of it fails. A block that writes holds the lock
-    alone; ``shared`` blocks, which only read, hold it together.
+    alone; ``shared`` blocks, which only read, hold it together. On Windows,
+    which has no ``flock``, the lock is the first byte of the same file,
+    locked with ``msvcrt``, and every block holds it alone.
 
-    A thread that already holds the lock enters again without waiting, so it
-    must not ask to write while it reads. Where the lock file cannot be
-    created or locked, as on Windows, which has no ``flock``, the block runs
-    unlocked.
+    A block waits for as long as another process holds the lock, and the
+    system releases the lock of a process that ends, also of one that was
+    killed. A thread that already holds the lock enters again without
+    waiting, so it must not ask to write while it reads. Where the lock file
+    cannot be created or locked, the block runs unlocked.
     """
     held = _held_locks()
-    handle = (
-        None
-        if directory in held
-        else _locked_file(os.path.join(directory, _LOCK_FILE_NAME), shared=shared)
-    )
-    if handle is None:
+    release = None if directory in held else _directory_lock(directory, shared=shared)
+    if release is None:
         yield
         return
     held.add(directory)
@@ -475,8 +527,7 @@ def cache_directory_lock(directory: str, *, shared: bool = False) -> Iterator[No
         yield
     finally:
         held.discard(directory)
-        # Closing the file releases its lock.
-        handle.close()
+        release()
 
 
 def _has_cache_entry(dispatcher: Any, sig: Any) -> bool:
