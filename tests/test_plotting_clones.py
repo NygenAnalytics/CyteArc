@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pytest
+from matplotlib.colors import to_hex
 
 from cytearc.clones import diversity as dv
 from cytearc.datastore.datastore import DataStore
@@ -1692,9 +1693,9 @@ def test_the_overlap_plot_prints_values_of_at_most_12_groups(many_groups) -> Non
     assert len(ax.texts) == 12 * 11
     shown = {text.get_position(): text for text in ax.texts}
     assert shown[(1, 0)].get_text() == "1" and shown[(2, 0)].get_text() == "0"
-    # Dark text on the light color of 1, light text on the dark color of 0.
-    assert shown[(1, 0)].get_color() == "black"
-    assert shown[(2, 0)].get_color() == "white"
+    # Black text on the light color of 1, white text on the dark color of 0.
+    assert to_hex(shown[(1, 0)].get_color()) == "#000000"
+    assert to_hex(shown[(2, 0)].get_color()) == "#ffffff"
     plt.close(twelve.figure)
     thirteen = _overlap_of_first(many_groups, 13)
     assert len(thirteen.axes["matrix"].texts) == 0

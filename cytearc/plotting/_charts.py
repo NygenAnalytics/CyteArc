@@ -29,6 +29,7 @@ from ._style import (
     continuous_norm,
     resolve_color_limits,
     scalable_values,
+    text_color_on,
 )
 
 __all__ = [
@@ -679,7 +680,8 @@ def draw_matrix(
     ``missing_color``, and with ``blank_diagonal`` the diagonal is left
     blank and out of the color limits, so the colors span the other cells.
     A table of at most ``MAX_PRINTED_VALUES`` rows and columns prints each
-    colored value, dark on light colors and light on dark ones. Each axis
+    colored value in black or white, whichever reaches the higher WCAG 2
+    contrast ratio on its color. Each axis
     names as many of its rows or columns as its length holds once the
     figure is laid out, at most ``MAX_NAMED_ITEMS``: every one, or else
     every second, third or nth.
@@ -723,15 +725,13 @@ def draw_matrix(
     if n_rows <= MAX_PRINTED_VALUES and n_columns <= MAX_PRINTED_VALUES:
         for row, column in zip(*np.nonzero(colored), strict=True):
             value = values[row, column]
-            red, green, blue, _alpha = colormap(norm(value))
-            light = 0.299 * red + 0.587 * green + 0.114 * blue > 0.5
             ax.text(
                 column,
                 row,
                 format(value, value_format),
                 ha="center",
                 va="center",
-                color="black" if light else "white",
+                color=text_color_on(colormap(norm(value))),
                 fontsize="x-small",
             )
     if show_legend:
