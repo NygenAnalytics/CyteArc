@@ -1175,8 +1175,10 @@ def _interleaved_ids(selected, seed=42):
     ``selected`` maps each source name, in source order, to its selected
     rows. The concatenated selected cells take the turns that the import
     shuffle of ``seed`` gives them, and each source gives its cells in its
-    stored order.
+    stored order from the first cell that the plan of ``seed`` draws,
+    wrapping round.
     """
+    from cytearc.merge.row_plan import build_row_plan
     from cytearc.storage.cell_order import shuffled_order
 
     names = list(selected)
@@ -1185,36 +1187,39 @@ def _interleaved_ids(selected, seed=42):
     turns = np.searchsorted(
         np.cumsum(sizes), shuffled_order(sum(sizes), seed), side="right"
     )
+    first_cells = dict(zip(names, build_row_plan(sizes, names, seed=seed).firstCells))
     taken = dict.fromkeys(names, 0)
     ids = []
     for turn in turns.tolist():
         name = names[turn]
-        ids.append(f"{name}__c{rows[name][taken[name]]}")
+        cell = (taken[name] + first_cells[name]) % len(rows[name])
+        ids.append(f"{name}__c{rows[name][cell]}")
         taken[name] += 1
     return ids
 
 
 # The order of every cell of the fixture's sources, 13 of a and 11 of b, in a
 # composite and in a merge with the default seed: each source's cells in their
-# stored order, taking the turns that the seed draws.
+# stored order from the first cell that the seed draws, a's eighth and b's
+# third, taking the turns that the seed draws.
 _ALL_CELLS_ORDER = [
-    *("b__c0", "a__c0", "b__c1", "b__c2", "a__c1", "b__c3", "a__c2", "a__c3"),
-    *("b__c4", "b__c5", "a__c4", "a__c5", "b__c6", "b__c7", "a__c6", "a__c7"),
-    *("a__c8", "a__c9", "a__c10", "b__c8", "b__c9", "b__c10", "a__c11", "a__c12"),
+    *("b__c2", "a__c7", "b__c3", "b__c4", "a__c8", "b__c5", "a__c9", "a__c10"),
+    *("b__c6", "b__c7", "a__c11", "a__c12", "b__c8", "b__c9", "a__c0", "a__c1"),
+    *("a__c2", "a__c3", "a__c4", "b__c10", "b__c0", "b__c1", "a__c5", "a__c6"),
 ]
 
 # The order with rows={"a": [12, 0, 7, 4]}: a's selected cells in its stored
-# order, interleaved with every cell of b.
+# order from its third, interleaved with every cell of b.
 _SELECTED_CELLS_ORDER = [
-    *("b__c0", "b__c1", "b__c2", "b__c3", "b__c4", "b__c5", "a__c0", "b__c6"),
-    *("b__c7", "b__c8", "a__c4", "b__c9", "a__c7", "a__c12", "b__c10"),
+    *("b__c2", "b__c3", "b__c4", "b__c5", "b__c6", "b__c7", "a__c7", "b__c8"),
+    *("b__c9", "b__c10", "a__c12", "b__c0", "a__c0", "a__c4", "b__c1"),
 ]
 
-# The order of a merge with seed=0, which draws other turns.
+# The order of a merge with seed=0, which draws other turns and first cells.
 _SEED_0_ORDER = [
-    *("b__c0", "b__c1", "b__c2", "b__c3", "b__c4", "b__c5", "a__c0", "a__c1"),
-    *("b__c6", "a__c2", "a__c3", "a__c4", "b__c7", "b__c8", "a__c5", "a__c6"),
-    *("a__c7", "a__c8", "b__c9", "a__c9", "b__c10", "a__c10", "a__c11", "a__c12"),
+    *("b__c0", "b__c1", "b__c2", "b__c3", "b__c4", "b__c5", "a__c9", "a__c10"),
+    *("b__c6", "a__c11", "a__c12", "a__c0", "b__c7", "b__c8", "a__c1", "a__c2"),
+    *("a__c3", "a__c4", "b__c9", "a__c5", "b__c10", "a__c6", "a__c7", "a__c8"),
 ]
 
 
@@ -3906,7 +3911,10 @@ def test_composite_reopen_rejects_invalid_saved_contract(
         ("overlap_without_root_metadata", ValueError, "must not overlap a source"),
         ("assay_type", ValueError, "different types"),
         ("empty_selection", ValueError, "at least one selected cell"),
-        ("budget", MemoryError, "mappings exceed mem_budget"),
+        # A budget below 24 bytes a cell refuses the order of the cells, and
+        # one that holds the order refuses the mappings beside it.
+        ("budget", MemoryError, "Ordering 24 merged cells holds about 576 bytes"),
+        ("mappings_budget", MemoryError, "mappings exceed mem_budget"),
     ],
 )
 def test_composite_invalid_creation_preserves_sources(
@@ -3959,6 +3967,8 @@ def test_composite_invalid_creation_preserves_sources(
         options["rows"] = {"a": [], "b": []}
     elif problem == "budget":
         options["mem_budget"] = 1
+    elif problem == "mappings_budget":
+        options["mem_budget"] = 576
     before = {
         name: _tree_digest(source.z.store.root) for name, source in sources.items()
     }
@@ -4139,10 +4149,12 @@ def test_contiguous_slices_of_a_composite_of_shuffled_imports_are_random_samples
         assert_random_sample_order(ids)
         assert joint.cells._group.attrs["cellOrder"] == {"shuffled": True, "seed": 42}
     else:
-        # A source in its file's order keeps that order, and the composite
-        # records no shuffle.
-        with pytest.raises(AssertionError):
-            assert_random_sample_order(ids)
+        # A source in its file's order keeps that order from a random first
+        # cell, wrapping round, and the composite records no shuffle.
+        file_rows = grouped_file_rows(ids)
+        given = file_rows[[identity.startswith("b__") for identity in ids]]
+        first = int(np.argmin(given))
+        assert np.all(np.diff(np.roll(given, -first)) > 0)
         assert "cellOrder" not in joint.cells._group.attrs
     if rows is None:
         # A composite of every cell lists them as the merge of its sources does.

@@ -155,7 +155,9 @@ def test_verify_merged_cell_ids(bench) -> None:
         tampered = zarr.open_group(store=MemoryStore(), mode="w").create_array(
             "ids", data=swapped, chunks=stored.chunks
         )
-        with pytest.raises(ValueError, match="order of cells does not match"):
+        with pytest.raises(
+            ValueError, match="cell IDs or their order differ from this merge's"
+        ):
             verify_merged_cell_ids(tampered, plan, tables, block_rows=PLAN_BLOCK_ROWS)
 
     # Every resume of a merge plans this pass over all merged cells.

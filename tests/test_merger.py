@@ -1648,7 +1648,7 @@ def test_dataset_merge_plan_reports_destination_conflict(tmp_path, merged_two_rn
 @pytest.mark.parametrize(
     ("case", "reason"),
     [
-        ("cell_identity", "order of cells"),
+        ("cell_identity", "cell IDs or their order differ"),
         ("counts_shape", "not finalized"),
         ("counts_dtype", "not finalized"),
         ("counts_chunks", "not finalized"),
@@ -3003,7 +3003,7 @@ def test_dataset_merge_writes_cell_metadata_in_whole_chunk_bands(tmp_path, monke
     ids[:] = swapped
     blocked = merger(banded_path).plan()
     assert blocked.canDump is False
-    assert "order of cells" in blocked.blockedReason
+    assert "cell IDs or their order differ" in blocked.blockedReason
 
 
 def test_dataset_merge_producer_reserve_uses_source_feature_width():
@@ -3186,13 +3186,16 @@ def test_dataset_merge_charges_a_source_it_reads_its_counts_and_smallest_read():
 
 def test_dataset_merge_rejects_insufficient_metadata_budget(tmp_path):
     path = str(tmp_path / "meta_budget.zarr")
-    merger = _merge_two_rna(
-        zarr_path=path,
-        mem_budget=64,
-        nthreads=1,
-    )
-    with pytest.raises(MemoryError, match="schema discovery"):
-        merger.plan()
+    # Ordering the 4 merged cells holds 24 bytes for each of them, the
+    # shuffle's hashes and order and each cell's source; beyond that, the
+    # budget leaves no room for the schema of the cell metadata.
+    for budget, message in (
+        (95, "Ordering 4 merged cells holds about 96 bytes"),
+        (96, "schema discovery"),
+    ):
+        merger = _merge_two_rna(zarr_path=path, mem_budget=budget, nthreads=1)
+        with pytest.raises(MemoryError, match=message):
+            merger.plan()
     assert not (tmp_path / "meta_budget.zarr").exists()
 
 
@@ -3772,7 +3775,7 @@ def test_dataset_merge_rejects_feature_metadata_width_mismatch():
 @pytest.mark.parametrize(
     ("case", "reason"),
     [
-        ("cell_id", "order of cells"),
+        ("cell_id", "cell IDs or their order differ"),
         ("feature_id", "featureData/ids"),
         ("feature_name", "featureData/names"),
     ],
@@ -6555,14 +6558,22 @@ def test_a_row_plan_interleaves_the_sources_and_keeps_each_ones_order(window_row
     coordinates = _plan_coordinates(plan, window_rows)
     # The source of each merged row is the source of the concatenated cell
     # that the import shuffle puts there, and each source gives its cells in
-    # its stored order.
+    # its stored order from its first cell, 4 of a's and 10 of b's for this
+    # seed, then from its first stored cell up to that one.
     owners = (shuffled_order(24, 7) >= 13).astype(int)
     assert [source for source, _ in coordinates] == owners.tolist()
-    assert [row for source, row in coordinates if source == 0] == list(range(13))
-    assert [row for source, row in coordinates if source == 1] == list(range(11))
+    assert plan.firstCells == (4, 10)
+    assert [row for source, row in coordinates if source == 0] == [
+        *range(4, 13),
+        *range(4),
+    ]
+    assert [row for source, row in coordinates if source == 1] == [10, *range(10)]
     assert plan.owners.dtype == np.uint8
     assert (plan.nCells, plan.sourceCells, plan.seed) == (24, (13, 11), 7)
-    assert plan.destination_rows(1).tolist() == np.flatnonzero(owners).tolist()
+    # Each cell's merged row, in the source's stored order.
+    for source, n_cells in ((0, 13), (1, 11)):
+        expected = [coordinates.index((source, row)) for row in range(n_cells)]
+        assert plan.destination_rows(source).tolist() == expected
 
 
 def test_a_row_plan_takes_selected_rows_in_store_order_whatever_their_order():
@@ -6577,7 +6588,10 @@ def test_a_row_plan_takes_selected_rows_in_store_order_whatever_their_order():
     selected = [np.array([12, 7, 0, 4]), np.array([10, 0])]
     plan = build_row_plan(sizes, names, seed=7, selected_rows=selected)
     coordinates = _plan_coordinates(plan, 4)
-    assert [row for source, row in coordinates if source == 0] == [0, 4, 7, 12]
+    # Each source gives its selected rows in stored order, from the fourth
+    # of a's and the first of b's for this seed.
+    assert plan.firstCells == (3, 0)
+    assert [row for source, row in coordinates if source == 0] == [12, 0, 4, 7]
     assert [row for source, row in coordinates if source == 1] == [0, 10]
     assert plan.source_rows(0, 1, 3).tolist() == [4, 7]
     assert plan.resident_bytes() == plan.owners.nbytes + 6 * 8
@@ -6607,6 +6621,83 @@ def test_selected_row_plan_rejects_invalid_selections(selection, error, message)
         build_row_plan([5, 3], ["a", "b"], selected_rows=selection)
 
 
+def test_a_row_plan_starts_each_source_at_a_uniformly_random_cell():
+    from scipy import stats
+
+    from cytearc.merge.row_plan import build_row_plan
+
+    # Over 7,000 seeds, the first cells of sources of 7 and 10 cells take
+    # each cell alike, and neither depends on the other or on the source of
+    # the first merged row.
+    plans = [build_row_plan([7, 10], ["a", "b"], seed=seed) for seed in range(7000)]
+    firsts = np.asarray([plan.firstCells for plan in plans])
+    turns = np.asarray([int(plan.owners[0]) for plan in plans])
+    for source, cells in ((0, 7), (1, 10)):
+        assert (
+            stats.chisquare(np.bincount(firsts[:, source], minlength=cells)).pvalue
+            > 1e-4
+        )
+        joint = np.zeros((cells, 2))
+        np.add.at(joint, (firsts[:, source], turns), 1)
+        assert stats.chi2_contingency(joint).pvalue > 1e-4
+    both = np.zeros((7, 10))
+    np.add.at(both, (firsts[:, 0], firsts[:, 1]), 1)
+    assert stats.chi2_contingency(both).pvalue > 1e-4
+
+
+def test_a_row_plan_gives_the_most_cells_of_one_source_in_a_window():
+    from cytearc.merge.row_plan import build_row_plan
+    from cytearc.storage.cell_order import shuffled_order
+
+    plan = build_row_plan([13, 11], ["a", "b"], seed=7)
+    owners = (shuffled_order(24, 7) >= 13).astype(int)
+    for window in (1, 3, 5, 24, 100):
+        expected = max(
+            int(np.bincount(owners[start : start + window], minlength=2).max())
+            for start in range(0, 24, window)
+        )
+        assert plan.most_source_cells(window) == expected
+    assert build_row_plan([0, 0], ["a", "b"]).most_source_cells(4) == 0
+
+
+def test_building_a_row_plan_holds_no_more_than_its_charge():
+    import tracemalloc
+
+    from cytearc.merge.row_plan import ROW_PLAN_BUILD_BYTES_PER_CELL, build_row_plan
+
+    # Ordering 500,000 cells holds 24 bytes for each beside the plan: the
+    # shuffle's hashes and order and each cell's source, at most; a source's
+    # selected rows count their sorted copies too.
+    sizes = [300_000, 200_000]
+    needed = 500_000 * ROW_PLAN_BUILD_BYTES_PER_CELL
+    build_row_plan(sizes, ["a", "b"], seed=1)
+    tracemalloc.start()
+    try:
+        build_row_plan(sizes, ["a", "b"], seed=1, memory_bytes=needed)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert needed - 500_000 < peak <= needed + 4_096
+    with pytest.raises(
+        MemoryBudgetError,
+        match="^Ordering 500000 merged cells holds about 12000000 bytes",
+    ):
+        build_row_plan(sizes, ["a", "b"], seed=1, memory_bytes=needed - 1)
+    # A third of a's cells and every cell of b: 300,000 cells at 24 bytes
+    # and a's 100,000 selected rows at 8.
+    selected = [np.arange(0, 300_000, 3), None]
+    with pytest.raises(
+        MemoryBudgetError,
+        match="^Ordering 300000 merged cells holds about 8000000 bytes",
+    ):
+        build_row_plan(
+            sizes, ["a", "b"], seed=1, selected_rows=selected, memory_bytes=7_999_999
+        )
+    build_row_plan(
+        sizes, ["a", "b"], seed=1, selected_rows=selected, memory_bytes=8_000_000
+    )
+
+
 def test_a_row_plan_of_one_seed_is_the_same_on_every_run_and_none_draws_another():
     from cytearc.merge.row_plan import build_row_plan
 
@@ -6617,6 +6708,7 @@ def test_a_row_plan_of_one_seed_is_the_same_on_every_run_and_none_draws_another(
         *(0, 0, 0, 1, 1, 1, 0, 0),
     ]
     assert build_row_plan([13, 11], ["a", "b"]).owners.tolist() == plan.owners.tolist()
+    assert plan.firstCells == (7, 2)
     drawn = [build_row_plan([20, 20], ["a", "b"], seed=None) for _ in range(2)]
     # Two orders of 40 cells agree with odds of one in 138 billion.
     assert drawn[0].owners.tolist() != drawn[1].owners.tolist()
@@ -6744,37 +6836,46 @@ def test_the_random_arrangement_check_rejects_orders_that_are_not(arrangement):
         _assert_random_arrangement(_two_source_arrangements(arrange))
 
 
-@pytest.mark.parametrize("sources_shuffled", [True, False])
+# Sources shuffled with seeds of their own, with one seed for both, as
+# default imports share shuffle_seed=0, or kept in file order.
+@pytest.mark.parametrize("import_seeds", ["own", "shared", "file order"])
 def test_a_merge_of_shuffled_sources_lists_its_cells_in_a_uniform_order(
-    sources_shuffled,
+    import_seeds,
 ):
     from scipy import stats
 
     from cytearc.merge.row_plan import build_row_plan
     from cytearc.storage.cell_order import shuffled_order
 
-    # Source a's file lists group x, rows 0 to 29, before group y; source b
-    # holds 40 cells. Each trial imports both, shuffled with seeds of their
-    # own or in file order, and merges them with a seed of its own.
+    # Each file lists group x, its first fifth, before group y: rows 0 to 11
+    # of source a's 60 cells and rows 0 to 7 of b's 40. Each trial imports
+    # both and merges them with a seed of its own.
     trials = 3000
     positions, x_counts = [], []
     for trial in range(trials):
+        seeds = {"own": (1000 + trial, 5000 + trial), "shared": (1000 + trial,) * 2}
         stored = [
-            shuffled_order(60, 1000 + trial) if sources_shuffled else np.arange(60),
-            shuffled_order(40, 5000 + trial) if sources_shuffled else np.arange(40),
+            np.arange(n_cells)
+            if import_seeds == "file order"
+            else shuffled_order(n_cells, seeds[import_seeds][source])
+            for source, n_cells in enumerate((60, 40))
         ]
         plan = build_row_plan([60, 40], ["a", "b"], seed=trial)
         merged = np.empty(100, dtype=np.int64)
-        for source, offset in ((0, 0), (1, 60)):
-            merged[plan.destination_rows(source)] = offset + stored[source]
+        in_x = np.empty(100, dtype=bool)
+        for source, (offset, x_rows) in enumerate(((0, 12), (60, 8))):
+            rows = plan.destination_rows(source)
+            merged[rows] = offset + stored[source]
+            in_x[rows] = stored[source] < x_rows
         positions.append(int(np.flatnonzero(merged == 0)[0]))
-        x_counts.append(int(np.count_nonzero(merged[:20] < 30)))
-    # A fixed cell, a's file row 0, lies anywhere in the merge alike, and
-    # the first 20 merged cells hold group x as a random sample does.
+        x_counts.append(int(np.count_nonzero(in_x[:20])))
+    # A fixed cell, a's file row 0, lies anywhere in the merge alike, and the
+    # first 20 merged cells hold group x as a random sample does: the
+    # hypergeometric law of 20 of 100 cells, of mean 4 and variance 2.59.
     position_p = stats.chisquare(
         np.bincount(np.asarray(positions) // 10, minlength=10)
     ).pvalue
-    law = stats.hypergeom(100, 30, 20)
+    law = stats.hypergeom(100, 20, 20)
     expected = law.pmf(np.arange(21)) * trials
     observed = np.bincount(x_counts, minlength=21).astype(float)
     kept = np.flatnonzero(expected >= 5)
@@ -6787,11 +6888,17 @@ def test_a_merge_of_shuffled_sources_lists_its_cells_in_a_uniform_order(
     ]
     pooled_expected *= pooled_observed.sum() / pooled_expected.sum()
     window_p = stats.chisquare(pooled_observed, pooled_expected).pvalue
-    if sources_shuffled:
-        assert position_p > 1e-4 and window_p > 1e-4
+    variance = float(np.var(x_counts))
+    if import_seeds == "file order":
+        # Each source keeps its file order from a random first cell, so a
+        # fixed cell lies anywhere, but a window holds runs of file rows.
+        assert position_p > 1e-4 and window_p < 1e-10
     else:
-        # Sources in their file's order keep it in the merge, so neither holds.
-        assert position_p < 1e-10 and window_p < 1e-10
+        # A shared seed lists each file row at about the same place in both
+        # sources; without their random first cells, the first rows of both
+        # files would come together, at a variance of about 3.95.
+        assert position_p > 1e-4 and window_p > 1e-4, (variance, law.var())
+        assert abs(variance - law.var()) < 0.3
 
 
 def test_row_plan_identity_checks_cover_every_cell_once():
@@ -6823,12 +6930,16 @@ def test_row_plan_identity_checks_cover_every_cell_once():
     shorter = zarr.open_group(store=MemoryStore(), mode="w").create_array(
         "ids", data=stored[:7]
     )
-    with pytest.raises(ValueError, match="order of cells does not match"):
+    with pytest.raises(
+        ValueError, match="cell IDs or their order differ from this merge's"
+    ):
         verify_merged_cell_ids(shorter, plan, tables)
     swapped = zarr.open_group(store=MemoryStore(), mode="w").create_array(
         "ids", data=np.asarray(expected[::-1]), chunks=(3,)
     )
-    with pytest.raises(ValueError, match="order of cells does not match"):
+    with pytest.raises(
+        ValueError, match="cell IDs or their order differ from this merge's"
+    ):
         verify_merged_cell_ids(swapped, plan, tables, block_rows=2)
 
 
@@ -7844,6 +7955,7 @@ def test_merged_counts_match_the_sparse_band_write_byte_for_byte(
     held,
 ):
     import cytearc.merge.writer as merge_writer
+    from cytearc.merge.row_plan import build_row_plan
     from cytearc.storage.cell_order import shuffled_order
 
     # Narrow destination shards cut each source shard into several batches;
@@ -7964,34 +8076,72 @@ def test_merged_counts_match_the_sparse_band_write_byte_for_byte(
     assert rows == {"block": 16, "8 rows": 8, "13 rows": 13, "CSR": 16}.get(held, 0)
     assert sparse == (held == "CSR")
 
-    def windows(n_rows, window):
+    # Each source gives its rows from its first cell on, then from its first
+    # row up to that one.
+    first_cells = build_row_plan([37, 29], ["left", "right"], seed=3).firstCells
+
+    def windows(n_rows, window, first):
         """The reads of a source's rows held ``window`` at a time within its shards of 16."""
-        return [
-            size
-            for start in range(0, n_rows, 16)
-            for shard in [min(16, n_rows - start)]
-            for size in [window] * (shard // window)
-            + [shard % window] * (shard % window > 0)
-        ]
+        if window >= 16:
+            # Whole shards, the first one's rows before the first cell kept
+            # apart until the source gives them.
+            return [min(16, n_rows - start) for start in range(0, n_rows, 16)]
+
+        def reads(row, stop):
+            sizes = []
+            while row < stop:
+                end = min(n_rows, row + window, (row // 16 + 1) * 16)
+                sizes.append(end - row)
+                row = end
+            return sizes
+
+        return reads(first, n_rows) + reads(0, first)
 
     # Each source's shards of 16 rows, 16, 16 and 5 rows of the left source
     # and of its antibodies and 16 and 13 of the right, are held whole or in
-    # windows of 8 or 13 rows, which stop at each shard's end.
-    # Batch by batch, each batch of merged rows reads the rows of each source
-    # that the merge seed puts in it.
+    # windows of 8 or 13 rows from the first cell, which stop at each
+    # shard's end. Batch by batch, each batch of merged rows reads the rows
+    # of each source that the merge seed puts in it, in two reads where they
+    # wrap round from the source's last row to its first.
     if held == "batch":
         owners = (shuffled_order(66, 3) >= 37).astype(np.int64)
-        expected_reads = [
-            int(count)
-            for start in range(0, 66, batch_rows)
-            for count in np.bincount(owners[start : start + batch_rows], minlength=2)
-            if count
-        ]
+        expected_reads = []
+        for source, n_rows in enumerate((37, 29)):
+            given = 0
+            for start in range(0, 66, batch_rows):
+                count = int(
+                    np.count_nonzero(owners[start : start + batch_rows] == source)
+                )
+                first = (given + first_cells[source]) % n_rows
+                expected_reads += [
+                    size
+                    for size in (
+                        min(count, n_rows - first),
+                        max(0, first + count - n_rows),
+                    )
+                    if size
+                ]
+                given += count
     else:
-        expected_reads = windows(37, rows) + windows(29, rows)
+        expected_reads = windows(37, rows, first_cells[0]) + windows(
+            29, rows, first_cells[1]
+        )
     if scenario == "missing":
-        expected_reads += windows(37, 16)
+        expected_reads += windows(37, 16, first_cells[0])
     assert sorted(reads) == sorted(expected_reads)
+
+
+def _scattered(block, order_map, n_feats, dtype):
+    """Scatter a block into zeroed rows and turn their negative zeros to zeros, as a dense merge batch does."""
+    from cytearc.merge.writer import scatter_block_dense
+
+    out = np.zeros((block.shape[0], n_feats), dtype=dtype)
+    scatter_block_dense(
+        block, order_map, n_feats, dtype, out=out, rows=np.arange(block.shape[0])
+    )
+    if out.dtype.kind in "fc":
+        np.copyto(out, 0, where=out == 0)
+    return out
 
 
 def test_scattered_dense_rows_check_casts_like_sparse_coordinates():
@@ -8000,19 +8150,19 @@ def test_scattered_dense_rows_check_casts_like_sparse_coordinates():
     order_map = np.asarray([3, 0, 2])
     integers = np.asarray([[1, 0, 7], [0, 0, 255]], dtype=np.uint16)
     np.testing.assert_array_equal(
-        scatter_block_dense(integers, order_map, 4, np.dtype(np.uint8)),
+        _scattered(integers, order_map, 4, np.dtype(np.uint8)),
         remap_block_to_coo(integers, order_map, 4, 1, np.dtype(np.uint8)).toarray(),
     )
     with pytest.raises(OverflowError, match="exceed the destination dtype"):
-        scatter_block_dense(integers + 1, order_map, 4, np.dtype(np.uint8))
+        _scattered(integers + 1, order_map, 4, np.dtype(np.uint8))
     with pytest.raises(OverflowError, match="exceed the destination dtype"):
         remap_block_to_coo(integers + 1, order_map, 4, 1, np.dtype(np.uint8))
     floats = np.asarray([[-0.0, np.nan, 1.5]], dtype=np.float32)
-    scattered = scatter_block_dense(floats, order_map, 4, np.dtype(np.float64))
+    scattered = _scattered(floats, order_map, 4, np.dtype(np.float64))
     expected = remap_block_to_coo(floats, order_map, 4, 1, np.dtype(np.float64))
     assert scattered.dtype == expected.dtype == np.float64
-    # Sparse coordinates drop a negative zero, so it is written as zero, and
-    # NaN keeps its bits.
+    # Sparse coordinates drop a negative zero, so the batch writes it as zero,
+    # and NaN keeps its bits.
     assert scattered.tobytes() == expected.toarray().tobytes()
     assert not np.signbit(scattered[0, 3])
     # Runs of consecutive merged columns copy as slices, and a shuffled map
@@ -8024,7 +8174,7 @@ def test_scattered_dense_rows_check_casts_like_sparse_coordinates():
             block, columns, 150, 1, np.dtype(np.uint32)
         ).toarray()
         np.testing.assert_array_equal(
-            scatter_block_dense(block, columns, 150, np.dtype(np.uint32)), expected
+            _scattered(block, columns, 150, np.dtype(np.uint32)), expected
         )
         # Into rows of a batch, the rows land there and the others stay.
         batch = np.full((9, 150), 7, dtype=np.uint32)
@@ -8220,6 +8370,9 @@ def _merge_chunk_columns(
         )
     }
     refill = merge_writer._HeldSourceRows._refill
+    init = merge_writer._HeldSourceRows.__init__
+    # Whether each held source keeps the head of its first cell's shard.
+    heads: list[bool] = []
 
     async def counted(self, chunk_bytes, chunk_spec):
         if writing[0]:
@@ -8262,6 +8415,10 @@ def _merge_chunk_columns(
                 raise
 
         return call
+
+    def held_init(self, *args, **options):
+        init(self, *args, **options)
+        heads.append(bool(options.get("keep_head")))
 
     def held_refill(self, row):
         refill(self, row)
@@ -8319,6 +8476,7 @@ def _merge_chunk_columns(
         patched.setattr(merge_writer, "iter_row_plan_windows", windows_of)
         patched.setattr(merge_writer, "controlled_compute", read)
         patched.setattr(merge_writer._HeldSourceRows, "_refill", held_refill)
+        patched.setattr(merge_writer._HeldSourceRows, "__init__", held_init)
         for name in ("plan_dense_write", "resolve_sparse_import_batch"):
             patched.setattr(merge_writer, name, planned(name))
         for name in ("write_dense_from_row_batches", "accumulate_sparse_to_shards"):
@@ -8349,6 +8507,7 @@ def _merge_chunk_columns(
         "csr_needed": csr_needed[-1] if csr_needed else None,
         "shard_writes": dict(shard_writes),
         "refills": refills,
+        "heads": set(heads),
         "decodes": dict(decodes),
         "widths": dict(widths),
         "alive": alive[0],
@@ -8358,47 +8517,83 @@ def _merge_chunk_columns(
     }
 
 
-def _chunk_decodes(locations, rows_at_once: int) -> dict[tuple[int, int], int]:
-    """Return the decodes of each source's chunk shape when each run of ``rows_at_once`` of its cells decodes each of its chunks once."""
+def _source_parts(sizes, batch_rows: int, seed: int = 42) -> list[list[int]]:
+    """Return the sizes of the reads of each source's cells when each batch of merged rows reads them alone.
+
+    The merge seed puts each merged row's cell, as the import shuffle orders
+    the sources' concatenated cells, and starts each source at the first cell
+    that the plan draws from it: a batch reads its cells of a source in one
+    read, or in two where they wrap round from the source's last cell to
+    its first.
+    """
+    from cytearc.merge.row_plan import build_row_plan
+    from cytearc.storage.cell_order import shuffled_order
+
+    owners = np.searchsorted(
+        np.cumsum(sizes), shuffled_order(sum(sizes), seed), side="right"
+    )
+    first_cells = build_row_plan(
+        list(sizes), [f"s{index}" for index in range(len(sizes))], seed=seed
+    ).firstCells
+    parts: list[list[int]] = [[] for _ in sizes]
+    given = [0] * len(sizes)
+    for start in range(0, sum(sizes), batch_rows):
+        counts = np.bincount(owners[start : start + batch_rows], minlength=len(sizes))
+        for source, count in enumerate(counts.tolist()):
+            if not count:
+                continue
+            first = (given[source] + first_cells[source]) % sizes[source]
+            before = min(count, sizes[source] - first)
+            parts[source] += [before, *([count - before] if count > before else [])]
+            given[source] += count
+    return parts
+
+
+def _chunk_decodes(
+    locations, rows_at_once: int, seed: int = 42
+) -> dict[tuple[int, int], int]:
+    """Return the decodes of each source's chunk shape when each run of ``rows_at_once`` of its cells decodes each of its chunks once.
+
+    Each source, stored in one shard, gives its cells from the first cell
+    that the plan of ``seed`` draws to its last, then from its first, so
+    runs start at the first cell and again at the source's first.
+    """
+    from cytearc.merge.row_plan import build_row_plan
+
+    arrays = [
+        zarr.open_group(location, mode="r")["Counts/counts"] for location in locations
+    ]
+    sizes = [int(counts.shape[0]) for counts in arrays]
+    first_cells = build_row_plan(
+        sizes, [f"s{index}" for index in range(len(sizes))], seed=seed
+    ).firstCells
     decodes = {}
-    for location in locations:
-        counts = zarr.open_group(location, mode="r")["Counts/counts"]
+    for counts, first in zip(arrays, first_cells, strict=True):
         n_cells, n_features = counts.shape
         chunk_rows, chunk_columns = counts.chunks
         assert chunk_rows == n_cells
-        decodes[tuple(counts.chunks)] = -(-n_cells // rows_at_once) * -(
-            -n_features // chunk_columns
+        runs = (
+            1
+            if rows_at_once >= n_cells
+            else -(-(n_cells - first) // rows_at_once) + -(-first // rows_at_once)
         )
+        decodes[tuple(counts.chunks)] = runs * -(-n_features // chunk_columns)
     return decodes
 
 
 def _batch_decodes(
     locations, batch_rows: int, seed: int = 42
 ) -> dict[tuple[int, int], int]:
-    """Return the decodes of each source's chunk shape when each batch of merged rows reads its rows of each source alone.
-
-    The merge seed puts each merged row's cell, as the import shuffle orders
-    the sources' concatenated cells, and a read of a source's rows decodes
-    each of its chunks once.
-    """
-    from cytearc.storage.cell_order import shuffled_order
-
-    shapes = [
+    """Return the decodes of each source's chunk shape when each batch of merged rows reads its rows of each source alone, each read decoding each of the source's chunks once."""
+    arrays = [
         zarr.open_group(location, mode="r")["Counts/counts"] for location in locations
     ]
-    sizes = [int(counts.shape[0]) for counts in shapes]
-    owners = np.searchsorted(
-        np.cumsum(sizes), shuffled_order(sum(sizes), seed), side="right"
-    )
+    parts = _source_parts([int(counts.shape[0]) for counts in arrays], batch_rows, seed)
     decodes: dict[tuple[int, int], int] = {}
-    for source, counts in enumerate(shapes):
-        batches = sum(
-            bool(np.any(owners[start : start + batch_rows] == source))
-            for start in range(0, sum(sizes), batch_rows)
-        )
+    for counts, reads in zip(arrays, parts, strict=True):
         chunks = -(-int(counts.shape[1]) // int(counts.chunks[1]))
         decodes[tuple(counts.chunks)] = (
-            decodes.get(tuple(counts.chunks), 0) + batches * chunks
+            decodes.get(tuple(counts.chunks), 0) + len(reads) * chunks
         )
     return decodes
 
@@ -8444,10 +8639,11 @@ def test_a_merge_decodes_each_source_chunk_once_for_each_window_of_cells_it_hold
     )
 
     # Each source of 600 or 500 cells, one shard, is held whole, or 80 cells
-    # at a time, and each window decodes each of the source's four chunks
-    # once: 4 + 4 decodes, or 8 * 4 + 7 * 4. Read batch by batch, each band
-    # of 16 merged cells reads its cells of each source, and each read
-    # decodes the source's four chunks.
+    # at a time from its first cell and again from its first stored cell,
+    # and each window decodes each of the source's four chunks once: 4 + 4
+    # decodes, or 8 * 4 + 8 * 4. Read batch by batch, each band of 16 merged
+    # cells reads its cells of each source, and each read decodes the
+    # source's four chunks.
     rows = merged["held_rows"]
     assert merged["batch_rows"] == 16
     assert rows == {None: 600, 80: 80}.get(most_rows, 0)
@@ -8455,12 +8651,19 @@ def test_a_merge_decodes_each_source_chunk_once_for_each_window_of_cells_it_hold
         assert merged["decodes"] == _batch_decodes(chunk_column_sources, 16)
     else:
         assert merged["decodes"] == _chunk_decodes(chunk_column_sources, rows)
-        assert {None: 8, 80: 60}[most_rows] == sum(merged["decodes"].values())
+        assert {None: 8, 80: 64}[most_rows] == sum(merged["decodes"].values())
         assert sum(merged["decodes"].values()) < sum(reference["decodes"].values())
     # Held windows are read a chunk column at a time, four of 10 features of
     # the left source and three of 12 and one of 4 of the right; a batch
     # reads its cells of each source whole.
-    left, right = (-(-600 // rows), -(-500 // rows)) if rows else (0, 0)
+    left, right = (
+        (
+            _chunk_decodes(chunk_column_sources, rows)[shape] // 4
+            for shape in ((600, 10), (500, 12))
+        )
+        if rows
+        else (0, 0)
+    )
     assert merged["widths"] == (
         {40: sum(_batch_reads(chunk_column_sources, 16))}
         if most_rows == 0
@@ -8552,17 +8755,35 @@ def sparse_shard_sources(sparse_source_stores) -> list[str]:
     ]
 
 
-def _shard_chunk_reads(locations) -> tuple[dict[tuple[int, int], int], dict[int, int]]:
-    """Return the decodes of each chunk shape, and the reads of each width, when each stored shard of each source is read once, a chunk column at a time."""
+def _shard_chunk_reads(
+    locations, *, heads_kept: bool = True, seed: int = 42
+) -> tuple[dict[tuple[int, int], int], dict[int, int]]:
+    """Return the decodes of each chunk shape, and the reads of each width, when each stored shard of each source is read once, a chunk column at a time.
+
+    A source of several shards gives the cells of its first cell's shard
+    before that cell last; unless the merge keeps them apart, ``heads_kept``,
+    their shard is read again.
+    """
     from collections import Counter
 
+    from cytearc.merge.row_plan import build_row_plan
+
+    arrays = [
+        zarr.open_group(location, mode="r")["Counts/counts"] for location in locations
+    ]
+    first_cells = build_row_plan(
+        [int(counts.shape[0]) for counts in arrays],
+        [f"s{index}" for index in range(len(arrays))],
+        seed=seed,
+    ).firstCells
     decodes: Counter = Counter()
     widths: Counter = Counter()
-    for location in locations:
-        counts = zarr.open_group(location, mode="r")["Counts/counts"]
+    for counts, first in zip(arrays, first_cells, strict=True):
         (n_cells, n_features), (chunk_rows, chunk_columns) = counts.shape, counts.chunks
         assert counts.shards[0] == chunk_rows
         shards = -(-n_cells // chunk_rows)
+        if not heads_kept and shards > 1 and first % chunk_rows:
+            shards += 1
         decodes[tuple(counts.chunks)] += shards * -(-n_features // chunk_columns)
         for start in range(0, n_features, chunk_columns):
             widths[min(chunk_columns, n_features - start)] += shards
@@ -8638,31 +8859,60 @@ def test_a_merge_holding_csr_windows_decodes_each_source_chunk_once(
     # CSR window of each source's shard of the most values, counted with
     # NumPy, in a piece for each chunk column: 2 bytes for each uint16 value
     # and 4 for its column, a spare value in each piece, and 4 bytes for the
-    # offset of each row and one more in each piece. It reserves what a
-    # refill and a piece taken from a window hold.
+    # offset of each row and one more in each piece. A source of several
+    # shards also keeps the cells of its first cell's shard before that cell,
+    # the head, in pieces of the same kind. The write reserves what a refill
+    # and a piece taken from a window hold, a piece as many cells as the
+    # merge seed gives a batch of one source at most.
     from cytearc import DataStore
+    from cytearc.merge.row_plan import build_row_plan
     from cytearc.merge.writer import _chunk_column_runs, _csr_window_bytes
+    from cytearc.storage.cell_order import shuffled_order
 
-    windows, charges = [], []
-    for location in locations:
+    sizes = [
+        int(zarr.open_group(location, mode="r")["Counts/counts"].shape[0])
+        for location in locations
+    ]
+    first_cells = build_row_plan(sizes, ["left", "right"], seed=42).firstCells
+    owners = np.searchsorted(
+        np.cumsum(sizes), shuffled_order(sum(sizes), 42), side="right"
+    )
+    batch_rows = merged["batch_rows"]
+    piece_rows = max(
+        int(np.bincount(owners[start : start + batch_rows]).max())
+        for start in range(0, sum(sizes), batch_rows)
+    )
+    assert merged["heads"] == {True}
+
+    def csr_bytes(values, rows, pieces):
+        return (values + pieces) * (2 + 4) + pieces * (rows + 1) * 4
+
+    windows, heads, charges = [], [], []
+    for location, first in zip(locations, first_cells, strict=True):
         counts = zarr.open_group(location, mode="r")["Counts/counts"]
         shard_rows = counts.chunks[0]
+        stored = counts[:]
         values = max(
-            int(np.count_nonzero(counts[start : start + shard_rows]))
+            int(np.count_nonzero(stored[start : start + shard_rows]))
             for start in range(0, counts.shape[0], shard_rows)
         )
         pieces = -(-counts.shape[1] // counts.chunks[1])
-        windows.append((values + pieces) * (2 + 4) + pieces * (shard_rows + 1) * 4)
+        windows.append(csr_bytes(values, shard_rows, pieces))
+        head = first % shard_rows if counts.shape[0] > shard_rows else 0
+        if head:
+            heads.append(
+                csr_bytes(
+                    int(np.count_nonzero(stored[first - head : first])), head, pieces
+                )
+            )
         source = DataStore(location, default_assay="Counts", nthreads=1).Counts
         charges.append(
             _csr_window_bytes(
-                source.rawData,
-                _chunk_column_runs(source.rawData),
-                values,
-                merged["batch_rows"],
+                source.rawData, _chunk_column_runs(source.rawData), values, piece_rows
             )
         )
-    assert merged["resident"] - reference["resident"] == sum(windows)
+    assert merged["resident"] - reference["resident"] == sum(windows) + sum(heads)
+    assert bool(heads) == (sources == "sparse_column_sources")
     assert [window for window, _, _ in charges] == windows
     reads = max(refill for _, refill, _ in charges) + max(
         take for _, _, take in charges
@@ -8713,20 +8963,29 @@ def test_a_merge_holds_csr_windows_from_the_least_budget_that_fits_them(
     below = merge(tmp_path / "below.zarr", budget - 1)
     ample = merge(tmp_path / "ample.zarr", None)
 
-    # A byte below that budget, the refusal of CSR windows names it, and the
-    # write holds dense windows shorter than a shard or reads batch by batch,
-    # which decode chunks again. With room for dense windows of a shard,
-    # which leave the write of one band at a time as many bands as CSR
-    # windows do, the write holds them dense and converts nothing.
+    # At that budget the CSR windows have no room for the cells of each
+    # source's first shard before its first cell, so that shard is read
+    # again at the end. A byte below that budget, the refusal of CSR windows
+    # names it, and the write holds dense windows shorter than a shard or
+    # reads batch by batch, which decode chunks more often. With room for
+    # dense windows of a shard, which leave the write of one band at a time
+    # as many bands as CSR windows do, the write holds them dense, keeps the
+    # heads, decodes each chunk once and converts nothing.
     decodes, _ = _shard_chunk_reads(sparse_shard_sources)
     assert merged["held_rows"] == 256
-    assert merged["decodes"] == decodes
+    assert merged["heads"] == {False}
+    assert (
+        merged["decodes"]
+        == _shard_chunk_reads(sparse_shard_sources, heads_kept=False)[0]
+    )
+    assert sum(merged["decodes"].values()) > sum(decodes.values())
     assert not below["sparse"]
     assert below["csr_needed"] == budget
     assert below["held_rows"] < 256
-    assert sum(below["decodes"].values()) > sum(decodes.values())
+    assert sum(below["decodes"].values()) > sum(merged["decodes"].values())
     assert not ample["sparse"]
     assert ample["held_rows"] == 256
+    assert ample["heads"] == {True}
     assert ample["decodes"] == decodes
     _same_files(merged, below)
     _same_files(merged, ample)
@@ -8767,12 +9026,18 @@ def test_a_merge_holds_csr_windows_while_dense_ones_would_write_fewer_bands_at_o
     # A byte below it, dense windows of a shard of every source fit beside
     # the write of one band at a time, and CSR ones beside two, so the write
     # holds CSR windows; from it on, dense ones leave two bands at once as
-    # well. Both decode each chunk once and store the same files.
-    decodes, _ = _shard_chunk_reads(sparse_shard_sources)
+    # well. Each decodes each chunk once, but for the first shards that it
+    # reads again when it has no room to keep their heads, and both store
+    # the same files.
     assert holding_csr["shard_writes"] == {False: 1, True: 2}
     assert holding_dense["shard_writes"] == {False: 2, True: 2}
     assert holding_csr["held_rows"] == holding_dense["held_rows"] == 256
-    assert holding_csr["decodes"] == holding_dense["decodes"] == decodes
+    for merged in (holding_csr, holding_dense):
+        (kept,) = merged["heads"]
+        assert (
+            merged["decodes"]
+            == _shard_chunk_reads(sparse_shard_sources, heads_kept=kept)[0]
+        )
     _same_files(holding_csr, holding_dense)
 
 
@@ -8788,9 +9053,9 @@ def test_a_merge_bounds_no_shard_of_a_source_without_cells(tmp_path, monkeypatch
     real = merge_writer._cumulative_row_nnz
 
     def recorded(*args, **kwargs):
-        cumulative, shard_values = real(*args, **kwargs)
+        cumulative, shard_values, head_values = real(*args, **kwargs)
         bounds.append(shard_values)
-        return cumulative, shard_values
+        return cumulative, shard_values, head_values
 
     monkeypatch.setattr(merge_writer, "_cumulative_row_nnz", recorded)
     DataStoreMerge(
@@ -8900,6 +9165,60 @@ def test_a_csr_window_holds_no_more_than_its_charge(tmp_path, dtype, density):
     assert take <= piece <= take + 4_096
 
 
+def test_a_dense_merge_write_makes_each_batch_once_the_previous_one_is_gone(
+    tmp_path, monkeypatch, chunk_column_sources
+):
+    import weakref
+
+    import cytearc.merge.writer as merge_writer
+    from cytearc import DataStore
+
+    # Each batch that the write takes is watched, and each piece that a
+    # batch scatters looks whether the batch before it is still alive.
+    yielded: list[weakref.ref] = []
+    alive: list[bool] = []
+    write, scatter = (
+        merge_writer.write_dense_from_row_batches,
+        merge_writer.scatter_block_dense,
+    )
+
+    def watched_write(destination, batches, **options):
+        def watched():
+            for batch in batches:
+                yielded.append(weakref.ref(batch))
+                yield batch
+                del batch
+
+        return write(destination, watched(), **options)
+
+    def watched_scatter(*args, **options):
+        if yielded:
+            alive.append(yielded[-1]() is not None)
+        return scatter(*args, **options)
+
+    monkeypatch.setattr(merge_writer, "write_dense_from_row_batches", watched_write)
+    monkeypatch.setattr(merge_writer, "scatter_block_dense", watched_scatter)
+    DataStoreMerge(
+        datasets=[
+            DataStore(location, default_assay="Counts", nthreads=1)
+            for location in chunk_column_sources
+        ],
+        zarr_path=str(tmp_path / "merged.zarr"),
+        names=["left", "right"],
+        prepend_text="",
+        nthreads=1,
+        # Bands of 16 cells.
+        policy=CountMatrixPolicy(unitBytes=1280, chunkBytes=640),
+    ).dump()
+
+    # The write takes 69 batches of 16 cells, and makes each after the first
+    # once neither it nor the band buffer holds the batch before it, which
+    # the write's reserve does not count.
+    assert len(yielded) == -(-1100 // 16)
+    assert len(alive) > len(yielded)
+    assert not any(alive)
+
+
 @pytest.mark.parametrize("dtype", ["uint16", "float32"])
 def test_held_csr_windows_give_each_source_row_once_in_order(tmp_path, dtype):
     from cytearc import DataStore
@@ -8928,19 +9247,11 @@ def test_held_csr_windows_give_each_source_row_once_in_order(tmp_path, dtype):
 
 def _batch_reads(locations, batch_rows: int, seed: int = 42) -> list[int]:
     """Return the reads of each source when each batch of merged rows reads its rows of each source alone."""
-    from cytearc.storage.cell_order import shuffled_order
-
     sizes = [
         int(zarr.open_group(location, mode="r")["Counts/counts"].shape[0])
         for location in locations
     ]
-    owners = np.searchsorted(
-        np.cumsum(sizes), shuffled_order(sum(sizes), seed), side="right"
-    )
-    return [
-        int(np.unique(owners[start : start + batch_rows]).size)
-        for start in range(0, sum(sizes), batch_rows)
-    ]
+    return [len(reads) for reads in _source_parts(sizes, batch_rows, seed)]
 
 
 @pytest.mark.parametrize("feature_key", ["ids", "names"])
@@ -9352,22 +9663,75 @@ def test_contiguous_slices_of_a_merge_of_shuffled_imports_are_random_samples(
         assert_random_sample_order(ids)
         assert merged.cells._group.attrs["cellOrder"] == {"shuffled": True, "seed": 7}
         return
-    # A source kept in its file's order keeps that order in the merge, so
-    # slices are no random samples of its cells, and the merge records no
-    # shuffle; the sources still take turns at random.
+    # A source kept in its file's order keeps that order in the merge from a
+    # random first cell, wrapping round, so slices hold runs of its file
+    # rows, and the merge records no shuffle; the sources still take turns
+    # at random.
     assert "cellOrder" not in merged.cells._group.attrs
-    with pytest.raises(AssertionError):
-        assert_random_sample_order(ids)
     rows = grouped_file_rows(ids)
     for name, is_shuffled in shuffled.items():
         positions = np.flatnonzero(
             [identity.startswith(f"{name}__") for identity in ids]
         )
-        rho = stats.spearmanr(positions, rows[positions]).statistic
         if is_shuffled:
+            rho = stats.spearmanr(positions, rows[positions]).statistic
             assert abs(rho) < 4.5 / np.sqrt(positions.size - 1)
         else:
-            assert rho == pytest.approx(1)
+            given = rows[positions]
+            first = int(np.argmin(given))
+            assert first > 0
+            np.testing.assert_array_equal(np.roll(given, -first), np.arange(given.size))
+
+
+def test_a_merge_of_imports_that_share_a_seed_takes_random_slices_and_records_no_shuffle(
+    tmp_path,
+):
+    from tests.storage_helpers import (
+        assert_random_sample_order,
+        import_grouped_cells,
+        open_store,
+    )
+
+    # Both imports shuffle with the default seed, so each lists a file row at
+    # about the same place; the merge starts each at a random cell, so its
+    # slices pass the laws of a random order, but it does not claim one.
+    sources = import_grouped_cells(
+        tmp_path, shuffled={"a": True, "b": True}, seeds={"a": 0, "b": 0}
+    )
+    path = tmp_path / "merged.zarr"
+    DataStoreMerge(
+        [sources["a"], sources["b"]], str(path), ["a", "b"], nthreads=1, seed=7
+    ).dump()
+    merged = open_store(path)
+    assert_random_sample_order(merged.cells.fetch_all("ids").tolist())
+    assert "cellOrder" not in merged.cells._group.attrs
+
+
+def test_a_merge_records_a_shuffle_beside_a_source_without_cells(tmp_path):
+    from tests.storage_helpers import (
+        import_grouped_cells,
+        open_store,
+        write_count_store,
+    )
+
+    # A source that gives no cells adds none to the order, though it records
+    # no shuffle.
+    sources = import_grouped_cells(tmp_path, shuffled={"a": True, "b": True})
+    empty = tmp_path / "empty.zarr"
+    write_count_store(
+        str(empty),
+        {"RNA": np.zeros((0, 2), dtype=np.uint32)},
+        "uint32",
+        feature_ids={"RNA": ["f0", "f1"]},
+    )
+    path = tmp_path / "merged.zarr"
+    DataStoreMerge(
+        [sources["a"], open_store(empty)], str(path), ["a", "e"], nthreads=1, seed=9
+    ).dump()
+    assert open_store(path).cells._group.attrs["cellOrder"] == {
+        "shuffled": True,
+        "seed": 9,
+    }
 
 
 def test_a_merge_records_the_shuffle_of_its_sources_only_when_each_records_one(
@@ -9466,6 +9830,7 @@ def test_merges_of_one_seed_write_the_same_store_and_refuse_a_store_of_another_o
             owners=plan.owners[::-1].copy(),
             selectedRows=plan.selectedRows,
             sourceCells=plan.sourceCells,
+            firstCells=plan.firstCells,
             nCells=plan.nCells,
             seed=plan.seed,
             sourceNames=plan.sourceNames,
@@ -9486,13 +9851,39 @@ def test_merges_of_one_seed_write_the_same_store_and_refuse_a_store_of_another_o
     plan = resumed.plan()
     assert not plan.canDump
     assert plan.blockedReason == (
-        "Completed cellData cannot be reused: ERROR: order of cells does not match "
-        "the one in existing file. Set overwrite=True to rebuild it."
+        "Completed cellData cannot be reused: its cell IDs or their order differ "
+        "from this merge's, as when an earlier CyteArc release wrote it in blocks "
+        "of one source or a source has changed. Merge into a fresh destination; "
+        "overwrite=True rebuilds this one only until a DataStore opens it."
     )
     DataStoreMerge(
         stores, str(interrupted), ["a", "b"], nthreads=1, seed=5, overwrite=True
     ).dump()
     assert _store_files(interrupted) == _store_files(first)
+    # A completed merge of the earlier order is refused alike, and once a
+    # DataStore has opened it, overwrite=True is refused too, so the merge
+    # goes to a fresh destination.
+    completed = tmp_path / "completed.zarr"
+    with monkeypatch.context() as patched:
+        patched.setattr(datasets, "build_row_plan", reversed_plan)
+        DataStoreMerge(stores, str(completed), ["a", "b"], nthreads=1, seed=5).dump()
+    from tests.storage_helpers import open_store
+
+    open_store(completed)
+    assert (
+        DataStoreMerge(stores, str(completed), ["a", "b"], nthreads=1, seed=5)
+        .plan()
+        .blockedReason
+        == plan.blockedReason
+    )
+    refused = DataStoreMerge(
+        stores, str(completed), ["a", "b"], nthreads=1, seed=5, overwrite=True
+    ).plan()
+    assert not refused.canDump
+    assert "prepared datasets require a fresh destination" in refused.blockedReason
+    fresh = tmp_path / "fresh.zarr"
+    DataStoreMerge(stores, str(fresh), ["a", "b"], nthreads=1, seed=5).dump()
+    assert _store_files(fresh) == _store_files(first)
 
 
 def _open_fixture_store(tmp_path, name: str, n_cells: int):

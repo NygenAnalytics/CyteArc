@@ -1349,6 +1349,9 @@ def write_dense_from_row_batches(
                     # would hold its values while the source makes the next
                     # batch.
                     del band
+                # The buffer has copied the batch's rows, so the source makes
+                # the next batch without this one beside it.
+                del batch, values
             buffer.finish()
         finally:
             _close_iterator(source)

@@ -2261,18 +2261,27 @@ def merged_shuffle_seed(
 ) -> int | None:
     """Return the seed to record as the shuffle of the merged cells, or None.
 
-    The merged order is uniformly random when every source that gives cells
-    lists them in a uniformly random order, as its ``cellOrder`` record
-    states, since the merge keeps each source's order and interleaves the
-    sources at random. A source without the record gives None.
+    The merged order is uniformly random when the sources that give cells
+    list them in independent uniformly random orders, since the merge
+    interleaves the sources at random and gives each source's cells in its
+    order from a random first cell. A source's ``cellOrder`` record states
+    that its order is uniform, and sources whose records name different
+    seeds are taken to be independent. Sources that share a seed list each
+    file row at about the same place, so their merge is only close to
+    uniform, and a source without the record gives None.
 
     Raises:
         ValueError: If a source's ``cellOrder`` record is malformed.
     """
+    seeds = []
     for cells, group in zip(row_plan.sourceCells, source_cell_groups, strict=True):
-        if cells and recorded_shuffle_seed(group) is None:
+        if not cells:
+            continue
+        seed = recorded_shuffle_seed(group)
+        if seed is None:
             return None
-    return row_plan.seed
+        seeds.append(seed)
+    return row_plan.seed if len(set(seeds)) == len(seeds) else None
 
 
 def validate_cell_metadata(

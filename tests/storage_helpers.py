@@ -525,12 +525,16 @@ GROUPED_CELLS = {"a": (("x", 150), ("y", 150)), "b": (("z", 200),)}
 
 
 def import_grouped_cells(
-    folder: Path, *, shuffled: Mapping[str, bool]
+    folder: Path,
+    *,
+    shuffled: Mapping[str, bool],
+    seeds: Mapping[str, int] | None = None,
 ) -> dict[str, "DataStore"]:
     """Import sources ``a`` and ``b`` of ``GROUPED_CELLS``, shuffled or in their file's order, and open them.
 
     A cell's ID is its group and its row among the group's cells, such as
-    ``y12``, and its counts are its row in its file, plus one, and 1.
+    ``y12``, and its counts are its row in its file, plus one, and 1. Each
+    shuffle takes its seed from ``seeds``, or 1 for ``a`` and 2 for ``b``.
     """
     from scipy.sparse import csr_matrix
 
@@ -550,7 +554,7 @@ def import_grouped_cells(
             assay_name="RNA",
             nthreads=1,
             shuffle_cells=shuffled[name],
-            shuffle_seed=seed,
+            shuffle_seed=seed if seeds is None else seeds[name],
         ).dump()
         stores[name] = open_store(location)
     return stores

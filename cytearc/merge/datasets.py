@@ -76,7 +76,7 @@ from .models import (
     MergeResult,
     MissingAssayPolicy,
 )
-from .row_plan import RowPlan, build_row_plan
+from .row_plan import CELL_ORDER_MISMATCH, RowPlan, build_row_plan
 from .writer import (
     _assay_metadata_path,
     _matrix_group_path,
@@ -250,15 +250,18 @@ class DataStoreMerge:
     columns is left out with a warning.
 
     Merged cells interleave the sources' cells in a random order that
-    ``seed`` draws, each source's cells in their stored order, so every
-    contiguous slice of merged rows holds each source's cells in proportion
-    to its size. When every source lists its cells in a uniformly random
-    order, as imports do by default, so does the merge: every contiguous
-    slice is a random sample of the merged cells, and the merged cell table
-    records the shuffle in its ``cellOrder`` attribute. A source kept in its
-    file's order keeps that order among its cells. Pair per-cell values with
-    merged cells by cell ID, ``{name}__{cell_id}``, or by ``sourceRow``, each
-    cell's row in the concatenation of the sources, and never by position.
+    ``seed`` draws, and each source gives its cells in their stored order
+    from a random first cell that ``seed`` also draws, wrapping round, so
+    every contiguous slice of merged rows holds each source's cells in
+    proportion to its size. When the sources list their cells in random
+    orders of different seeds, the merged order is uniformly random: every
+    contiguous slice is a random sample of the merged cells, and the merged
+    cell table records the shuffle in its ``cellOrder`` attribute. Imports
+    shuffled with one seed, as default imports are, merge close to uniform,
+    and the merge records no shuffle. A source kept in its file's order
+    keeps that order from its first cell. Pair per-cell values with merged
+    cells by cell ID, ``{name}__{cell_id}``, or by ``sourceRow``, each cell's
+    row in the concatenation of the sources, and never by position.
     """
 
     def __init__(
@@ -403,7 +406,10 @@ class DataStoreMerge:
                     ds.z, operation="merged", subject=f"Source {name!r}"
                 )
             self._rowPlan = build_row_plan(
-                self._source_cell_counts(), self.names, seed=self.seed
+                self._source_cell_counts(),
+                self.names,
+                seed=self.seed,
+                memory_bytes=self.resources.memoryBytes,
             )
             # A malformed record of a source's cell order is refused before
             # anything is written.
@@ -952,10 +958,15 @@ class DataStoreMerge:
                     ),
                 )
                 if invalid is not None:
+                    remedy = (
+                        "Merge into a fresh destination; overwrite=True "
+                        "rebuilds this one only until a DataStore opens it"
+                        if invalid == CELL_ORDER_MISMATCH
+                        else "Set overwrite=True to rebuild it"
+                    )
                     return self._blocked_inspection(
                         assay_plans,
-                        f"Completed cellData cannot be reused: {invalid}. "
-                        "Set overwrite=True to rebuild it.",
+                        f"Completed cellData cannot be reused: {invalid}. {remedy}.",
                     )
                 actions["cellData"] = "skip"
             else:

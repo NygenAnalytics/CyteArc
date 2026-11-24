@@ -1129,13 +1129,14 @@ def _merged_order_values(
 ) -> np.ndarray:
     """Count each merged cell's nonzero values with NumPy, in the merged order.
 
-    Each source's cells take, in their stored order, the merged rows that
-    the plan gives the source.
+    Each source's cells take, in their stored order from the source's first
+    cell and then from its first stored cell, the merged rows that the plan
+    gives the source.
     """
     values = np.empty(row_plan.nCells, dtype=np.int64)
     for source, (_, counts) in enumerate(stores):
-        values[np.flatnonzero(row_plan.owners == source)] = np.count_nonzero(
-            counts, axis=1
+        values[np.flatnonzero(row_plan.owners == source)] = np.roll(
+            np.count_nonzero(counts, axis=1), -row_plan.firstCells[source]
         )
     return values
 
@@ -1183,11 +1184,17 @@ def test_merge_counts_signed_values_within_its_budget_or_names_the_budget_it_nee
 
     def profile(budget: int, held: int = 1_000) -> np.ndarray:
         recorded_blocks.clear()
-        cumulative, shard_values = merge_writer._cumulative_row_nnz(
+        cumulative, shard_values, head_values = merge_writer._cumulative_row_nnz(
             assays, row_plan, ResourceBudget(budget, 1), resident_bytes=held
         )
-        # Each source's two shards of 12 cells, counted the same way.
+        # Each source's two shards of 12 cells, counted the same way, and the
+        # cells of its first cell's shard before that cell, which it gives last.
         assert shard_values == _most_shard_values(stores, 12)
+        assert head_values == [
+            int(np.count_nonzero(counts[first - first % 12 : first]))
+            for (_, counts), first in zip(stores, row_plan.firstCells, strict=True)
+        ]
+        assert any(head_values)
         return cumulative
 
     np.testing.assert_array_equal(np.diff(profile(10**9)), expected)
@@ -1272,7 +1279,7 @@ def test_merge_refuses_before_it_reads_any_source_when_one_cannot_be_read(
 
     def profile(budget: int) -> np.ndarray:
         recorded_blocks.clear()
-        cumulative, shard_values = merge_writer._cumulative_row_nnz(
+        cumulative, shard_values, _ = merge_writer._cumulative_row_nnz(
             assays, row_plan, ResourceBudget(budget, 1), resident_bytes=1_000
         )
         # Each source's two shards of 12 cells, counted with NumPy.
@@ -1315,7 +1322,7 @@ def test_merge_names_the_count_summaries_that_its_budget_cannot_load(
 
     def profile(budget: int) -> np.ndarray:
         recorded_blocks.clear()
-        cumulative, shard_values = merge_writer._cumulative_row_nnz(
+        cumulative, shard_values, _ = merge_writer._cumulative_row_nnz(
             assays, row_plan, ResourceBudget(budget, 1), resident_bytes=1_000
         )
         shard_rows = [int(assay.rawData.chunksize[0]) for assay in assays]
@@ -2464,10 +2471,17 @@ def test_a_merge_of_a_merged_store_keeps_each_cells_counts_and_source_in_its_int
     third_cells = _stored_cells_of_source(panel_source(20, ["CD3", "CD56"], 9000))
     order = np.asarray(zarr.open_group(outer, mode="r")["cellData/ids"][:]).astype(str)
     # The merge interleaves the third store's cells with the inner store's,
-    # and keeps the inner store's cells in the inner store's own order.
-    inner_order = np.asarray(zarr.open_group(inner, mode="r")["cellData/ids"][:])
+    # and keeps the inner store's cells in the inner store's own order, from
+    # a random first cell, wrapping round.
+    inner_order = [
+        f"inner__{cell}"
+        for cell in np.asarray(zarr.open_group(inner, mode="r")["cellData/ids"][:])
+        .astype(str)
+        .tolist()
+    ]
     taken = [cell for cell in order.tolist() if cell.startswith("inner__")]
-    assert taken == [f"inner__{cell}" for cell in inner_order.astype(str).tolist()]
+    first = inner_order.index(taken[0])
+    assert taken == inner_order[first:] + inner_order[:first]
     third_rows = np.flatnonzero(np.char.startswith(order, "third__"))
     assert third_rows.size == 20
     assert third_rows[-1] - third_rows[0] + 1 > third_rows.size

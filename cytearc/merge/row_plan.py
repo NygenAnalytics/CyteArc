@@ -8,25 +8,44 @@ import numpy as np
 from ..metadata.rows import read_metadata_rows_chunkwise
 from ..storage.cell_order import shuffle_seed_argument, shuffled_order
 from ..storage.partition import checked_indices
+from ..utils.digest import mix64_array
+from ..utils.memory_budget import memory_refusal
 
 # The text between a source's name and the source's own cell ID in each cell
 # ID of a merged store.
 MERGED_ID_SEPARATOR = "__"
+# Why a merge cannot take a stored table of merged cells as its own.
+CELL_ORDER_MISMATCH = (
+    "its cell IDs or their order differ from this merge's, as when an earlier "
+    "CyteArc release wrote it in blocks of one source or a source has changed"
+)
 # What a window of merged rows holds for each of its rows while it is in use:
 # the positions and source rows of its parts, and the sort that groups them.
 WINDOW_BYTES_PER_ROW = 24
+# What building a row plan holds for each merged cell beside the plan: the
+# hashes and the order of the shuffle that arranges the sources' turns.
+ROW_PLAN_BUILD_BYTES_PER_CELL = 24
+# SplitMix64's increment, which spaces the counters of a stream.
+_GOLDEN = np.uint64(0x9E3779B97F4A7C15)
+# "MrgStart" in ASCII, mixed into the merge's seed, so the first cell of each
+# source takes a stream of its own beside the order of the sources' turns.
+_START_SALT = np.uint64(0x4D72675374617274)
 
 
 @dataclass(frozen=True, slots=True)
 class RowPlan:
     """The order of the cells that a merge or composite takes from its sources.
 
-    Merged row ``r`` holds the next cell of source ``owners[r]``: each
-    source's cells keep their stored order, and the sources take turns in
-    the order that ``shuffled_order(nCells, seed)`` gives their concatenated
-    cells. ``owners`` is therefore a uniformly random arrangement of the
-    sources' cells, and when each source lists its cells in a uniformly
-    random order, so does the merge.
+    Merged row ``r`` holds the next cell of source ``owners[r]``. The
+    sources take turns in the order that ``shuffled_order(nCells, seed)``
+    gives their concatenated cells, so ``owners`` is a uniformly random
+    arrangement of the sources' cells. Each source gives its cells in their
+    stored order from the one at ``firstCells`` on, a uniformly random cell
+    that ``seed`` also draws, and then from its first cell up to that one.
+    When the sources list their cells in independent uniformly random
+    orders, so does the merge. Sources that an import shuffled with one seed
+    list each file row at about the same place, which the random first cells
+    set apart.
     """
 
     # The source of each merged row, as the smallest unsigned integers that
@@ -36,6 +55,9 @@ class RowPlan:
     selectedRows: tuple[np.ndarray | None, ...]
     # The cells that each source contributes.
     sourceCells: tuple[int, ...]
+    # The cell, among those that each source contributes in stored order,
+    # that the source gives first; 0 for a source without cells.
+    firstCells: tuple[int, ...]
     nCells: int
     seed: int
     sourceNames: tuple[str, ...]
@@ -48,16 +70,38 @@ class RowPlan:
     def source_rows(
         self, source: int, start: int = 0, stop: int | None = None
     ) -> np.ndarray:
-        """Return the rows of ``source`` that the merge takes, from its ``start``-th to before its ``stop``-th, increasing."""
+        """Return the rows of ``source`` that the merge takes, from its ``start``-th to before its ``stop``-th in stored order, increasing."""
         stop = self.sourceCells[source] if stop is None else stop
         selected = self.selectedRows[source]
         if selected is None:
             return np.arange(start, stop, dtype=np.int64)
         return selected[start:stop]
 
+    def most_source_cells(self, window_rows: int) -> int:
+        """Return the most cells that a window of ``window_rows`` merged rows takes from one source, of the windows that :func:`iter_row_plan_windows` cuts without boundaries."""
+        n_sources = len(self.sourceNames)
+        return max(
+            (
+                int(
+                    np.bincount(
+                        self.owners[start : start + int(window_rows)],
+                        minlength=n_sources,
+                    ).max()
+                )
+                for start in range(0, self.nCells, max(1, int(window_rows)))
+            ),
+            default=0,
+        )
+
     def destination_rows(self, source: int) -> np.ndarray:
-        """Return the merged rows of the cells of ``source``, increasing."""
-        return np.flatnonzero(self.owners == source)
+        """Return the merged row of each cell that the merge takes from ``source``, in the source's stored order.
+
+        The rows increase from the source's first cell on, and again from
+        its stored first cell up to that one. Beside the result, this holds a
+        flag of every merged row and the merged rows of the source's cells.
+        """
+        rows = np.flatnonzero(self.owners == source)
+        return np.roll(rows, self.firstCells[source])
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,12 +132,19 @@ def build_row_plan(
     seed: int | None = 42,
     *,
     selected_rows: list[np.ndarray | None] | None = None,
+    memory_bytes: int | None = None,
 ) -> RowPlan:
     """Interleave the sources' cells in the random order that ``seed`` draws.
 
     ``selected_rows`` gives, for each source, the rows that it contributes,
-    in any order, or None for every row; each source's cells keep their
-    stored order. ``seed`` None draws a new order.
+    in any order, or None for every row. Each source gives its cells in
+    their stored order from a random first cell, wrapping round, as
+    :class:`RowPlan` describes. ``seed`` None draws a new order. Building
+    holds ``ROW_PLAN_BUILD_BYTES_PER_CELL`` bytes for each merged cell
+    beside the plan, which must fit ``memory_bytes`` when given.
+
+    Raises:
+        MemoryBudgetError: If building needs more than ``memory_bytes``.
     """
     if len(n_cells_per_source) != len(source_names):
         raise ValueError("Source names must match the number of sources")
@@ -117,6 +168,16 @@ def build_row_plan(
         chosen.append(rows)
         cells.append(int(rows.size))
     n_total = sum(cells)
+    needed = n_total * ROW_PLAN_BUILD_BYTES_PER_CELL + sum(
+        int(rows.nbytes) for rows in chosen if rows is not None
+    )
+    if memory_bytes is not None and needed > int(memory_bytes):
+        raise memory_refusal(
+            f"Ordering {n_total} merged cells",
+            "the shuffle that arranges the sources' turns",
+            needed,
+            int(memory_bytes),
+        )
     # The concatenated cells of source s are the integers from the cells of
     # the sources before it up to its own last; a uniform permutation of them
     # gives the turn of every merged row to the source of its cell.
@@ -127,9 +188,22 @@ def build_row_plan(
         owners=owners,
         selectedRows=tuple(chosen),
         sourceCells=tuple(cells),
+        firstCells=_first_cells(cells, seed),
         nCells=n_total,
         seed=seed,
         sourceNames=tuple(source_names),
+    )
+
+
+def _first_cells(cells: list[int], seed: int) -> tuple[int, ...]:
+    """Return the cell that each source gives first: uniformly random among its ``cells``, from a stream of ``seed``."""
+    key = mix64_array(np.array([seed], dtype=np.uint64) ^ _START_SALT)
+    hashes = mix64_array(
+        key ^ mix64_array(np.arange(len(cells), dtype=np.uint64) + _GOLDEN)
+    )
+    return tuple(
+        int(value % np.uint64(count)) if count else 0
+        for value, count in zip(hashes.tolist(), cells, strict=True)
     )
 
 
@@ -142,8 +216,9 @@ def iter_row_plan_windows(
     """Yield the merged rows in order, in windows of at most ``window_rows`` rows.
 
     No window crosses a multiple of ``boundary_rows``, such as the edge of a
-    stored chunk band. A window in use holds ``WINDOW_BYTES_PER_ROW`` bytes
-    for each of its rows.
+    stored chunk band. A source whose cells wrap round from its last to its
+    first within a window has a part for each side. A window in use holds
+    ``WINDOW_BYTES_PER_ROW`` bytes for each of its rows.
     """
     if int(window_rows) < 1:
         raise ValueError("window_rows must be positive")
@@ -164,14 +239,27 @@ def iter_row_plan_windows(
         offset = 0
         for source in np.flatnonzero(counts).tolist():
             count = int(counts[source])
-            first = int(taken[source])
+            positions = grouped[offset : offset + count]
+            cells = row_plan.sourceCells[source]
+            first = (int(taken[source]) + row_plan.firstCells[source]) % cells
+            # The cells from ``first`` up to the source's last, then from its
+            # first on.
+            before_wrap = min(count, cells - first)
             parts.append(
                 RowPlanPart(
                     sourceIdx=source,
-                    positions=grouped[offset : offset + count],
-                    localRows=row_plan.source_rows(source, first, first + count),
+                    positions=positions[:before_wrap],
+                    localRows=row_plan.source_rows(source, first, first + before_wrap),
                 )
             )
+            if before_wrap < count:
+                parts.append(
+                    RowPlanPart(
+                        sourceIdx=source,
+                        positions=positions[before_wrap:],
+                        localRows=row_plan.source_rows(source, 0, count - before_wrap),
+                    )
+                )
             offset += count
         taken += counts
         yield RowPlanWindow(destStart=start, nRows=stop - start, parts=tuple(parts))
@@ -232,9 +320,7 @@ def verify_merged_cell_ids(
     """
     n_cells = int(stored_ids.shape[0])
     if n_cells != row_plan.nCells:
-        raise ValueError(
-            "ERROR: order of cells does not match the one in existing file"
-        )
+        raise ValueError(CELL_ORDER_MISMATCH)
     chunk_rows = max(1, int(stored_ids.chunks[0]))
     band_start = 0
     band = np.asarray(stored_ids[0:0])
@@ -255,7 +341,5 @@ def verify_merged_cell_ids(
             width = min(expected.size - offset, band_start + band.size - row)
             actual = band[row - band_start : row - band_start + width]
             if not np.array_equal(actual, expected[offset : offset + width]):
-                raise ValueError(
-                    "ERROR: order of cells does not match the one in existing file"
-                )
+                raise ValueError(CELL_ORDER_MISMATCH)
             offset += width

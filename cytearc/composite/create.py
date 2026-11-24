@@ -823,13 +823,14 @@ def create_composite(
     The composite lists its cells in the order of a merge of the same sources
     by ``DataStoreMerge`` with its default ``seed``: the sources' selected
     cells interleave in a random order, each source's cells in their stored
-    order, whatever the order of ``rows``. Every contiguous slice of the
-    composite's rows holds each source's cells in proportion to the cells it
-    gives. When every source lists its cells in a uniformly random order, as
-    imports do by default, so does the composite, and its cell table records
-    the shuffle in its ``cellOrder`` attribute. Pair per-cell values with the
-    composite by cell ID, ``{name}__{cell_id}``, or by ``sourceRow``, and
-    never by position.
+    order from a random first cell, whatever the order of ``rows``. Every
+    contiguous slice of the composite's rows holds each source's cells in
+    proportion to the cells it gives, so a slice reads about one stored shard
+    of every source. When the sources list their cells in random
+    orders of different seeds, so does the composite, and its cell table
+    records the shuffle in its ``cellOrder`` attribute. Pair per-cell values
+    with the composite by cell ID, ``{name}__{cell_id}``, or by
+    ``sourceRow``, and never by position.
 
     Args:
         sources: Open source DataStores by name. A cell's ID in the composite
@@ -1032,7 +1033,10 @@ def _write_composite(
     # written.
     measured_record = feature_record(alignment, names, nested, assay_name=assay)
     row_plan = build_row_plan(
-        [source.cells.N for source in datasets], names, selected_rows=selected_rows
+        [source.cells.N for source in datasets],
+        names,
+        selected_rows=selected_rows,
+        memory_bytes=resources.memoryBytes,
     )
     shuffle_seed = merged_shuffle_seed(
         row_plan, [source.cells._group for source in datasets]
