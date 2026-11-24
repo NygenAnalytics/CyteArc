@@ -3717,10 +3717,12 @@ def test_hvgs_of_some_sources_name_the_genes_that_those_sources_lack(
     kept = np.isin(names, _THREE_SOURCES[first]) & np.isin(
         names, _THREE_SOURCES[second]
     )
+    # The two merges interleave the pair's cells in different orders, so the
+    # sums behind the scores round differently.
     np.testing.assert_allclose(
         np.asarray(store.artifacts.load(ref)["corrected_variance"][:])[kept],
         intersection.artifacts.load(expected)["corrected_variance"][:],
-        rtol=1e-9,
+        rtol=1e-6,
     )
     assert _selected_names(store, ref) == _selected_names(intersection, expected)
 
