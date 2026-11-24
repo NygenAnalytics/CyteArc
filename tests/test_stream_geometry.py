@@ -9,7 +9,11 @@ from cytearc.storage.budget import ResourceBudget
 from cytearc.storage.async_execution import zarr_io_concurrency
 from cytearc.storage.execution import admit_stream
 from cytearc.storage.feature_stream import plan_feature_stream
-from cytearc.storage.geometry import ArrayGeometry, array_geometry
+from cytearc.storage.geometry import (
+    _BAND_LEFTOVER_LIMIT_BYTES,
+    ArrayGeometry,
+    array_geometry,
+)
 from cytearc.storage.parallel import stream_shards
 from cytearc.storage.partition import (
     affordable_width,
@@ -423,9 +427,11 @@ def test_reads_in_bands_are_charged_the_shards_each_band_touches_and_what_the_ba
     # shard's read, the indexers of the 10 columns, 64 bytes each, and Zarr's
     # copy of a row's five columns of a chunk. The reads of the 99 bands
     # before it took two chunks each, 198 chunks, whose objects pass the
-    # 640 KiB at which what reads in bands leave levels off, and the reader
+    # limit at which what reads in bands leave levels off, and the reader
     # orders the 100 rows, 48 bytes each.
-    assert row_bands == 2 * 40 + shard + 10 * 64 + 5 * 4 + 640 * 1024 + 100 * 48
+    assert row_bands == (
+        2 * 40 + shard + 10 * 64 + 5 * 4 + _BAND_LEFTOVER_LIMIT_BYTES + 100 * 48
+    )
     # A band of columns takes the 100 rows of a chunk's nine columns in one
     # read of the 100 shards, one at a time while the task of each of the
     # other 99 holds the objects of a chunk, 4 KiB. It indexes the 100 rows
@@ -465,7 +471,9 @@ def test_reads_in_bands_are_charged_the_shards_each_band_touches_and_what_the_ba
     column_halves, row_halves = index_band_bytes(
         halves, columns, rows=100, row_span=1, shards=100
     )
-    assert row_halves == 2 * 40 + half + 4_096 + 10 * 64 + 5 * 4 + 640 * 1024 + 4_800
+    assert row_halves == (
+        2 * 40 + half + 4_096 + 10 * 64 + 5 * 4 + _BAND_LEFTOVER_LIMIT_BYTES + 4_800
+    )
     assert column_halves == (
         2 * 3_600
         + half
@@ -480,8 +488,9 @@ def test_reads_in_bands_are_charged_the_shards_each_band_touches_and_what_the_ba
     # bands, not in one request over its 400 shards, which only a block whose
     # rows form a run would be, over at most five rows of shards: its charge
     # exceeds that of as many shuffled cells of the first four shards by what
-    # the earlier bands leave alone, 640 KiB against the objects of a read and
-    # of the six chunks of the three bands before the last.
+    # the earlier bands leave alone, the limit of reads in bands against the
+    # objects of a read and of the six chunks of the three bands before the
+    # last.
     array = zarr.create_array(
         store=MemoryStore(),
         shape=(40_000, 20),
@@ -500,7 +509,7 @@ def test_reads_in_bands_are_charged_the_shards_each_band_touches_and_what_the_ba
         block_size=400,
     )
     assert spread._read_bytes(0) - fewer._read_bytes(0) == (
-        640 * 1024 - (32 * 1024 + 6 * 4_096)
+        _BAND_LEFTOVER_LIMIT_BYTES - (32 * 1024 + 6 * 4_096)
     )
     # A run of rows touches a row of shards for every 100 rows, and one more
     # where it does not start at a shard's first row.

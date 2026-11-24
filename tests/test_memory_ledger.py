@@ -654,14 +654,14 @@ def test_the_reads_of_bands_leave_the_objects_of_a_read_and_of_each_chunk() -> N
     column = ArrayGeometry((1_000,), (100,), None, 4)
     assert column.leftoverBytes(5_000) == 32 * 1024 + 10 * 4 * 1024
     # What the reads of a one-dimensional array leave levels off at 192 KiB,
-    # which 40 chunks reach, and what reads of rows of an array of more axes
-    # leave at 640 KiB, which 152 chunks reach.
+    # which 40 chunks reach, and what reads of an array of more axes leave at
+    # 760,864 bytes, which 178 chunks pass.
     flags = ArrayGeometry((100_000,), (100,), None, 4)
     assert flags.bandsLeftoverBytes(40) == 32 * 1024 + 40 * 4 * 1024 == 192 * 1024
     assert flags.bandsLeftoverBytes(41) == flags.bandsLeftoverBytes(999) == 192 * 1024
     long = ArrayGeometry((100_000, 40), (100, 10), None, 4)
-    assert long.bandsLeftoverBytes(38) == 32 * 1024 + 152 * 4 * 1024 == 640 * 1024
-    assert long.bandsLeftoverBytes(39) == long.bandsLeftoverBytes(999) == 640 * 1024
+    assert long.bandsLeftoverBytes(44) == 32 * 1024 + 176 * 4 * 1024 == 753_664
+    assert long.bandsLeftoverBytes(45) == long.bandsLeftoverBytes(999) == 760_864
     # A read of three rows in three bands holds what the reads of the two
     # earlier bands leave, and a block of rows of 512 bytes for each of the
     # two more bands, which three rows of one band do not.
@@ -676,6 +676,93 @@ def test_the_reads_of_bands_leave_the_objects_of_a_read_and_of_each_chunk() -> N
     assert sharded.wholeReadBytes(1) - one_band.wholeReadBytes(1) == (
         900 * 40 * 4 + 32 * 1024 + 9 * 4 * 4 * 1024
     )
+
+
+def test_reads_in_bands_of_more_axes_are_charged_what_python_313s_free_lists_hold() -> (
+    None
+):
+    import contextvars
+    import sys
+
+    from cytearc.storage.geometry import _BAND_LEFTOVER_LIMIT_BYTES
+
+    # Python 3.13 keeps up to 2,000 freed tuples of each length from 1 to 20
+    # items for reuse. There a tuple takes 40 bytes and 8 an item, the
+    # collector's header included, as sys.getsizeof reports; Python 3.14 adds
+    # 8 bytes for its hash.
+    if sys.version_info[:2] == (3, 13):
+        assert [sys.getsizeof((0,) * items) for items in (1, 3, 20)] == [48, 64, 200]
+    # A read of a band of an array of up to three axes fills the lists of
+    # tuples of 1 item, of one item an axis and of one item a chunk that it
+    # takes along an axis of a shard, up to 20.
+    tuples = 2_000 * (48 + 64 + 200)
+    # The other free lists that the reads use hold up to 80 lists, 80 dicts
+    # with the key tables of 128 bytes that a dict of up to five keys
+    # allocates, 100 floats and 255 contexts.
+    others = (
+        80 * sys.getsizeof([])
+        + 80 * (sys.getsizeof({}) + 128)
+        + 100 * sys.getsizeof(0.5)
+        + 255 * sys.getsizeof(contextvars.copy_context())
+    )
+    assert others == 38_560
+    # A whole read of 1,000 bands of 20 chunks keeps up to 82 KB more once it
+    # returns, which 96 KiB covers.
+    assert _BAND_LEFTOVER_LIMIT_BYTES == tuples + others + 96 * 1024 == 760_864
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    ("shape", "chunks"),
+    [
+        pytest.param((1_000, 19 * 16), (1, 16), id="19-chunks"),
+        pytest.param((1_000, 20 * 16), (1, 16), id="20-chunks"),
+        pytest.param((1_000, 21 * 16), (1, 16), id="21-chunks"),
+        pytest.param((1_000, 2, 20 * 16), (1, 2, 16), id="three-axes-20-chunks"),
+    ],
+)
+def test_a_whole_read_of_bands_of_up_to_twenty_chunks_stays_within_its_charge(
+    tmp_path, shape, chunks
+) -> None:
+    import gc
+    import tracemalloc
+
+    from tests.memory_helpers import recording_ledger
+
+    # 1,000 rows of float32, each row a band of 19, 20 or 21 chunks of 16
+    # values in a shard of ten rows, or of 1 by 20 chunks of an array of three
+    # axes. On Python 3.13 the reads of the bands fill CPython's free lists of
+    # tuples of 1 item, of one an axis and of one a chunk along an axis, 2,000
+    # of each length up to 20 items: whole reads of rows of 19 and 20 chunks
+    # left 690 and 700 KB beside their result, and of 1 by 20 chunks 715 KB,
+    # beyond the 640 KiB that they were charged, and reads of 21 chunks,
+    # whose tuples are too long for a list, 302 KB.
+    root = zarr.open_group(tmp_path / "store.zarr", mode="w")
+    values = np.random.default_rng(0).random(shape, dtype=np.float32)
+    array = root.create_array(
+        "values", data=values, chunks=chunks, shards=(10, *shape[1:])
+    )
+    geometry = array_geometry(array)
+    assert geometry is not None
+    assert geometry.bandCount() == 1_000
+    # A first whole read makes what the process keeps of the array once, such
+    # as the modules it imports and the interned names of the shards' files.
+    read_whole(recording_ledger(), root, "values", item="the values")
+    ledger = recording_ledger()
+    gc.collect()
+    tracemalloc.start()
+    try:
+        start, _ = tracemalloc.get_traced_memory()
+        read = read_whole(ledger, root, "values", item="the values")
+        left, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    np.testing.assert_array_equal(read, values)
+    assert peak - start <= ledger.most
+    # What the reads of the bands left once the read returned, beside its
+    # result, stays within what the read is charged for them.
+    assert left - start - read.nbytes <= geometry.bandsLeftoverBytes(999)
 
 
 def test_a_sharded_array_reads_whole(tmp_path) -> None:

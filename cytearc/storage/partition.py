@@ -277,7 +277,9 @@ def index_band_bytes(
     shards it touches at once. The reads of the earlier bands leave their
     objects while the last one runs, as
     :meth:`~cytearc.storage.geometry.ArrayGeometry.chunksLeftoverBytes`
-    counts them for the chunks those reads took, up to 640 KiB: a chunk in
+    counts them for the chunks those reads took, up to the limit that
+    :meth:`~cytearc.storage.geometry.ArrayGeometry.bandsLeftoverBytes` takes
+    for an array of more axes: a chunk in
     each row chunk that the rows lie in for each earlier band of columns, and
     each selected column chunk for each earlier band of rows, one band to a
     row chunk that the rows lie in. A read of no columns reads nothing.
@@ -359,8 +361,8 @@ def _band_leftovers(
     band of columns takes a chunk in each of those row chunks, and a band of
     rows each selected column chunk of one of them, as
     :meth:`~cytearc.storage.geometry.ArrayGeometry.chunksLeftoverBytes`
-    counts what they leave, up to the 640 KiB at which what two-dimensional
-    reads leave levels off.
+    counts what they leave, up to the limit at which what reads in bands of
+    an array of more axes leave levels off.
     """
     row_chunks = min(
         max(0, int(rows)),
