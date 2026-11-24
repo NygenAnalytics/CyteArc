@@ -1154,7 +1154,9 @@ class _HeldSourceRows:
     (:class:`~cytearc.merge.row_plan.RowPlan`). The rows before
     ``first_row`` in its shard, the head, come last: with ``keep_head``, a
     window of whole shards keeps them apart once it moves on, rather than
-    read their shard again.
+    read their shard again. A window of part of a source of one shard that
+    reaches the source's last row goes on from its first row, in the same
+    read, so the windows decode each chunk as often as windows from row 0.
     """
 
     def __init__(
@@ -1175,6 +1177,10 @@ class _HeldSourceRows:
         self._workers = workers
         self._sparse = sparse
         self._start = self._stop = 0
+        # The rows from the source's first that a window holds after its
+        # last row, when it wraps round.
+        self._wrapStop = 0
+        self._firstRow = int(first_row)
         self._values: Any = None
         self._headStart = int(first_row) - int(first_row) % self._shardRows
         self._headStop = int(first_row) if keep_head else self._headStart
@@ -1188,6 +1194,12 @@ class _HeldSourceRows:
             if self._head is not None and self._headStart <= row < self._headStop:
                 width = min(count - offset, self._headStop - row)
                 yield offset, self._rows(self._head, row - self._headStart, width)
+                offset += width
+                continue
+            if row < self._wrapStop and not self._start <= row < self._stop:
+                width = min(count - offset, self._wrapStop - row)
+                start = self._stop - self._start + row
+                yield offset, self._rows(self._values, start, width)
                 offset += width
                 continue
             if not self._start <= row < self._stop:
@@ -1213,10 +1225,11 @@ class _HeldSourceRows:
     def _refill(self, row: int) -> None:
         """Hold the window that holds source row ``row``.
 
-        A window of part of a shard starts at the row; a window of whole
-        shards starts at the shard that holds it, so the window of the first
-        row also holds the head. The head is kept apart when that window
-        moves on.
+        A window of part of a shard starts at the row, and in a source of one
+        shard goes on from the source's first row once it reaches the last;
+        a window of whole shards starts at the shard that holds it, so the
+        window of the first row also holds the head. The head is kept apart
+        when that window moves on.
         """
         if (
             self._head is None
@@ -1234,29 +1247,35 @@ class _HeldSourceRows:
         self._values = None
         n_rows = int(self._reader.shape[0])
         shard = self._shardRows
+        wrap = 0
         if self._windowRows < shard:
             begin = row
             stop = min(n_rows, row + self._windowRows, (row // shard + 1) * shard)
+            if n_rows <= shard and stop == n_rows and row >= self._firstRow:
+                # Before the source wraps round, its first rows are in the same
+                # shard, so one read decodes them with the last.
+                wrap = min(self._firstRow, row + self._windowRows - n_rows)
         else:
             begin = row - row % shard
             stop = min(n_rows, begin + self._windowRows // shard * shard)
+        rows: Any = np.r_[begin:stop, 0:wrap] if wrap else slice(begin, stop)
         if self._sparse:
             values: Any = [
-                csr_from_dense(controlled_compute(run[begin:stop, :], self._workers))
+                csr_from_dense(controlled_compute(run[rows, :], self._workers))
                 for run in self._runs
             ]
         else:
             values = np.empty(
-                (stop - begin, int(self._reader.shape[1])), dtype=self._reader.dtype
+                (stop - begin + wrap, int(self._reader.shape[1])),
+                dtype=self._reader.dtype,
             )
             column = 0
             for run in self._runs:
                 end = column + int(run.shape[1])
-                values[:, column:end] = controlled_compute(
-                    run[begin:stop, :], self._workers
-                )
+                values[:, column:end] = controlled_compute(run[rows, :], self._workers)
                 column = end
         self._start, self._stop, self._values = begin, stop, values
+        self._wrapStop = wrap
 
 
 def _finish_assay_counts(

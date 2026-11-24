@@ -8549,34 +8549,21 @@ def _source_parts(sizes, batch_rows: int, seed: int = 42) -> list[list[int]]:
     return parts
 
 
-def _chunk_decodes(
-    locations, rows_at_once: int, seed: int = 42
-) -> dict[tuple[int, int], int]:
+def _chunk_decodes(locations, rows_at_once: int) -> dict[tuple[int, int], int]:
     """Return the decodes of each source's chunk shape when each run of ``rows_at_once`` of its cells decodes each of its chunks once.
 
-    Each source, stored in one shard, gives its cells from the first cell
-    that the plan of ``seed`` draws to its last, then from its first, so
-    runs start at the first cell and again at the source's first.
+    Each source, stored in one shard, gives its cells from its first cell to
+    its last, then from its first stored cell, and the run that reaches its
+    last cell goes on from its first stored cell, so it takes as many runs as
+    from row 0.
     """
-    from cytearc.merge.row_plan import build_row_plan
-
-    arrays = [
-        zarr.open_group(location, mode="r")["Counts/counts"] for location in locations
-    ]
-    sizes = [int(counts.shape[0]) for counts in arrays]
-    first_cells = build_row_plan(
-        sizes, [f"s{index}" for index in range(len(sizes))], seed=seed
-    ).firstCells
     decodes = {}
-    for counts, first in zip(arrays, first_cells, strict=True):
+    for location in locations:
+        counts = zarr.open_group(location, mode="r")["Counts/counts"]
         n_cells, n_features = counts.shape
         chunk_rows, chunk_columns = counts.chunks
         assert chunk_rows == n_cells
-        runs = (
-            1
-            if rows_at_once >= n_cells
-            else -(-(n_cells - first) // rows_at_once) + -(-first // rows_at_once)
-        )
+        runs = -(-n_cells // rows_at_once)
         decodes[tuple(counts.chunks)] = runs * -(-n_features // chunk_columns)
     return decodes
 
@@ -8639,10 +8626,11 @@ def test_a_merge_decodes_each_source_chunk_once_for_each_window_of_cells_it_hold
     )
 
     # Each source of 600 or 500 cells, one shard, is held whole, or 80 cells
-    # at a time from its first cell and again from its first stored cell,
-    # and each window decodes each of the source's four chunks once: 4 + 4
-    # decodes, or 8 * 4 + 8 * 4. Read batch by batch, each band of 16 merged
-    # cells reads its cells of each source, and each read decodes the
+    # at a time from its first cell, the window that reaches its last cell
+    # going on from its first stored cell, and each window decodes each of
+    # the source's four chunks once: 4 + 4 decodes, or 8 * 4 + 7 * 4, as
+    # windows from row 0 decode them. Read batch by batch, each band of 16
+    # merged cells reads its cells of each source, and each read decodes the
     # source's four chunks.
     rows = merged["held_rows"]
     assert merged["batch_rows"] == 16
@@ -8651,7 +8639,7 @@ def test_a_merge_decodes_each_source_chunk_once_for_each_window_of_cells_it_hold
         assert merged["decodes"] == _batch_decodes(chunk_column_sources, 16)
     else:
         assert merged["decodes"] == _chunk_decodes(chunk_column_sources, rows)
-        assert {None: 8, 80: 64}[most_rows] == sum(merged["decodes"].values())
+        assert {None: 8, 80: 60}[most_rows] == sum(merged["decodes"].values())
         assert sum(merged["decodes"].values()) < sum(reference["decodes"].values())
     # Held windows are read a chunk column at a time, four of 10 features of
     # the left source and three of 12 and one of 4 of the right; a batch
@@ -9312,6 +9300,39 @@ def test_held_rows_give_the_head_of_the_first_cells_shard_last_without_its_windo
     np.testing.assert_array_equal(np.vstack(pieces), np.r_[values[530:], values[:530]])
 
 
+def test_held_rows_of_a_source_of_one_shard_wrap_round_within_a_window(
+    chunk_column_sources,
+):
+    from cytearc import DataStore
+    from cytearc.merge.writer import _chunk_column_runs, _HeldSourceRows
+
+    location = chunk_column_sources[0]
+    counts = DataStore(location, default_assay="Counts", nthreads=1).Counts.rawData
+    values = np.asarray(zarr.open_group(location, mode="r")["Counts/counts"][:])
+    assert counts.chunksize[0] == 600
+    held = _HeldSourceRows(
+        counts, _chunk_column_runs(counts), 80, 1, first_row=530, keep_head=True
+    )
+    refills = []
+    refill = held._refill
+
+    def recorded(row):
+        refill(row)
+        refills.append((row, held._values.shape[0]))
+
+    held._refill = recorded
+    pieces = []
+    for first, stop in ((530, 600), (0, 530)):
+        for start in range(first, stop, 16):
+            taken = held.take(start, min(16, stop - start))
+            pieces.extend(rows.copy() for _, rows in taken)
+    # The window from row 530 reaches the last row and goes on with rows 0 to
+    # 9 in the same read, so the source takes 8 windows of 80 rows, as many
+    # as from row 0.
+    assert refills == [(530, 80), *((row, 80) for row in range(10, 530, 80))]
+    np.testing.assert_array_equal(np.vstack(pieces), np.r_[values[530:], values[:530]])
+
+
 def _batch_reads(locations, batch_rows: int, seed: int = 42) -> list[int]:
     """Return the reads of each source when each batch of merged rows reads its rows of each source alone."""
     sizes = [
@@ -9426,6 +9447,9 @@ def test_a_merge_holds_windows_of_a_composite_source(
     from cytearc.merge.row_plan import build_row_plan
 
     def windows(n_cells: int, shard_rows: int, first: int) -> int:
+        if n_cells <= shard_rows:
+            # The window that reaches the last cell goes on from the first.
+            return -(-n_cells // 80)
         count = 0
         for start, stop in ((first, n_cells), (0, first)):
             row = start
