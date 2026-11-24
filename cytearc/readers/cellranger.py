@@ -647,8 +647,8 @@ class CrH5Reader(CrReader):
         cells reads the file once.
 
         The scan and the spill run within what ``maxBytes`` leaves beside
-        the reader's arrays, which :meth:`_sparse_import_resident_bytes`
-        counts.
+        the reader's arrays: the indexes of the selected barcodes, the
+        file's row pointers and the selected barcodes' cumulative values.
 
         Raises:
             MemoryError: If one barcode holds more values than fit in
