@@ -1103,13 +1103,20 @@ def test_a_csv_import_lets_go_of_its_cell_columns_and_count_summary_before_count
     # In the file's order, the counts write gathers the columns' parts, the
     # notes alone 4 bytes a character of 300 for each cell.
     n_cells = 400
-    writer = CSVtoZarr(
-        _notes_reader(tmp_path / "counts.csv", n_cells),
-        MemoryStore(),
-        "RNA",
-        nthreads=1,
-        shuffle_cells=False,
-    )
+
+    def importer() -> Any:
+        return CSVtoZarr(
+            _notes_reader(tmp_path / "counts.csv", n_cells),
+            MemoryStore(),
+            "RNA",
+            nthreads=1,
+            shuffle_cells=False,
+        )
+
+    # An untraced import first compiles and imports what a first import does
+    # once, which stays held.
+    importer().dump()
+    writer = importer()
     seen: list[tuple[int, int]] = []
     preflight = sharding.preflight_counts_t_spec
 
