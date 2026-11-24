@@ -803,21 +803,50 @@ def test_a_read_of_cells_spread_over_shards_holds_a_task_for_each_shard(
         assert peak > charge - (column_shards - 1) * touched * 4_096
 
 
-@pytest.mark.parametrize("touched", [40, 100])
+@pytest.mark.parametrize(
+    ("chunk", "touched", "left", "short"),
+    [
+        # Two chunks a band, 100 bands: the reads of the 99 bands before the
+        # last took 198 chunks, whose objects pass the 640 KiB at which what
+        # reads in bands leave levels off, where as many cells of one shard
+        # are one band and leave none; a charge without them falls short.
+        pytest.param(10, 100, 640 * 1024, 640 * 1024, id="two-chunks-100-bands"),
+        # Five chunks a band, 1,000 bands, against as many cells of the first
+        # ten shards, whose nine bands before the last leave the objects of a
+        # read, 32 KiB, and of their 45 chunks, 4 KiB each; a charge of what
+        # whole reads of one-dimensional arrays leave, up to 192 KiB, falls
+        # short.
+        pytest.param(
+            4,
+            1_000,
+            640 * 1024 - (32 * 1024 + 45 * 4_096),
+            (640 - 192) * 1024,
+            id="five-chunks-1000-bands",
+            marks=pytest.mark.slow,
+        ),
+    ],
+)
 def test_a_read_in_bands_of_cells_spread_over_shards_holds_what_the_bands_before_it_leave(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch, touched: int
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    chunk: int,
+    touched: int,
+    left: int,
+    short: int,
 ) -> None:
     import sys
 
     from cytearc.storage import virtual_arrays
     from tests.memory_helpers import traced_selection_read
 
-    # 30,000 cells by 20 features in shards of 100 cells of two 10-feature
-    # chunks; a block of one cell from each of 40 or 100 shards by every
-    # other feature, which a sharded read of both takes in bands of rows,
-    # each in one shard, and a block of as many shuffled cells of one shard.
+    # 100 cells for each shard that the block reads, by 20 features in shards
+    # of 100 cells of 10-feature or 4-feature chunks; a block of one cell
+    # from each of 100 or 1,000 shards by every other feature, which a
+    # sharded read of both takes in bands of rows, each in one shard, two or
+    # five chunks of it, and a block of as many shuffled cells of the first
+    # shards.
     stored, values = _random_bits_store(
-        tmp_path, (30_000, 20), (100, 10), (100, 20), np.float32
+        tmp_path, (touched * 100, 20), (100, chunk), (100, 20), np.float32
     )
     columns = np.arange(0, 20, 2)
     sliced: list[int] = []
@@ -839,18 +868,15 @@ def test_a_read_in_bands_of_cells_spread_over_shards_holds_what_the_bands_before
     assert set(sliced) == {0}
     charge = block._read_bytes(read.nbytes)
     assert peak <= charge
-    # The reads of the 39 or 99 bands before the last took two chunks each
-    # and leave the most that such reads leave, 192 KiB. No band waits on
-    # another shard, so as many cells of one shard, one band, are charged the
-    # same but for those objects.
+    # No band waits on another shard, so the block is charged as many cells
+    # of the first shards are but for what the earlier bands leave.
     clustered = np.random.default_rng(7).permutation(touched)
     fewer = ChunkedArray(stored, rows=clustered, cols=columns, block_size=touched)
-    left = 192 * 1024
     assert charge - fewer._read_bytes(read.nbytes) == left
     if sys.version_info < (3, 14):
         # On Python 3.13 the read holds those objects beyond the rest of its
         # charge; the reads leave few of them on Python 3.14.
-        assert peak > charge - left
+        assert peak > charge - short
 
 
 @pytest.mark.parametrize(
@@ -881,11 +907,7 @@ def test_a_read_of_cells_on_zarrs_fused_pipeline_is_charged_its_pools_reads(
 
     # Shuffled cells of four chunks, or of four shards, read as one block on
     # Zarr's fused pipeline with a pool of four threads of the test's own,
-    # each decode holding its chunk until the four hold theirs. Each value's
-    # high half is zero, so a chunk is stored in about half the bytes that
-    # it decodes to, while the charge counts the stored bytes of data that
-    # does not compress: the read of four column chunks keeps 1.7 to 2.7 MB
-    # of its 16.6 MB charge to spare, where random bits left 0.13 MB.
+    # each decode holding its chunk until the four hold theirs.
     monkeypatch.setattr(codec_pipeline, "_pool", None)
     monkeypatch.setattr(codec_pipeline, "_pool_size", 0)
     settings = {
@@ -893,15 +915,8 @@ def test_a_read_of_cells_on_zarrs_fused_pipeline_is_charged_its_pools_reads(
         "codec_pipeline.max_workers": 4,
     }
     cells = np.random.default_rng(8).permutation(shape[0])
-    bits = np.random.default_rng(0).integers(0, 1 << 16, size=shape, dtype=np.uint32)
-    values = bits.view(np.float32)
     with zarr.config.set(settings):
-        stored = zarr.open_group(
-            store=LocalStore(str(tmp_path)), mode="w"
-        ).create_array(
-            "values", shape=shape, chunks=chunks, shards=shards, dtype=np.float32
-        )
-        stored[:] = values
+        stored, values = _random_bits_store(tmp_path, shape, chunks, shards, np.float32)
         geometry = array_geometry(stored)
         assert geometry is not None and geometry.fusedPoolWorkers == 4
         (outer, *_) = stored.metadata.codecs

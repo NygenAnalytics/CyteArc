@@ -40,6 +40,13 @@ SCAN_BAND_BYTES = 64 * 1024**2
 #: that index: 48 bytes an index of int64 in all. Its stable sort and masks
 #: held less beside them, 26 bytes an index traced.
 _BAND_INDEX_BYTES = 48
+#: The reads of the earlier bands of a read in bands leave more of their
+#: objects than whole reads of one-dimensional arrays, whose 192 KiB
+#: ``ArrayGeometry.chunksLeftoverBytes`` charges unless given another limit:
+#: on Python 3.13, 1,000 to 4,000 Zarr reads of one row of a two-dimensional
+#: sharded array, of 2, 4 and 16 chunks each, left 265, 422 and 613 KB, by
+#: slices and index arrays alike, and on Python 3.14 17 to 23 KB.
+_BAND_LEFTOVER_LIMIT_BYTES = 640 * 1024
 #: Passes over a selection's indices take at most this many at a time, or,
 #: where they take whole bands, one band that holds more, so a pass holds 9
 #: to 11 bytes for each index of a piece, 590 to 720 KB for 65,536 of them,
@@ -277,10 +284,10 @@ def index_band_bytes(
     shards it touches at once. The reads of the earlier bands leave their
     objects while the last one runs, as
     :meth:`~cytearc.storage.geometry.ArrayGeometry.chunksLeftoverBytes`
-    counts them for the chunks those reads took: a chunk in each row chunk
-    that the rows lie in for each earlier band of columns, and each selected
-    column chunk for each earlier band of rows, one band to a row chunk that
-    the rows lie in. A read of no columns reads nothing.
+    counts them for the chunks those reads took, up to 640 KiB: a chunk in
+    each row chunk that the rows lie in for each earlier band of columns, and
+    each selected column chunk for each earlier band of rows, one band to a
+    row chunk that the rows lie in. A read of no columns reads nothing.
     """
     if columns.size == 0:
         return 0, 0
@@ -359,7 +366,8 @@ def _band_leftovers(
     band of columns takes a chunk in each of those row chunks, and a band of
     rows each selected column chunk of one of them, as
     :meth:`~cytearc.storage.geometry.ArrayGeometry.chunksLeftoverBytes`
-    counts what they leave.
+    counts what they leave, up to the 640 KiB at which what two-dimensional
+    reads leave levels off.
     """
     row_chunks = min(
         max(0, int(rows)),
@@ -368,8 +376,12 @@ def _band_leftovers(
     )
     column_chunks = int(np.unique(geometry.binOf(1, columns)).size)
     return (
-        geometry.chunksLeftoverBytes((column_chunks - 1) * row_chunks),
-        geometry.chunksLeftoverBytes((row_chunks - 1) * column_chunks),
+        geometry.chunksLeftoverBytes(
+            (column_chunks - 1) * row_chunks, limit=_BAND_LEFTOVER_LIMIT_BYTES
+        ),
+        geometry.chunksLeftoverBytes(
+            (row_chunks - 1) * column_chunks, limit=_BAND_LEFTOVER_LIMIT_BYTES
+        ),
     )
 
 

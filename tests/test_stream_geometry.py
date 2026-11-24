@@ -422,17 +422,26 @@ def test_reads_in_bands_are_charged_the_shards_each_band_touches_and_what_the_ba
     # A band of rows lies in one shard, and holds its 10 values twice, the
     # shard's read, the indexers of the 10 columns, 64 bytes each, and Zarr's
     # copy of a row's five columns of a chunk. The reads of the 99 bands
-    # before it took two chunks each and leave up to 192 KiB of their
-    # objects, and the reader orders the 100 rows, 48 bytes each.
-    assert row_bands == 2 * 40 + shard + 10 * 64 + 5 * 4 + 192 * 1024 + 100 * 48
+    # before it took two chunks each, 198 chunks, whose objects pass the
+    # 640 KiB at which what reads in bands leave levels off, and the reader
+    # orders the 100 rows, 48 bytes each.
+    assert row_bands == 2 * 40 + shard + 10 * 64 + 5 * 4 + 640 * 1024 + 100 * 48
     # A band of columns takes the 100 rows of a chunk's nine columns in one
     # read of the 100 shards, one at a time while the task of each of the
     # other 99 holds the objects of a chunk, 4 KiB. It indexes the 100 rows
     # and copies their nine values of the chunk, and the read of the band
-    # before it took a chunk in each of 100 row chunks, which leaves up to
-    # 192 KiB; the reader orders the 10 columns.
+    # before it took a chunk in each of 100 row chunks, which leaves the
+    # objects of a read, 32 KiB, and 4 KiB of each chunk; the reader orders
+    # the 10 columns.
     assert column_bands == (
-        2 * 3_600 + shard + 99 * 4_096 + 100 * 64 + 3_600 + 192 * 1024 + 10 * 48
+        2 * 3_600
+        + shard
+        + 99 * 4_096
+        + 100 * 64
+        + 3_600
+        + 32_768
+        + 100 * 4_096
+        + 10 * 48
     )
     # Ten rows in ten shards: the nine earlier bands of rows leave the objects
     # of a read and of their 18 chunks, and the band of columns before the
@@ -456,9 +465,16 @@ def test_reads_in_bands_are_charged_the_shards_each_band_touches_and_what_the_ba
     column_halves, row_halves = index_band_bytes(
         halves, columns, rows=100, row_span=1, shards=100
     )
-    assert row_halves == 2 * 40 + half + 4_096 + 10 * 64 + 5 * 4 + 192 * 1024 + 4_800
+    assert row_halves == 2 * 40 + half + 4_096 + 10 * 64 + 5 * 4 + 640 * 1024 + 4_800
     assert column_halves == (
-        2 * 3_600 + half + 99 * 4_096 + 100 * 64 + 3_600 + 192 * 1024 + 10 * 48
+        2 * 3_600
+        + half
+        + 99 * 4_096
+        + 100 * 64
+        + 3_600
+        + 32_768
+        + 100 * 4_096
+        + 10 * 48
     )
     # A run of rows touches a row of shards for every 100 rows, and one more
     # where it does not start at a shard's first row.
