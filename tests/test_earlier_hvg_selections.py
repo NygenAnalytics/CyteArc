@@ -10,6 +10,11 @@ arrays, parameters and inputs, revision 2 where revision 2 applies and none
 otherwise, diagnostics without selectedDetectionRatio, and cytearc_version
 1.4.0. A selection of 2,000 cells resolves the default min_cells to 20 in both
 releases, so a default call has the provenance of the saved selection.
+
+Revision 4 marks the batch-aware selections of the cytearc flavor that record
+no normalizer, as 1.4.0 saved them: such selections now record the
+normalization_method and size_factor of the values they score, so a call
+computes them anew, while they stay usable and lineage shows them stale.
 """
 
 import shutil
@@ -52,7 +57,7 @@ SETTINGS: dict[str, Any] = {
     "doublets": False,
     "markers": False,
 }
-_REVISION_2, _REVISION_3 = OPERATION_REVISIONS["select_hvgs"]
+_REVISION_2, _REVISION_3, _REVISION_4 = OPERATION_REVISIONS["select_hvgs"]
 _RATIO = "selectedDetectionRatio"
 
 
@@ -83,7 +88,8 @@ def _as_saved_by_1_4(store: DataStore, ref: ArtifactRef) -> None:
     """Rewrite a selection's record as CyteArc 1.4.0 saved it for the same call.
 
     The selection of revision 3 becomes revision 2 where revision 2 applies to
-    its record, and revision 1 otherwise.
+    its record, and revision 1 otherwise. A batch-aware selection of the
+    cytearc flavor loses its normalizer, which 1.4.0 did not record.
     """
     provenance = artifact_group(store.zw, ref).attrs["provenance"]
     assert provenance["revision"] == _REVISION_3.revision
@@ -94,6 +100,18 @@ def _as_saved_by_1_4(store: DataStore, ref: ArtifactRef) -> None:
         else 1
     )
     rewrite_as_saved_by_1_4(store, ref, revision=earlier, without=_RATIO)
+    if "batch" in provenance["inputs"] and "flavor" not in provenance["parameters"]:
+        _without_normalizer(store, ref)
+
+
+def _without_normalizer(store: DataStore, ref: ArtifactRef) -> None:
+    """Drop the normalizer and size factor from a selection's record."""
+    group = artifact_group(store.zw, ref)
+    provenance = dict(group.attrs["provenance"])
+    parameters = dict(provenance["parameters"])
+    del parameters["normalization_method"], parameters["size_factor"]
+    provenance["parameters"] = parameters
+    group.attrs["provenance"] = provenance
 
 
 @pytest.fixture(scope="module")
@@ -250,6 +268,62 @@ def test_a_default_call_selects_anew_and_logs_why(copy) -> None:
     with recomputations() as logged:
         assert store.features.hvgs(cells, top_n=_TOP_N, show_plot=False) == selection
     assert logged == []
+
+
+def test_a_batch_aware_selection_without_a_normalizer_stays_usable_and_is_stale(
+    copy,
+) -> None:
+    store = copy.store
+    cells = copy.run["analysis_cell_selection"]
+
+    def select(top_n: int) -> ArtifactRef:
+        return store.features.hvgs(cells, batch="batch", top_n=top_n, show_plot=False)
+
+    # A selection of this release records its normalizer and is current.
+    saved_by_1_4 = select(_TOP_N)
+    assert store.artifacts.inspect(saved_by_1_4).revision == 3
+    assert store.artifacts.inspect(saved_by_1_4).is_current
+    # As 1.4.0 saved it, and as builds before revision 4 saved another.
+    _as_saved_by_1_4(store, saved_by_1_4)
+    earlier_build = select(_TOP_N // 2)
+    _without_normalizer(store, earlier_build)
+
+    for ref, revision, superseded_by in (
+        (saved_by_1_4, 2, (_REVISION_3, _REVISION_4)),
+        (earlier_build, 3, (_REVISION_4,)),
+    ):
+        status = store.artifacts.inspect(ref)
+        assert "normalization_method" not in (status.parameters or {})
+        assert (status.revision, status.current_revision, status.is_current) == (
+            revision,
+            4,
+            False,
+        )
+        assert status.superseded_by == superseded_by
+        # It still loads, resolves, and serves a call that passes it.
+        assert int(_genes(store, ref).sum()) > 0
+        assert store.features.resolve("RNA", ref) == ref
+        normalized = store.features.normalize(cells, ref)
+        assert store.artifacts.inspect(normalized).input_ref("feature_selection") == ref
+        markdown = store.artifacts.lineage(ref).to_markdown()
+        assert "- Status: `stale`" in markdown
+        assert f"- Revision: `{revision}, current 4: " in markdown
+
+    # A call computes the selection anew, with its normalizer.
+    computed = select(_TOP_N)
+    assert computed not in (saved_by_1_4, earlier_build)
+    status = store.artifacts.inspect(computed)
+    assert (status.revision, status.is_current) == (3, True)
+    assert "normalization_method" in (status.parameters or {})
+    # Revision 4 leaves out selections of another flavor, which read counts,
+    # those that this release saves and those that 1.4.0 saved.
+    other = store.features.hvgs(
+        cells, flavor="seurat_v3", batch="batch", top_n=_TOP_N, show_plot=False
+    )
+    status = store.artifacts.inspect(other)
+    assert (status.revision, status.is_current) == (3, True)
+    _as_saved_by_1_4(store, other)
+    assert store.artifacts.inspect(other).superseded_by == (_REVISION_3,)
 
 
 def test_a_current_selection_without_the_ratio_is_refused_and_computed_anew(

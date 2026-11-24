@@ -21,6 +21,7 @@ import zarr
 from scipy.sparse import csr_matrix
 from scipy.stats import spearmanr
 
+from cytearc import SparseToZarr
 from cytearc.assay import ATACassay, PearsonResidualNormalizer, norm_pearson_residuals
 from cytearc.assay.base import Assay
 from cytearc.assay.hvg_statistics import (
@@ -31,6 +32,8 @@ from cytearc.assay.hvg_statistics import (
 from cytearc.assay.normalization import (
     applicable_normalization_flags,
     fit_normalization,
+    norm_lib_size,
+    norm_lib_size_log,
     normalize_rows,
 )
 from cytearc.datastore.datastore import DataStore
@@ -54,7 +57,12 @@ from cytearc.features.variability import (
     seurat_v3_expected_variance,
     seurat_v3_standardized_variance,
 )
-from cytearc.storage.artifacts import artifact_path, inspect_artifact
+from cytearc.storage.artifacts import (
+    ArtifactRef,
+    artifact_path,
+    callable_identity,
+    inspect_artifact,
+)
 from cytearc.storage.count_matrix import CountMatrixPolicy
 from cytearc.storage.diagnostics import declared_diagnostics
 from cytearc.storage.errors import ArtifactResolutionError
@@ -912,19 +920,23 @@ def test_grouped_statistics_check_their_batches(banded) -> None:
 # The flavors as features.hvgs computes them
 
 
+def _cytearc_reference(values: np.ndarray) -> np.ndarray:
+    """Score genes over the rows of normalized ``values`` as the cytearc flavor does."""
+    average = values.mean(axis=0)
+    positive = average > 0
+    scores = np.zeros(values.shape[1])
+    scores[positive] = fit_lowess(
+        average[positive], values.var(axis=0)[positive], 200, 0.1
+    )
+    return scores
+
+
 def _reference_scores(flavor: str, counts: np.ndarray, **options: Any) -> np.ndarray:
     """Score genes over the rows of ``counts`` from the published formulas."""
     counts = counts.astype(np.float64)
     n = len(counts)
     if flavor == "cytearc":
-        values = _library_size(counts)
-        average = values.mean(axis=0)
-        positive = average > 0
-        scores = np.zeros(counts.shape[1])
-        scores[positive] = fit_lowess(
-            average[positive], values.var(axis=0)[positive], 200, 0.1
-        )
-        return scores
+        return _cytearc_reference(_library_size(counts))
     if flavor == "seurat_v3":
         mean = counts.mean(axis=0)
         variance = counts.var(axis=0, ddof=1)
@@ -1050,6 +1062,97 @@ def test_batches_select_by_count_then_median_rank(banded, flavor) -> None:
         )
         == ref
     )
+
+
+@pytest.mark.parametrize("batch", [None, "batch"])
+@pytest.mark.parametrize("change", ["normalizer", "size factor"])
+def test_a_selection_under_another_normalizer_or_size_factor_is_computed_anew(
+    banded, batch, change
+) -> None:
+    cells = banded.snapshot_cell_selection()
+
+    def select() -> ArtifactRef:
+        return banded.features.hvgs(cells, batch=batch, top_n=8, show_plot=False)
+
+    first = select()
+    if change == "normalizer":
+        banded.RNA.normMethod = norm_lib_size_log
+        values = [np.log1p(_library_size(counts)) for counts in _groups(batch)]
+    else:
+        banded.RNA.sf = 5000
+        values = [5 * _library_size(counts) for counts in _groups(batch)]
+    second = select()
+
+    assert second != first
+    # The selection scores the values of the new normalizer or size factor,
+    # the mean over the batches with batch.
+    np.testing.assert_allclose(
+        banded.artifacts.load(second)["corrected_variance"][:],
+        np.mean([_cytearc_reference(group) for group in values], axis=0),
+        rtol=1e-7,
+        atol=1e-12,
+    )
+    # The same normalizer and size factor reuse it.
+    assert select() == second
+    if batch is not None:
+        parameters = inspect_artifact(banded.zw, second).parameters
+        assert parameters["normalization_method"] == callable_identity(
+            banded.RNA.normMethod
+        )
+        assert parameters["size_factor"] == banded.RNA.sf
+
+
+def _groups(batch: str | None) -> list[np.ndarray]:
+    """The counts of all cells, or of each batch."""
+    counts = _COUNTS.astype(np.float64)
+    if batch is None:
+        return [counts]
+    return [counts[_CODES == code] for code in range(3)]
+
+
+@pytest.mark.slow
+def test_recipe_runs_under_each_normalizer_select_their_own_batch_aware_genes(
+    tmp_path,
+) -> None:
+    # The banded store's small chunks make whole runs slow, so the runs read a
+    # store of the same counts in the default chunks.
+    location = tmp_path / "runs.zarr"
+    SparseToZarr(
+        csr_matrix(_COUNTS),
+        str(location),
+        [f"c{index}" for index in range(_N_CELLS)],
+        list(_NAMES),
+        shuffle_cells=False,
+    ).dump()
+    store = DataStore(
+        str(location), default_assay="RNA", min_features_per_cell=-1, nthreads=2
+    )
+    store.cells.insert("batch", by_cell_id(store.cells, _BATCHES), overwrite=True)
+    settings = {
+        "filtering": False,
+        "cell_cycle": False,
+        "hvg": {"batch": "batch", "top_n": 8},
+        "pca": {"dims": 3},
+        "neighbors": {"k": 5},
+        "umap": False,
+        "leiden": False,
+        "doublets": False,
+        "markers": False,
+    }
+    key = "highly_variable_features"
+
+    library = store.pipeline.rna(normalization={"method": "lib_size"}, **settings)
+    logged = store.pipeline.rna(normalization={"method": "lib_size_log"}, **settings)
+    again = store.pipeline.rna(normalization={"method": "lib_size"}, **settings)
+
+    assert logged[key] != library[key]
+    assert again[key] == library[key]
+    for run, normalizer in ((library, norm_lib_size), (logged, norm_lib_size_log)):
+        parameters = inspect_artifact(store.zw, run[key]).parameters
+        assert parameters["normalization_method"] == callable_identity(normalizer)
+        # The run normalizes and reduces the genes of its own selection.
+        normalized = inspect_artifact(store.zw, run["normalized"])
+        assert normalized.input_ref("feature_selection") == run[key]
 
 
 def test_batch_labels_may_come_from_a_label_artifact(banded) -> None:
