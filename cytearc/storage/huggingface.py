@@ -13,7 +13,7 @@ from typing import Any, cast
 from urllib.parse import quote
 
 import httpx2
-from huggingface_hub import HfApi, hf_hub_url
+from huggingface_hub import hf_hub_url
 from huggingface_hub.errors import EntryNotFoundError, HfHubHTTPError
 from huggingface_hub.hf_file_system import (
     HfFileSystem,
@@ -40,9 +40,9 @@ from zarr.storage._utils import _dereference_path
 from .async_execution import zarr_host_threads
 from .stores import REMOTE_RETRY_TIMEOUT, byte_request_span
 
-# huggingface_hub sets no timeout on a bucket's lookup or its tree listings, so
-# a request that the server or the network leaves unanswered would wait
-# forever. Each attempt at a request of the store is given this many seconds.
+# A bucket's lookup sets no timeout, as huggingface_hub sends it, so a request
+# that the server or the network leaves unanswered would wait forever. Each
+# attempt at a request of the store is given this many seconds.
 REQUEST_TIMEOUT = 60.0
 # The seconds in which a request is retried, as object stores retry theirs.
 RETRY_TIMEOUT = REMOTE_RETRY_TIMEOUT.total_seconds()
@@ -142,27 +142,56 @@ def _file_url(fs: HfFileSystem, resolved: _Resolved, path: str) -> str:
 
 
 def _list_tree(
-    fs: HfFileSystem, resolved: _Resolved, path: str, *, recursive: bool
-) -> Iterable[Any]:
+    fs: HfFileSystem, resolved: _Resolved, path: str, *, recursive: bool, timeout: float
+) -> Iterable[dict[str, Any]]:
     """List the folder at ``path`` of the bucket or repository that ``resolved`` names.
 
-    The listing goes to Hugging Face's API directly rather than through the
-    file system's directory cache, which keeps a listing for the life of the
-    process and which concurrent listings can leave half filled. A bucket
-    matches a recursive listing's ``path`` as text.
+    The entries are those of Hugging Face's API, each with its ``type`` and
+    ``path``, and a file's ``size``. The listing goes to the API directly
+    rather than through the file system's directory cache, which keeps a
+    listing for the life of the process and which concurrent listings can
+    leave half filled. A bucket matches a recursive listing's ``path`` as
+    text.
+
+    Each page is one GET, the request that huggingface_hub's
+    ``list_bucket_tree`` and ``list_repo_tree`` send, without their retries.
+    From huggingface_hub 2.1.0 on, those functions retry each page within an
+    attempt of the store: their retries would multiply the store's, and a
+    rate limit that huggingface_hub waited out would read as an attempt that
+    got no answer. The listing takes at most ``timeout`` seconds, the time of
+    the store's attempt that sends it: each page waits for the time left, and
+    the listing raises TimeoutError instead of asking for a page after it, so
+    that a listing whose attempt the store gave up on sends no more.
     """
-    api = HfApi(endpoint=fs.endpoint, token=fs.token)
+    folder = "/" + quote(path, safe="") if path else ""
     if isinstance(resolved, HfFileSystemResolvedBucketPath):
-        return api.list_bucket_tree(
-            resolved.bucket_id, path or None, recursive=recursive
+        url = f"{fs.endpoint}/api/buckets/{resolved.bucket_id}/tree{folder}"
+        params = {"recursive": recursive}
+    else:
+        revision = quote(resolved.revision, safe="")
+        url = (
+            f"{fs.endpoint}/api/{resolved.repo_type}s/{resolved.repo_id}"
+            f"/tree/{revision}{folder}"
         )
-    return api.list_repo_tree(
-        resolved.repo_id,
-        path or None,
-        recursive=recursive,
-        revision=resolved.revision,
-        repo_type=resolved.repo_type,
-    )
+        params = {"recursive": recursive, "expand": False}
+    headers = build_hf_headers(token=fs.token)
+    deadline = time.monotonic() + timeout
+
+    def left() -> float:
+        seconds = deadline - time.monotonic()
+        if seconds <= 0:
+            raise TimeoutError(f"The listing of {url} took more than {timeout:g} s")
+        return seconds
+
+    response = get_session().get(url, params=params, headers=headers, timeout=left())
+    while True:
+        hf_raise_for_status(response)
+        yield from response.json()
+        # The link to the next page carries the listing's query.
+        page = response.links.get("next", {}).get("url")
+        if page is None:
+            return
+        response = get_session().get(page, headers=headers, timeout=left())
 
 
 def _list_store(
@@ -185,34 +214,34 @@ def _list_store(
         return _StoreListing({}, lambda key: "")
     root = resolved.path
     listed = _within(root, within) if within else root
-    tree = _list_tree(fs, resolved, listed, recursive=True)
+    tree = _list_tree(fs, resolved, listed, recursive=True, timeout=timeout)
     prefix = f"{root}/" if root else ""
     sizes: dict[str, int] = {}
     try:
         for entry in tree:
-            # Folders carry no size. A prefix matches as text, so "data.zarr"
-            # also lists "data.zarr2/..."; only keys below the root, and
-            # within the folder asked for, are kept.
-            size = getattr(entry, "size", None)
-            if size is None or not entry.path.startswith(prefix):
+            # Only files are keys: a repository's folders list with a size of
+            # 0. A prefix matches as text, so "data.zarr" also lists
+            # "data.zarr2/..."; only keys below the root, and within the
+            # folder asked for, are kept.
+            if entry["type"] != "file" or not entry["path"].startswith(prefix):
                 continue
-            key = entry.path[len(prefix) :]
+            key = entry["path"][len(prefix) :]
             if not within or key == within or key.startswith(f"{within}/"):
-                sizes[key] = int(size)
+                sizes[key] = int(entry["size"])
     except EntryNotFoundError:
         sizes = {}
         if within and not isinstance(resolved, HfFileSystemResolvedBucketPath):
-            entry = _file_entry(fs, _dereference_path(path, within), timeout)
-            if entry is not None:
-                sizes[within] = int(entry["size"])
+            found = _file_entry(fs, _dereference_path(path, within), timeout)
+            if found is not None:
+                sizes[within] = int(found["size"])
     return _StoreListing(sizes, lambda key: _file_url(fs, resolved, _within(root, key)))
 
 
-def _list_folder(fs: HfFileSystem, path: str) -> list[str]:
+def _list_folder(fs: HfFileSystem, path: str, timeout: float) -> list[str]:
     """Return the names of the files and folders in the folder at ``path``.
 
-    The folder is listed when asked, as ``_list_tree`` lists. A folder that
-    does not exist lists as empty.
+    The folder is listed when asked, within ``timeout`` seconds, as
+    ``_list_tree`` lists. A folder that does not exist lists as empty.
     """
     try:
         resolved = fs.resolve_path(path)
@@ -224,9 +253,11 @@ def _list_folder(fs: HfFileSystem, path: str) -> list[str]:
         # A bucket matches the folder as text, so listing "c/1" also names
         # "c/10"; only the folder's own entries are kept.
         return [
-            entry.path[len(start) :]
-            for entry in _list_tree(fs, resolved, folder, recursive=False)
-            if entry.path.startswith(start)
+            entry["path"][len(start) :]
+            for entry in _list_tree(
+                fs, resolved, folder, recursive=False, timeout=timeout
+            )
+            if entry["path"].startswith(start)
         ]
     except EntryNotFoundError:
         return []
@@ -514,7 +545,9 @@ class HfReadStore(FsspecStore):
             functools.partial(
                 self._request,
                 f"Listing {self._location}",
-                lambda: asyncio.to_thread(_list_store, fs, self.path),
+                lambda: asyncio.to_thread(
+                    _list_store, fs, self.path, "", self.request_timeout
+                ),
             ),
         )
 
@@ -570,10 +603,10 @@ class HfReadStore(FsspecStore):
 
         ``request`` names the request in the error that ends its retries.
         """
-        # Hugging Face's file system runs each request on a thread, and
-        # huggingface_hub sets no timeout on its listings, so the thread of an
-        # attempt abandoned here can keep waiting until the server or the
-        # network closes its connection; the request itself moves on.
+        # Hugging Face's file system runs each request on a thread, and a
+        # bucket's lookup sets no timeout, so the thread of an attempt
+        # abandoned here can keep waiting until the server or the network
+        # closes its connection; the request itself moves on.
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.retry_timeout
         attempts = throttled = 0
@@ -817,7 +850,10 @@ class HfReadStore(FsspecStore):
         if files is not None:
             folder = _dereference_path(self.path, prefix)
             for name in await self._request(
-                request, lambda: asyncio.to_thread(_list_folder, files, folder)
+                request,
+                lambda: asyncio.to_thread(
+                    _list_folder, files, folder, self.request_timeout
+                ),
             ):
                 yield name
             return
