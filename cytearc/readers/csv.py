@@ -18,12 +18,15 @@ from ..utils.files import (
     is_tar,
 )
 from ..utils.progress import iter_progress
-from ._text import as_text, require_unique_identifiers
+from ._text import FieldText, as_text, field_texts, require_unique_identifiers
 from ..utils.arguments import bool_argument, quoted_value
 
 # read_csv settings that, besides the separator and ``quoting``, decide how
 # pandas splits a line into fields. The field check splits with the same ones.
 _QUOTING_SETTINGS = ("quotechar", "doublequote", "escapechar", "skipinitialspace")
+# read_csv settings that open the file, which a handle that the reader opens
+# has applied, and which read_csv would apply again or refuse beside it.
+_OPENING_SETTINGS = frozenset({"compression", "memory_map", "storage_options"})
 # read_csv settings that split lines in ways Python's csv module cannot follow.
 _UNSUPPORTED_SETTINGS = frozenset({"comment", "dialect", "lineterminator"})
 # read_csv settings that the reader sets from its own arguments, with the
@@ -52,21 +55,6 @@ _TAR_COMPRESSIONS = (None, "gzip", "bz2", "xz")
 # text. pandas looks a converter's key up as a column name, then as a
 # position, so only a name of text reaches the ID column alone.
 _ID_COLUMN_LABEL = "__cytearc_cell_ids__"
-
-
-class _FieldText:
-    """One field of the ID column, as the file holds it.
-
-    read_csv reads text such as ``NA`` or ``null`` as a missing value, and
-    its python engine does so for what a converter returns too, unless that
-    is not text. The ID column's converter wraps each field in this class,
-    so that every field stays an ID.
-    """
-
-    __slots__ = ("text",)
-
-    def __init__(self, text: str) -> None:
-        self.text = text
 
 
 def _count_dtype(frame: pd.DataFrame, value_range: CountValueRange) -> np.dtype[Any]:
@@ -461,7 +449,7 @@ class CSVReader:
             labels = self.pandas_kwargs.get("names")
             key = self._idColumn if labels is None else labels[self._idColumn]
             converters = dict(self.pandas_kwargs.get("converters") or {})
-            converters[key] = _FieldText
+            converters[key] = FieldText
             self.pandas_kwargs["converters"] = converters
         (
             self.nCells,
@@ -506,8 +494,32 @@ class CSVReader:
         return head
 
     def _get_streamer(self) -> Generator[pd.DataFrame, None, None]:
-        reader = pd.read_csv(self._fn, **self.pandas_kwargs)
-        yield from reader
+        kwargs = self.pandas_kwargs
+        if kwargs.get("encoding_errors") in (None, "strict"):
+            yield from pd.read_csv(self._fn, **kwargs)
+            return
+        # Where pandas' C engine reads a file's bytes itself, as for an
+        # encoding of utf-8 and, from pandas 3.1 on, for a file without one,
+        # it decodes the text that it hands a converter, as the ID column's,
+        # under strict errors whatever encoding_errors asks. The file is
+        # decoded here instead, as the field check decodes it.
+        with get_handle(
+            self._fn,
+            "r",
+            encoding=kwargs.get("encoding"),
+            compression=kwargs["compression"],
+            errors=kwargs["encoding_errors"],
+            memory_map=kwargs.get("memory_map", False),
+            storage_options=kwargs.get("storage_options"),
+        ) as handles:
+            yield from pd.read_csv(
+                handles.handle,
+                **{
+                    key: value
+                    for key, value in kwargs.items()
+                    if key not in _OPENING_SETTINGS
+                },
+            )
 
     def _read_text[T](self, read: Callable[[], T]) -> T:
         """Return what ``read`` returns from the file's text, refusing bytes that its encoding cannot decode.
@@ -647,7 +659,7 @@ class CSVReader:
         cell_data_idx: list[int] | None = None
         count_dtype: np.dtype | None = None
         count_range = CountValueRange()
-        id_fields: list[_FieldText] = []
+        id_fields: list[FieldText] = []
         for df in iter_progress(
             stream,
             desc="Checking CSV consistency",
@@ -693,7 +705,7 @@ class CSVReader:
         cell_ids: np.ndarray | None = None
         if self._idColumn is not None:
             # Every field is an ID, an empty one too, which is refused as blank.
-            cell_ids = np.asarray([field.text for field in id_fields], dtype=str)
+            cell_ids = field_texts(id_fields).astype(str)
             require_unique_identifiers(cell_ids, "CSV cell IDs")
         if keep_cols is not None:
             n_features = len(keep_cols)

@@ -2454,9 +2454,10 @@ def test_sorting_matrix_market_entries_into_rows_holds_no_more_than_its_charge(
         _close(reader)
     assert held <= charge
     # The charge counts the Python objects that pandas 2.2 makes of each
-    # line, which pandas 3.0 does not, so it may reach 2.2 times what a sort
-    # with pandas 3.0 holds.
-    assert charge <= 2.5 * held
+    # line. pandas 3.0 makes fewer of a chunk of many lines, and pandas 3.1
+    # parses a chunk of 1,000 lines in half the memory of 3.0, so the charge
+    # reaches 2.7 times what a sort with pandas 3.1 holds.
+    assert charge <= 3 * held
 
 
 def _feature_major_reader(directory: Path, values: np.ndarray) -> MtxReader:

@@ -1625,6 +1625,54 @@ def test_csv_reader_refuses_text_that_its_encoding_cannot_decode(
             ["g�ne"],
             id="replaced",
         ),
+        # pandas decodes the text that it hands a converter, as the ID
+        # column's, under strict errors where it reads the file's bytes
+        # itself: for an encoding given as UTF-8, and from pandas 3.1 on for
+        # a file without an encoding too.
+        pytest.param(
+            b"cell,g\xe8ne\ncaf\xe9,1\nc2,2\n",
+            {"encoding_errors": "ignore"},
+            ["caf", "c2"],
+            ["gne"],
+            id="ignored",
+        ),
+        pytest.param(
+            b"cell,g\xe8ne\ncaf\xe9,1\nc2,2\n",
+            {"encoding_errors": "backslashreplace"},
+            ["caf\\xe9", "c2"],
+            ["g\\xe8ne"],
+            id="backslash-replaced",
+        ),
+        pytest.param(
+            b"\xef\xbb\xbfcell,g\xe8ne\ncaf\xe9,1\nc2,2\n",
+            {"encoding_errors": "replace"},
+            ["caf�", "c2"],
+            ["g�ne"],
+            id="replaced-after-a-byte-order-mark",
+        ),
+        pytest.param(
+            "cell,gène\ncafé,1\nc2,2\n".encode("utf-16"),
+            {"encoding": "utf-16", "encoding_errors": "replace"},
+            ["café", "c2"],
+            ["gène"],
+            id="utf-16-with-errors-replaced",
+        ),
+        pytest.param(
+            b"cell,g\xe8ne\ncaf\xe9,1\nc2,2\n",
+            {"encoding": "utf-8", "encoding_errors": "replace"},
+            ["caf\ufffd", "c2"],
+            ["g\ufffdne"],
+            id="utf-8-with-errors-replaced",
+        ),
+        # The reader's handle maps the file, which read_csv would map again
+        # beside it, parsing the compressed bytes of a gzip file.
+        pytest.param(
+            b"cell,g\xe8ne\ncaf\xe9,1\nc2,2\n",
+            {"encoding_errors": "replace", "memory_map": True},
+            ["caf\ufffd", "c2"],
+            ["g\ufffdne"],
+            id="replaced-memory-mapped",
+        ),
         pytest.param(
             b"cell,a\ncaf\xe9,1\nc2,2\n",
             {"encoding_errors": "surrogateescape", "engine": "python"},
@@ -1655,6 +1703,44 @@ def test_csv_text_that_pandas_reads_imports_as_before(
     assert root["cellData/ids"][:].tolist() == cells
     assert root["RNA/featureData/ids"][:].tolist() == features
     np.testing.assert_array_equal(root["RNA/counts"][:], [[1], [2]])
+
+
+def test_csv_text_at_a_url_imports_under_its_encoding_errors(tmp_path: Path) -> None:
+    # The reader opens the file itself, with the storage_options that this
+    # file system needs to open, and read_csv refuses them beside its handle.
+    import fsspec
+    from fsspec.implementations.memory import MemoryFileSystem
+
+    class KeyedFileSystem(MemoryFileSystem):
+        """fsspec's memory file system, which opens only with its key."""
+
+        protocol = "cytearc-keyed"
+
+        def __init__(self, *args, key: str | None = None, **kwargs) -> None:
+            if key != "secret":
+                raise PermissionError("This file system opens only with its key")
+            super().__init__(*args, **kwargs)
+
+    fsspec.register_implementation(
+        KeyedFileSystem.protocol, KeyedFileSystem, clobber=True
+    )
+    options = {"key": "secret"}
+    url = f"cytearc-keyed://{tmp_path.name}/counts.csv"
+    with fsspec.open(url, "wb", **options) as handle:
+        handle.write(b"cell,g\xe8ne\ncaf\xe9,1\nc2,2\n")
+    try:
+        reader = CSVReader(
+            url,
+            id_column=0,
+            batch_size=1,
+            pandas_kwargs={"storage_options": options, "encoding_errors": "replace"},
+        )
+        root = _imported(reader)
+    finally:
+        # The memory file systems share one store.
+        fsspec.filesystem(KeyedFileSystem.protocol, **options).rm(url)
+    assert root["cellData/ids"][:].tolist() == ["caf\ufffd", "c2"]
+    assert root["RNA/featureData/ids"][:].tolist() == ["g\ufffdne"]
 
 
 @pytest.mark.parametrize(

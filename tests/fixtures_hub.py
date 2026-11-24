@@ -15,7 +15,7 @@ from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlencode, urlsplit
 
 import pytest
 from huggingface_hub import BucketFile, BucketFolder
@@ -270,14 +270,18 @@ class LoopbackHub(ThreadingHTTPServer):
     The same directory is also the dataset repository ``REPOSITORY_ID`` at
     revision ``main``, whose recursive listings name folders as well as files,
     and list only a folder, never a file or a prefix of a name, as the Hub
-    lists a repository's tree.
+    lists a repository's tree. A repository's folders list with a size of 0,
+    as the Hub lists them. ``page_size``, when set, is the most entries that
+    one answer to a listing holds, and its ``Link`` header names the next
+    page, whose URL carries the listing's query and a ``cursor``, as the Hub
+    pages a tree 1000 entries at a time.
 
     ``plan[kind]`` lists what the next requests of a kind meet, in order:
-    ``"stall"`` holds a request unanswered until the hub closes, which ends it
-    with status 410, ``"whole"`` answers a file request with the whole file
-    and status 200 whatever range it asked for, as a server that ignores
-    ranges does, and a status, or a status with headers, answers with that
-    status. The kinds are
+    ``"serve"`` serves a request as if it were not planned, ``"stall"`` holds
+    a request unanswered until the hub closes, which ends it with status 410,
+    ``"whole"`` answers a file request with the whole file and status 200
+    whatever range it asked for, as a server that ignores ranges does, and a
+    status, or a status with headers, answers with that status. The kinds are
     ``"bucket"``, the bucket's lookup, ``"repository"``, the repository's,
     ``"tree"``, a listing, ``"paths-info"``, a lookup of named files of the
     bucket or the repository, and ``"file"``, a file's bytes. A request that
@@ -287,7 +291,8 @@ class LoopbackHub(ThreadingHTTPServer):
     ``"recursive"`` or ``"directory"`` for a listing, the ``Range`` header, or
     None, for a file, and the ``Authorization`` header, or None, for a lookup.
     ``authorizations`` records the kind and the ``Authorization`` header, or
-    None, of every request.
+    None, of every request, and ``targets`` the target of every request, its
+    path and query as sent.
     """
 
     daemon_threads = True
@@ -295,7 +300,9 @@ class LoopbackHub(ThreadingHTTPServer):
     def __init__(self, root: Path) -> None:
         super().__init__(("127.0.0.1", 0), _LoopbackHandler)
         self.root = root
+        self.page_size: int | None = None
         self.plan: dict[str, list[str | int | tuple[int, dict[str, str]]]] = {}
+        self.targets: list[str] = []
         self.requests: list[tuple[str, str]] = []
         self.received: list[tuple[str, str, str | None]] = []
         self.authorizations: list[tuple[str, str | None]] = []
@@ -362,6 +369,7 @@ class _LoopbackHandler(BaseHTTPRequestHandler):
         return None
 
     def do_POST(self) -> None:
+        self.server.targets.append(self.path)
         url = urlsplit(self.path)
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
         repository = url.path == f"/api/datasets/{REPOSITORY_ID}/paths-info/main"
@@ -412,6 +420,7 @@ class _LoopbackHandler(BaseHTTPRequestHandler):
         self._json(200, found)
 
     def do_GET(self) -> None:
+        self.server.targets.append(self.path)
         url = urlsplit(self.path)
         api = f"/api/buckets/{BUCKET_ID}"
         files = f"/buckets/{BUCKET_ID}/resolve/"
@@ -490,8 +499,22 @@ class _LoopbackHandler(BaseHTTPRequestHandler):
         if not entries:
             self._json(404, {"error": "No entries"}, {"X-Error-Code": "EntryNotFound"})
             return
-        # A repository names each entry's git object.
+        headers: dict[str, str] = {}
+        if self.server.page_size is not None:
+            url = urlsplit(self.path)
+            query = parse_qs(url.query)
+            start = int(query.pop("cursor", ["0"])[0])
+            stop = start + self.server.page_size
+            if stop < len(entries):
+                following = urlencode({**query, "cursor": [str(stop)]}, doseq=True)
+                headers["Link"] = (
+                    f'<{self.server.endpoint}{url.path}?{following}>; rel="next"'
+                )
+            entries = entries[start:stop]
+        # A repository names each entry's git object, and gives a folder a
+        # size of 0.
         identity = {"oid": "0" * 40} if repository else {}
+        folder_size = {"size": 0} if repository else {}
         self._json(
             200,
             [
@@ -507,9 +530,11 @@ class _LoopbackHandler(BaseHTTPRequestHandler):
                     "type": "directory",
                     "path": path.relative_to(base).as_posix(),
                     **identity,
+                    **folder_size,
                 }
                 for path in entries
             ],
+            headers,
         )
 
     def _file(self, path: str, *, whole: bool = False) -> None:
