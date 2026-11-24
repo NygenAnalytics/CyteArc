@@ -126,12 +126,21 @@ def mix64_array(values: np.ndarray) -> np.ndarray:
     """Return the SplitMix64 finalizer of each unsigned 64-bit integer.
 
     Each value equals :func:`mix64` of it; array products wrap around without
-    warnings, as the compiled products do.
+    warnings, as the compiled products do. The steps run in place, so beside
+    its input the mixing holds two arrays of its size on every Python build,
+    where expressions would hold a third wherever NumPy cannot reuse their
+    temporaries.
     """
-    mixed = (values ^ (values >> np.uint64(30))) * _M1
-    mixed = (mixed ^ (mixed >> np.uint64(27))) * _M2
-    finalized: np.ndarray = mixed ^ (mixed >> np.uint64(31))
-    return finalized
+    mixed: np.ndarray = values >> np.uint64(30)
+    mixed ^= values
+    mixed *= _M1
+    shifted = mixed >> np.uint64(27)
+    mixed ^= shifted
+    del shifted
+    mixed *= _M2
+    shifted = mixed >> np.uint64(31)
+    mixed ^= shifted
+    return mixed
 
 
 @njit(cache=True, nogil=True)

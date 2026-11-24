@@ -1105,6 +1105,27 @@ def test_mix64_is_splitmix64s_finalizer_compiled_and_on_arrays():
     assert _splitmix64(0x9E3779B97F4A7C15) == 0xE220A8397B1DCDAF
 
 
+def test_mix64_array_holds_two_arrays_beside_its_input():
+    import tracemalloc
+
+    # 30,000 values stay below the 256 KiB from which NumPy reuses the
+    # temporaries of an expression, which only some Python builds allow, so
+    # the trace counts what every build holds: the mixed values and one step.
+    values = np.arange(30_000, dtype=np.uint64) * np.uint64(0x9E3779B97F4A7C15)
+    mix64_array(values)
+    tracemalloc.start()
+    try:
+        mixed = mix64_array(values)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert 2 * values.nbytes - 30_000 < peak <= 2 * values.nbytes + 1_024
+    assert mixed[[0, 29_999]].tolist() == [
+        _splitmix64(int(values[0])),
+        _splitmix64(int(values[29_999])),
+    ]
+
+
 def test_numba_threads_sets_a_bounded_count_and_restores_the_last():
     import numba
 

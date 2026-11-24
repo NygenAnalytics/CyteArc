@@ -22,8 +22,11 @@ CELL_ORDER_MISMATCH = (
 # What a window of merged rows holds for each of its rows while it is in use:
 # the positions and source rows of its parts, and the sort that groups them.
 WINDOW_BYTES_PER_ROW = 24
-# What building a row plan holds for each merged cell beside the plan: the
-# hashes and the order of the shuffle that arranges the sources' turns.
+# What building a row plan holds for each merged cell beside the plan, at its
+# peak: the hashes of the shuffle that arranges the sources' turns as they are
+# mixed, beside the two arrays of the mixing's steps (mix64_array). Sorting the
+# hashes then holds them and their order, which NumPy's sort fills without a
+# buffer, and finding the sources' turns holds the order and each turn.
 ROW_PLAN_BUILD_BYTES_PER_CELL = 24
 # SplitMix64's increment, which spaces the counters of a stream.
 _GOLDEN = np.uint64(0x9E3779B97F4A7C15)

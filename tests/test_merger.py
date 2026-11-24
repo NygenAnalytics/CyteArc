@@ -6665,11 +6665,14 @@ def test_building_a_row_plan_holds_no_more_than_its_charge():
 
     from cytearc.merge.row_plan import ROW_PLAN_BUILD_BYTES_PER_CELL, build_row_plan
 
-    # Ordering 500,000 cells holds 24 bytes for each beside the plan: the
-    # shuffle's hashes and order and each cell's source, at most; a source's
-    # selected rows count their sorted copies too.
-    sizes = [300_000, 200_000]
-    needed = 500_000 * ROW_PLAN_BUILD_BYTES_PER_CELL
+    # Ordering 30,000 cells holds 24 bytes for each beside the plan: the
+    # shuffle's hashes as they are mixed, beside the two arrays of the
+    # mixing's steps; a source's selected rows count their sorted copies too.
+    # Arrays of 30,000 cells stay below the 256 KiB from which NumPy reuses
+    # the temporaries of an expression, which only some Python builds allow,
+    # so the trace counts what every build holds.
+    sizes = [18_000, 12_000]
+    needed = 30_000 * ROW_PLAN_BUILD_BYTES_PER_CELL
     build_row_plan(sizes, ["a", "b"], seed=1)
     tracemalloc.start()
     try:
@@ -6677,24 +6680,24 @@ def test_building_a_row_plan_holds_no_more_than_its_charge():
         peak = tracemalloc.get_traced_memory()[1]
     finally:
         tracemalloc.stop()
-    assert needed - 500_000 < peak <= needed + 4_096
+    assert needed - 30_000 < peak <= needed + 4_096
     with pytest.raises(
         MemoryBudgetError,
-        match="^Ordering 500000 merged cells holds about 12000000 bytes",
+        match="^Ordering 30000 merged cells holds about 720000 bytes",
     ):
         build_row_plan(sizes, ["a", "b"], seed=1, memory_bytes=needed - 1)
-    # A third of a's cells and every cell of b: 300,000 cells at 24 bytes
-    # and a's 100,000 selected rows at 8.
-    selected = [np.arange(0, 300_000, 3), None]
+    # A third of a's cells and every cell of b: 18,000 cells at 24 bytes and
+    # a's 6,000 selected rows at 8.
+    selected = [np.arange(0, 18_000, 3), None]
     with pytest.raises(
         MemoryBudgetError,
-        match="^Ordering 300000 merged cells holds about 8000000 bytes",
+        match="^Ordering 18000 merged cells holds about 480000 bytes",
     ):
         build_row_plan(
-            sizes, ["a", "b"], seed=1, selected_rows=selected, memory_bytes=7_999_999
+            sizes, ["a", "b"], seed=1, selected_rows=selected, memory_bytes=479_999
         )
     build_row_plan(
-        sizes, ["a", "b"], seed=1, selected_rows=selected, memory_bytes=8_000_000
+        sizes, ["a", "b"], seed=1, selected_rows=selected, memory_bytes=480_000
     )
 
 
