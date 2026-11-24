@@ -1204,6 +1204,10 @@ class PerturbationEfficiencyArguments(OperationArguments):
     target_features_fingerprint: str = artifact_input()
     by: str = parameter()
     invalidate_cache: bool = execution()
+    # The genes that every source of a merged store's compared cells
+    # measured, which each cell's library size covers, recorded only when some
+    # source did not measure some gene.
+    measured_features_fingerprint: str | None = parameter(None, omit_if_none=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1224,6 +1228,10 @@ class PerturbationSignatureArguments(OperationArguments):
     sample_columns: tuple[str, ...] = parameter()
     scale_factor: float = parameter()
     invalidate_cache: bool = execution()
+    # The genes that every source of a merged store's cells measured, which
+    # each cell's total covers, recorded only when some source did not
+    # measure some gene.
+    measured_features_fingerprint: str | None = parameter(None, omit_if_none=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1302,6 +1310,10 @@ class PerturbationAssociationArguments(OperationArguments):
     sample_columns: tuple[str, ...] = parameter()
     covariate_columns: tuple[str, ...] = parameter()
     invalidate_cache: bool = execution()
+    # The genes that every source of a merged store's compared cells
+    # measured, which the calibration pairs and each cell's UMIs and detected
+    # genes cover, recorded only when some source did not measure some gene.
+    measured_features_fingerprint: str | None = parameter(None, omit_if_none=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1333,6 +1345,10 @@ class PerturbationProfileArguments(OperationArguments):
     mask_targets: bool = parameter()
     sample_columns: tuple[str, ...] = parameter()
     invalidate_cache: bool = execution()
+    # The genes that every source of a merged store's profiled cells
+    # measured, which each cell's total covers, recorded only when some
+    # source did not measure some gene.
+    measured_features_fingerprint: str | None = parameter(None, omit_if_none=True)
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,21 +1,34 @@
 from collections.abc import Iterator, Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import pandas as pd
 import zarr
 
+from ...assay.hvg_statistics import cell_totals
 from ...metadata.arguments import (
     MixscapeArguments,
     PerturbationLabelArguments,
     PerturbationSignatureArguments,
 )
 from ...metadata.artifacts import write_cell_data_artifact
+from ...metadata.membership import (
+    cells_measured_features,
+    leave_out_unmeasured,
+    measured_features_by_source,
+    measured_mask,
+    measured_positions,
+)
 from ...metadata.rows import array_row_selection_parts, read_metadata_rows_chunkwise
 from ...metadata.selection import cell_selection_indices
 from ...perturbation.mixscape import UNLABELED, MixscapeResult, mixscape_settings
 from ...perturbation.signature import PerturbationSignature, signature_settings
-from ...storage.artifacts import ArtifactRef, artifact_group, require_complete_artifact
+from ...storage.artifacts import (
+    ArtifactRef,
+    artifact_group,
+    fingerprint_array,
+    require_complete_artifact,
+)
 from ...storage.geometry import array_geometry
 from ...storage.types import as_zarr_array, read_array
 from ...storage.validation_scope import validation_scoped
@@ -146,6 +159,15 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
         ``split.by`` does. Labeled cells without coordinates have no
         signature, and a log message counts them.
 
+        On a store merged from sources that measured different features, as
+        its feature columns ``measured_in_<source>`` record, the features of
+        ``features`` that some source of the cells of the coordinates did not
+        measure are left out, through a feature selection of the others, with
+        a warning that names them, and y scales each cell's counts by its
+        total over the features that every such source measured, as a store
+        of those features alone holds it. The signature then records those
+        features as ``measured_features_fingerprint``.
+
         Args:
             labels: A ``perturbation_labels`` artifact, whose ``"control"``
                 cells are the neighbors.
@@ -176,8 +198,9 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
                 ``features`` is not a feature selection or is missing for
                 coordinates without one, a number is out of range,
                 ``sample_column`` is not a cell metadata column or leaves a
-                cell without a sample, or a sample has fewer than
-                ``n_neighbors`` control cells with coordinates.
+                cell without a sample, a sample has fewer than
+                ``n_neighbors`` control cells with coordinates, or every
+                feature of ``features`` was left out.
             PermissionError: If the store is read-only and the signature is
                 not saved yet.
             MemoryError: If the neighbor search of one cell, or the control
@@ -233,6 +256,28 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
         )
         cell_index = cell_selection_indices(self.zw, cell_selection)
         n_cells = len(cell_index)
+        # The signature holds the selected features that every source of its
+        # cells measured, and each cell's total covers those features.
+        cells_measured = cells_measured_features(
+            assay.cells, assay.feats, cell_index, assay=assay.name
+        )
+        selected = np.zeros(int(assay.feats.N), dtype=bool)
+        selected[feature_index] = True
+        features, selected = cast(Any, self)._measured_feature_selection(
+            assay,
+            features,
+            selected,
+            cell_index,
+            analysis="perturbation.signature",
+            remedy=(
+                "Compute the signatures of the cells of the sources that measured "
+                "them, or of features that every source measured."
+            ),
+            measured=cells_measured,
+            of_cells="the cells of the coordinates",
+        )
+        feature_index = np.flatnonzero(selected).astype(np.int64)
+        measured = measured_mask(cells_measured)
         is_control, n_missing = self._signature_controls(labels, cell_index)
         cell_samples = read_cell_samples(
             self,
@@ -277,6 +322,9 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
             sample_columns=cell_samples.columns,
             scale_factor=factor,
             invalidate_cache=invalidate_cache,
+            measured_features_fingerprint=(
+                None if measured is None else fingerprint_array(measured)
+            ),
         )
         n_features = len(feature_index)
 
@@ -390,7 +438,7 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
                 )
                 neighbors[members] = np.searchsorted(controls, pool)[nearest]
         del values
-        totals = assay._cell_count_totals(cell_index)
+        totals = cell_totals(assay, cell_index, measured, held_bytes=held)
         control_scaled = np.empty((n_controls, n_features))
         offset = 0
         _, control_blocks = _count_blocks(
@@ -675,6 +723,15 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
         its label otherwise, such as ``"Negative"`` or ``"Multiple"``, or
         ``"unlabeled"`` for a cell of the signature outside the labels.
 
+        On a store merged from sources that measured different features, as
+        its feature columns ``measured_in_<source>`` record, the DE genes are
+        drawn from the features that every source of the signature's cells
+        measured, and counted among them, with a warning that names the
+        others, and the normalized values divide each cell's counts by its
+        total over those features, as the signature does. A signature that
+        recorded other features, such as one computed before the record
+        changed, is refused.
+
         Args:
             signature: A ``perturbation_signature`` artifact from
                 :meth:`~cytearc.datastore.namespaces.PerturbationAccessor.signature`.
@@ -702,8 +759,10 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
             ValueError: If ``signature`` is not a ``perturbation_signature``
                 artifact, a number is out of range, ``perturbation_type`` is
                 empty, holds a space or is the class of other cells, such as
-                ``"NP"``, or ``split_column`` is not a cell metadata column or
-                leaves a cell without a split.
+                ``"NP"``, ``split_column`` is not a cell metadata column or
+                leaves a cell without a split, the signature recorded other
+                features than those that every source of its cells measured,
+                or no feature was measured by every source of its cells.
             PermissionError: If the store is read-only and the classes are not
                 saved yet.
             MemoryError: If one feature's values over the classified and
@@ -760,6 +819,41 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
             reason="Each split is classified apart, so every cell needs one",
         )
         splits, split_names = cell_splits.codes, cell_splits.names
+        # The DE genes and each cell's total cover the features that every
+        # source of the signature's cells measured, as the signature's do.
+        cells_measured = cells_measured_features(
+            assay.cells, assay.feats, cell_index, assay=assay.name
+        )
+        measured = measured_mask(cells_measured)
+        recorded = (source.parameters or {}).get("measured_features_fingerprint")
+        if recorded != (None if measured is None else fingerprint_array(measured)):
+            took = (
+                "every feature"
+                if recorded is None
+                else "the features that every source of its cells measured"
+            )
+            changed = (
+                "no longer records which features each source measured"
+                if measured_features_by_source(assay.feats) is None
+                else "now records that the sources of its cells measured other features"
+            )
+            raise ValueError(
+                f"The signature took each cell's total over {took}, but the "
+                f"feature table of {assay.name!r} {changed}; compute the "
+                "signature again with perturbation.signature, then classify its "
+                "cells"
+            )
+        leave_out_unmeasured(
+            cells_measured,
+            assay.feats,
+            analysis="perturbation.mixscape",
+            kind="feature",
+            of_cells="the cells of the signature",
+            remedy=(
+                "Classify the cells of the sources that measured them, with a "
+                "signature over their coordinates."
+            ),
+        )
         arguments = MixscapeArguments(
             signature=signature,
             dataset_fingerprint=self._ensure_dataset_fingerprint(assay.name),
@@ -813,6 +907,8 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
         if planned.reused:
             return planned.ref
         n_features = int(assay.feats.N)
+        # The features that the DE genes are drawn from.
+        candidates = measured_positions(measured, n_features)
         n_groups = n_splits + n_rows
         # Each cell's group: the control cells of its split first, then the
         # cells of each row. The cells of the groups are the members.
@@ -891,7 +987,7 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
             _count_bands(
                 _resident_ledger(self, resident),
                 assay,
-                np.arange(n_features),
+                candidates,
                 (member_cells,),
                 per_feature=per_feature,
                 scratch_per_feature=8,
@@ -902,7 +998,9 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
         )
         del member_cells
         self._require_writable(arguments.operation)
-        member_totals = assay._cell_count_totals(cell_index[members])
+        member_totals = cell_totals(
+            assay, cell_index[members], measured, held_bytes=resident
+        )
         position_of = np.full(n_cells, -1, dtype=np.int64)
         position_of[members] = np.arange(n_members)
         # Every neighbor is a control cell, so a member.
@@ -940,7 +1038,7 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
 
         def band_genes(start: int, stop: int) -> dict[int, np.ndarray]:
             """The DE genes of each row among the features of a band."""
-            band = np.arange(start, stop)
+            band = candidates[start:stop]
             values = normalized(band, every_member, resident + per_feature * len(band))
             found = band_de_genes(
                 values,
@@ -952,7 +1050,7 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
                 min_fraction=fraction,
                 logfc_threshold=fold,
                 p_value_cutoff=cutoff,
-                n_features=n_features,
+                n_features=len(candidates),
             )
             return {row: band[genes] for row, genes in found.items()}
 

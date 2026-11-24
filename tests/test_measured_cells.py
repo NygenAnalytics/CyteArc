@@ -70,6 +70,7 @@ from cytearc.storage.feature_selection import read_feature_selection_indices
 from cytearc.storage.selections import read_stored_selection_indices
 from cytearc.writers._store import write_membership_column
 from tests.fixtures_datastore import build_neighborhood_graph
+from tests.perturbation_helpers import warned as warnings_of
 from tests.storage_helpers import by_cell_id, write_count_store
 from tests.test_hto import planted_hto_counts
 from tests.test_mapping_reference import mapping_counts
@@ -6148,3 +6149,777 @@ def test_stores_without_a_record_take_no_other_totals_and_keep_their_parameters(
         rna.trajectory.drivers(fate, features=universe),
     ):
         assert rna.artifacts.inspect(ref).input_ref("feature_selection") == universe
+
+
+_SCREEN_SHARED = [f"G{index}" for index in range(60)]
+_SCREEN_OWN = [f"L{index}" for index in range(20)]
+_SCREEN_GUIDES = ["gA", "gB", "nt1", "nt2", "nt3"]
+_SCREEN_LACK = "Source 'right' lacks 20: 'L0', 'L1', 'L2', 'L3', 'L4' and 15 more."
+
+
+@dataclass(frozen=True)
+class _ScreenSources:
+    """Two screens, left with 20 genes of its own beside 60 shared genes and right with the shared genes, and their union and intersection merges."""
+
+    base: Path
+    coordinates: dict[str, np.ndarray]
+
+    def open(self, name: str) -> DataStore:
+        return DataStore(
+            str(self.base / f"{name}.zarr"),
+            default_assay="RNA",
+            min_features_per_cell=0,
+            nthreads=1,
+        )
+
+
+def _screen_counts(
+    rng: np.random.Generator, n_a: int, n_b: int, own: bool
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return the RNA and guide counts of a screen.
+
+    ``n_a`` cells carry guide gA, ``n_b`` gB, 30 each of the control guides
+    and 20 none. In 70% of the cells of gA its target G0 and G20 to G27 fall
+    tenfold, and in those of gB its target G1 and G30 to G37. A screen with
+    genes of its own counts them at Poisson(3), before the shared genes.
+    Every cell holds a few ambient guide UMIs, at least one and below the
+    calls' 10, as the high-MOI covariates need.
+    """
+    carried = np.r_[
+        np.zeros(n_a, int), np.ones(n_b, int), np.repeat([2, 3, 4], 30), [-1] * 20
+    ]
+    n_cells = len(carried)
+    rates = np.tile(rng.gamma(2.0, 3.0, size=len(_SCREEN_SHARED)), (n_cells, 1))
+    rates *= rng.lognormal(0, 0.2, size=(n_cells, 1))
+    knocked = rng.random(n_cells) < 0.7
+    rates[np.ix_((carried == 0) & knocked, [0, *range(20, 28)])] *= 0.1
+    rates[np.ix_((carried == 1) & knocked, [1, *range(30, 38)])] *= 0.1
+    rna = rng.poisson(rates)
+    if own:
+        rna = np.hstack([rng.poisson(3.0, size=(n_cells, len(_SCREEN_OWN))), rna])
+    guides = rng.poisson(0.5, size=(n_cells, len(_SCREEN_GUIDES)))
+    guides[guides.sum(axis=1) == 0, 2] = 1
+    carriers = np.flatnonzero(carried >= 0)
+    guides[carriers, carried[carriers]] += 30
+    return rna.astype(np.uint32), guides.astype(np.uint32)
+
+
+@pytest.fixture(scope="module")
+def screen_sources(tmp_path_factory) -> _ScreenSources:
+    """Merge a screen with 20 genes of its own and a screen of the 60 shared genes.
+
+    The left screen holds 90 cells of gA and 40 of gB, and the right one the
+    reverse, so that the left source's own genes, which read as zero in the
+    right source's cells, look raised in the cells of gA.
+    """
+    base = tmp_path_factory.mktemp("screen_sources")
+    rng = np.random.default_rng(23)
+    coordinates = {}
+    for name, n_a, n_b, own in (("left", 90, 40, True), ("right", 40, 90, False)):
+        rna, guides = _screen_counts(rng, n_a, n_b, own)
+        write_count_store(
+            str(base / f"{name}.zarr"),
+            {"RNA": rna, "CRISPR": guides},
+            "uint32",
+            feature_ids={
+                "RNA": (_SCREEN_OWN if own else []) + _SCREEN_SHARED,
+                "CRISPR": _SCREEN_GUIDES,
+            },
+        )
+        coordinates[name] = rng.normal(size=(len(rna), 5))
+    screens = _ScreenSources(base, coordinates)
+    for name in ("left", "right"):
+        screens.open(name)._get_assay("CRISPR").feats.insert(
+            "target_gene_name", np.asarray(["G0", "G1", "NT", "NT", "NT"], dtype=object)
+        )
+    for name, kind in (("merged", "union"), ("intersection", "intersection")):
+        DataStoreMerge(
+            [screens.open(source) for source in ("left", "right")],
+            str(base / f"{name}.zarr"),
+            ["left", "right"],
+            nthreads=1,
+            features=kind,
+        ).dump()
+        store = screens.open(name)
+        ids = store.cells.fetch_all("ids").astype(str)
+        for source in ("left", "right"):
+            store.cells.insert(
+                f"{source}_cells",
+                by_cell_id(store.cells, np.char.startswith(ids, f"{source}__")),
+            )
+        # Every left cell and the right source's cells of gB, its cells 40 to
+        # 129, so that the right source holds compared cells but no control
+        # cell.
+        right_gb = [f"right__cell{index}" for index in range(40, 130)]
+        store.cells.insert(
+            "left_and_right_gB_cells",
+            by_cell_id(
+                store.cells, np.char.startswith(ids, "left__") | np.isin(ids, right_gb)
+            ),
+        )
+    return screens
+
+
+def _screen(
+    screens: _ScreenSources,
+    name: str,
+    source: str | None = None,
+    *,
+    targets: dict[str, str] | None = None,
+) -> tuple[DataStore, ArtifactRef, ArtifactRef]:
+    """Open a store and label its cells, or a source's cells of a merge, from calls of 10 guide UMIs or more.
+
+    Returns the store, the cells and the labels; ``targets`` replaces the
+    targets of the guides it names.
+    """
+    store = screens.open(name)
+    cells = (
+        store.select_measured_cells("CRISPR")
+        if source is None
+        else store.snapshot_cell_selection(f"{source}_cells")
+    )
+    calls = store.perturbation.call_guides(cells, method="fixed", min_umi=10)
+    labels = store.perturbation.labels(calls, controls=["NT"], targets=targets)
+    return store, cells, labels
+
+
+def _every_gene(store: DataStore) -> ArtifactRef:
+    return store.features.snapshot(mask=np.ones(store.RNA.feats.N, dtype=bool))
+
+
+def _screen_coordinates(
+    screens: _ScreenSources, store: DataStore, name: str, cells: ArtifactRef
+) -> ArtifactRef:
+    """Import each cell's fixed coordinates, by its source and its ID in that source."""
+    ids = store.cells.fetch_all("ids").astype(str)
+    owners = [cell.split("__") if "__" in cell else (name, cell) for cell in ids]
+    values = np.stack(
+        [
+            screens.coordinates[owner][int(cell.removeprefix("cell"))]
+            for owner, cell in owners
+        ]
+    )
+    return store.reduction.import_coordinates(
+        pd.DataFrame(values, index=ids), cell_selection=cells, name="X"
+    )
+
+
+def _source_ids(index: pd.Index, source: str) -> pd.Index:
+    """Return cell IDs of a merge without the prefix of ``source``, as the source's own store names them."""
+    return pd.Index(
+        [cell.removeprefix(f"{source}__") for cell in index], name=index.name
+    )
+
+
+def _warned(call: Callable[[], Any]) -> tuple[Any, list[str]]:
+    """Call, and return the result with the warnings of analyses that leave out unmeasured features."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = call()
+    return result, _left_out(caught)
+
+
+def _leaves_out(analysis: str, of_cells: str, lacking: str = _SCREEN_LACK) -> str:
+    count = lacking.split(" lacks ")[1].split(":")[0]
+    plural = "" if count == "1" else "s"
+    return (
+        f"{analysis} leaves out {count} feature{plural} that some source of "
+        f"{of_cells} did not measure, since their zero counts in its cells are not "
+        f"measurements. {lacking}"
+    )
+
+
+def test_perturbation_profiles_leave_out_features_that_a_source_of_their_cells_did_not_measure(
+    screen_sources,
+) -> None:
+    def profiles(name: str, source: str | None = None) -> tuple[Any, ...]:
+        store, _, labels = _screen(screen_sources, name, source)
+        ref, left_out = _warned(
+            lambda: store.perturbation.profiles(
+                labels, _every_gene(store), min_cells=10, id_column=None
+            )
+        )
+        return store, ref, store.perturbation.load_profiles(ref), left_out
+
+    def assert_same(found: Any, expected: Any) -> None:
+        for frame in ("values", "control_mean", "control_sd"):
+            expected_frame = getattr(expected, frame)
+            pd.testing.assert_frame_equal(
+                getattr(found, frame)[expected_frame.columns],
+                expected_frame,
+                check_exact=False,
+                rtol=1e-6,
+            )
+        pd.testing.assert_frame_equal(found.perturbations, expected.perturbations)
+
+    _, _, expected, warned = profiles("intersection")
+    assert warned == []
+    store, ref, found, warned = profiles("merged")
+    assert warned == [_leaves_out("perturbation.profiles", "the profiled cells")]
+    # The profiles hold the shared genes and take each cell's total over
+    # them, as the intersection merge holds them.
+    assert list(found.values.columns) == _SCREEN_SHARED
+    assert_same(found, expected)
+    assert _selected_names(store, _input(store, ref, "feature_selection")) == (
+        _SCREEN_SHARED
+    )
+    assert "measured_features_fingerprint" in store.artifacts.inspect(ref).parameters
+
+    # Over one source's cells they are that source's own profiles.
+    for source in ("left", "right"):
+        _, ref, found, warned = profiles("merged", source)
+        _, _, expected, _ = profiles(source)
+        assert warned == (
+            []
+            if source == "left"
+            else [_leaves_out("perturbation.profiles", "the profiled cells")]
+        )
+        assert_same(found, expected)
+
+
+_L3_UNMEASURED = (
+    "1 of 2 rows have no feature of assay 'RNA' for their target, since some "
+    "source of the compared cells did not measure its gene, whose zero counts in "
+    "that source's cells are not measurements, for example 'L3'. Source 'right' "
+    "lacks 1: 'L3'. Measure them over the cells of the sources that measured "
+    "them: call the guides of those cells, with a cell_selection that leaves the "
+    "others out, and label those calls."
+)
+_L3_UNMATCHED = (
+    "1 of 2 rows have no feature of assay 'RNA' for their target, for example "
+    "'L3'. Check id_column, or the target names against the feature names."
+)
+
+
+def test_perturbation_efficiency_gives_no_feature_to_a_target_gene_that_a_source_of_its_cells_did_not_measure(
+    screen_sources,
+) -> None:
+    def efficiency(
+        name: str, source: str | None = None, targets: dict[str, str] | None = None
+    ) -> tuple[DataStore, ArtifactRef, pd.DataFrame, list[str]]:
+        store, _, labels = _screen(screen_sources, name, source, targets=targets)
+        ref, _, diagnostic = warnings_of(
+            lambda: store.perturbation.efficiency(labels, id_column=None)
+        )
+        table = store.perturbation.load_efficiency(ref).table
+        return store, ref, table, [str(item) for item in diagnostic]
+
+    # Targets that every source measured: each cell's library size is its
+    # total over the shared genes, as the intersection merge holds it.
+    _, _, expected, _ = efficiency("intersection")
+    store, ref, found, diagnostic = efficiency("merged")
+    pd.testing.assert_frame_equal(found, expected, check_exact=False, rtol=1e-10)
+    assert diagnostic == []
+    assert "measured_features_fingerprint" in store.artifacts.inspect(ref).parameters
+
+    # gB's target becomes L3, which the right source did not measure: its row
+    # has no feature, as in the intersection merge, which lacks L3, and a
+    # warning names the gene and the source, also when the table is reused.
+    targets = {"gB": "L3"}
+    _, _, expected, diagnostic = efficiency("intersection", targets=targets)
+    assert diagnostic == [_L3_UNMATCHED]
+    assert expected.set_index("target").loc["L3", "status"] == "no_feature"
+    for _ in range(2):
+        store, ref, found, diagnostic = efficiency("merged", targets=targets)
+        pd.testing.assert_frame_equal(found, expected, check_exact=False, rtol=1e-10)
+        assert diagnostic == [_L3_UNMEASURED]
+    # Over the cells of the right source, as in the right store, whose L3
+    # matches no feature; over the left source's, which measured L3, as in
+    # the left store.
+    _, _, found, diagnostic = efficiency("merged", "right", targets)
+    _, _, expected, _ = efficiency("right", targets=targets)
+    pd.testing.assert_frame_equal(found, expected, check_exact=False, rtol=1e-10)
+    assert diagnostic == [_L3_UNMEASURED]
+    store, ref, found, diagnostic = efficiency("merged", "left", targets)
+    _, _, expected, _ = efficiency("left", targets=targets)
+    assert found["status"].tolist() == ["tested", "tested"]
+    pd.testing.assert_frame_equal(found, expected, check_exact=False, rtol=1e-10)
+    assert diagnostic == []
+    assert "measured_features_fingerprint" not in (
+        store.artifacts.inspect(ref).parameters
+    )
+    # By guide, the warning names each guide of such a target.
+    store, _, labels = _screen(screen_sources, "merged", targets=targets)
+    _, _, diagnostic = warnings_of(
+        lambda: store.perturbation.efficiency(labels, by="guide", id_column=None)
+    )
+    assert [str(item) for item in diagnostic] == [
+        _L3_UNMEASURED.replace(
+            "for example 'L3'", "for example guide 'gB' (target 'L3')"
+        )
+    ]
+
+
+def test_perturbation_signatures_and_mixscape_leave_out_features_that_a_source_of_their_cells_did_not_measure(
+    screen_sources,
+) -> None:
+    def classify(name: str, source: str | None = None) -> tuple[Any, ...]:
+        store, cells, labels = _screen(screen_sources, name, source)
+        expression = (
+            store.select_measured_cells("RNA")
+            if source is None
+            else store.snapshot_cell_selection(f"{source}_cells")
+        )
+        coordinates = _screen_coordinates(screen_sources, store, name, expression)
+
+        def call() -> tuple[ArtifactRef, ArtifactRef]:
+            signature = store.perturbation.signature(
+                labels, coordinates, features=_every_gene(store), dims=5, n_neighbors=10
+            )
+            return signature, store.perturbation.mixscape(signature)
+
+        (signature, classes), left_out = _warned(call)
+        return (
+            store,
+            (signature, classes),
+            store.perturbation.load_signature(signature),
+            store.perturbation.load_mixscape(classes),
+            left_out,
+        )
+
+    def assert_same(
+        found: tuple[Any, ...], expected: tuple[Any, ...], source: str | None
+    ) -> None:
+        signature, classes = found[2], found[3]
+        if source is not None:
+            for frame in (signature.values, signature.cells, classes.cells):
+                frame.index = _source_ids(frame.index, source)
+        # A merge orders the cells of its sources otherwise.
+        cells = expected[2].values.index
+        pd.testing.assert_frame_equal(
+            signature.values.loc[cells, expected[2].values.columns],
+            expected[2].values,
+            check_exact=False,
+            rtol=1e-5,
+            atol=1e-6,
+        )
+        pd.testing.assert_frame_equal(signature.cells.loc[cells], expected[2].cells)
+        pd.testing.assert_frame_equal(
+            classes.cells.loc[expected[3].cells.index],
+            expected[3].cells,
+            check_exact=False,
+            rtol=1e-6,
+        )
+        pd.testing.assert_frame_equal(classes.de_genes, expected[3].de_genes)
+        pd.testing.assert_frame_equal(
+            classes.targets, expected[3].targets, check_exact=False, rtol=1e-6
+        )
+
+    expected = classify("intersection")
+    assert expected[4] == []
+    found = classify("merged")
+    assert found[4] == [
+        _leaves_out("perturbation.signature", "the cells of the coordinates"),
+        _leaves_out("perturbation.mixscape", "the cells of the signature"),
+    ]
+    # The signature and the DE genes cover the shared genes, with each
+    # cell's total over them, as the intersection merge holds them.
+    store, (signature, classes) = found[0], found[1]
+    assert list(found[2].values.columns) == _SCREEN_SHARED
+    assert set(found[3].de_genes["feature"]) <= set(_SCREEN_SHARED)
+    assert_same(found, expected, None)
+    assert _selected_names(store, _input(store, signature, "feature_selection")) == (
+        _SCREEN_SHARED
+    )
+    # The classes take the signature's features, which its identity holds.
+    assert "measured_features_fingerprint" in (
+        store.artifacts.inspect(signature).parameters
+    )
+    assert store.artifacts.inspect(classes).input_ref("signature") == signature
+
+    for source in ("left", "right"):
+        found = classify("merged", source)
+        assert found[4] == (
+            []
+            if source == "left"
+            else [
+                _leaves_out("perturbation.signature", "the cells of the coordinates"),
+                _leaves_out("perturbation.mixscape", "the cells of the signature"),
+            ]
+        )
+        assert_same(found, classify(source), source)
+
+
+def test_mixscape_refuses_a_signature_of_other_features_than_the_record_gives(
+    screen_sources, tmp_path, monkeypatch
+) -> None:
+    from cytearc.datastore._operations import perturbation_mixscape
+
+    shutil.copytree(screen_sources.base / "merged.zarr", tmp_path / "merged.zarr")
+    screens = _ScreenSources(tmp_path, screen_sources.coordinates)
+    store, cells, labels = _screen(screens, "merged")
+    coordinates = _screen_coordinates(screens, store, "merged", cells)
+
+    def signature() -> ArtifactRef:
+        ref, _ = _warned(
+            lambda: store.perturbation.signature(
+                labels, coordinates, features=_every_gene(store), dims=5, n_neighbors=10
+            )
+        )
+        return ref
+
+    def refusal(ref: ArtifactRef) -> str:
+        saved = list_artifacts(
+            store.zw, scope="assay", assay="RNA", kind="mixscape_classes"
+        )
+        with pytest.raises(ValueError) as refused:
+            store.perturbation.mixscape(ref)
+        assert (
+            list_artifacts(
+                store.zw, scope="assay", assay="RNA", kind="mixscape_classes"
+            )
+            == saved
+        )
+        return str(refused.value)
+
+    again = (
+        "; compute the signature again with perturbation.signature, then "
+        "classify its cells"
+    )
+    # A signature that took each cell's total over every gene, as one saved
+    # before Mixscape read the record does, while the record leaves out the
+    # left source's own genes.
+    with monkeypatch.context() as patched:
+        patched.setattr(
+            perturbation_mixscape, "cells_measured_features", lambda *_a, **_k: None
+        )
+        unrecorded = signature()
+    assert "measured_features_fingerprint" not in (
+        store.artifacts.inspect(unrecorded).parameters
+    )
+    assert refusal(unrecorded) == (
+        "The signature took each cell's total over every feature, but the feature "
+        "table of 'RNA' now records that the sources of its cells measured other "
+        "features" + again
+    )
+    # A signature of the shared genes, once the record is dropped.
+    recorded = signature()
+    for source in ("left", "right"):
+        store.RNA.feats.drop(f"measured_in_{source}")
+    assert refusal(recorded) == (
+        "The signature took each cell's total over the features that every "
+        "source of its cells measured, but the feature table of 'RNA' no longer "
+        "records which features each source measured" + again
+    )
+
+
+_ASSOCIATIONS_FAST = {"n_resamples": (199, 999, 1999), "id_column": None}
+
+
+@pytest.mark.parametrize("moi", ["low", "high"])
+def test_perturbation_associations_test_the_features_that_every_source_of_their_cells_measured(
+    screen_sources, moi
+) -> None:
+    # gB's target becomes L3, which the right source did not measure, so its
+    # positive control is left out, as the intersection merge, which lacks
+    # L3, leaves it out for want of a feature.
+    targets = {"gB": "L3"}
+
+    def associations(name: str, source: str | None = None) -> tuple[Any, ...]:
+        store, _, labels = _screen(screen_sources, name, source, targets=targets)
+        ref, left_out = _warned(
+            lambda: store.perturbation.associations(
+                labels, features=_every_gene(store), moi=moi, **_ASSOCIATIONS_FAST
+            )
+        )
+        return store, ref, store.perturbation.load_associations(ref), left_out
+
+    def assert_same(found: Any, expected: Any, *, ordered: bool = True) -> None:
+        """Compare the tests of cells in the same order, or the statistics that do not depend on it.
+
+        A merge orders the cells of a source otherwise than its own store,
+        which changes the random sets and the sums of the fits by rounding.
+        """
+        for table in ("discovery", "calibration", "positive"):
+            columns = (
+                list(getattr(expected, table).columns)
+                if ordered
+                else [
+                    "target",
+                    "feature",
+                    "n_cells",
+                    "n_control_cells",
+                    "n_nonzero_cells",
+                    "n_nonzero_control_cells",
+                    "pass_qc",
+                    "z",
+                    "log2_fold_change",
+                    "se_log2_fold_change",
+                ]
+            )
+            pd.testing.assert_frame_equal(
+                getattr(found, table)[columns],
+                getattr(expected, table)[columns],
+                check_exact=False,
+                rtol=1e-8 if ordered else 1e-5,
+                atol=0 if ordered else 1e-5,
+            )
+        if ordered:
+            assert found.calibration_grade == expected.calibration_grade
+
+    _, _, expected, warned = associations("intersection")
+    assert warned == []
+    store, ref, found, warned = associations("merged")
+    assert warned == [
+        _leaves_out("perturbation.associations", "the compared cells"),
+        "perturbation.associations leaves out 1 positive-control feature that "
+        "some source of the compared cells did not measure, since their zero "
+        "counts in its cells are not measurements. Source 'right' lacks 1: 'L3'.",
+    ]
+    # The discovery pairs pair the shared genes, the calibration pairs draw
+    # from them, and each cell's UMIs and detected genes cover them, as the
+    # intersection merge holds them.
+    assert set(found.discovery["feature"]) == set(_SCREEN_SHARED)
+    assert set(found.calibration["feature"]) <= set(_SCREEN_SHARED)
+    assert len(found.calibration) and found.positive["feature"].tolist() == ["G0"]
+    assert_same(found, expected)
+    status = store.artifacts.inspect(ref)
+    assert "measured_features_fingerprint" in status.parameters
+    assert _selected_names(store, status.input_ref("feature_selection")) == (
+        _SCREEN_SHARED
+    )
+
+    for source in ("left", "right"):
+        _, _, found, warned = associations("merged", source)
+        _, _, expected, _ = associations(source)
+        assert len(warned) == (0 if source == "left" else 2)
+        assert_same(found, expected, ordered=False)
+
+
+def test_association_depth_covariates_count_the_features_that_every_source_measured(
+    screen_sources,
+) -> None:
+    """Each cell's UMIs and detected genes, sceptre's depth covariates, in the order of the cells given."""
+    from cytearc.datastore._operations.perturbation_associations import _cell_depths
+
+    store = screen_sources.open("merged")
+    counts = _dense_counts(store, "RNA")
+    shared = np.isin(store.RNA.feats.fetch_all("ids").astype(str), _SCREEN_SHARED)
+    # Distinct cells out of store order, as the tests hold the control cells
+    # and then each target's cells.
+    cells = np.random.default_rng(3).permutation(np.arange(0, 480, 3))
+    for measured in (shared, None):
+        kept = np.ones(len(shared), dtype=bool) if measured is None else measured
+        umis, detected = _cell_depths(store.RNA, cells, measured, held_bytes=0)
+        np.testing.assert_array_equal(umis, counts[np.ix_(cells, kept)].sum(axis=1))
+        np.testing.assert_array_equal(
+            detected, (counts[np.ix_(cells, kept)] > 0).sum(axis=1)
+        )
+
+
+def test_perturbation_associations_refuse_pairs_that_a_source_of_their_cells_did_not_measure(
+    screen_sources,
+) -> None:
+    store, _, labels = _screen(screen_sources, "merged")
+    saved = list_artifacts(
+        store.zw, scope="assay", assay="RNA", kind="perturbation_associations"
+    )
+    remedy = (
+        "Test the cells of the sources that measured them: call the guides of "
+        "those cells, with a cell_selection that leaves the others out, and label "
+        "those calls; or leave those pairs out."
+    )
+    table = pd.DataFrame({"target": ["G0", "G0", "G1"], "feature": ["G5", "L7", "L2"]})
+    for name, settings in (
+        ("pairs", {"pairs": table, "positive_controls": None}),
+        (
+            "positive_controls",
+            {"positive_controls": table, "features": _every_gene(store)},
+        ),
+    ):
+        # The refusal comes before the trans pairs leave anything out.
+        with pytest.raises(ValueError) as refused, warnings.catch_warnings():
+            warnings.simplefilter("error")
+            store.perturbation.associations(labels, **settings, **_ASSOCIATIONS_FAST)
+        assert str(refused.value) == (
+            "Assay 'RNA' records that some source of the compared cells did not "
+            f"measure 2 of the 3 features of {name}, so their zero counts in its "
+            "cells are not measurements. Source 'right' lacks 2: 'L2', 'L7'. The "
+            "feature columns 'measured_in_left', 'measured_in_right' record which "
+            f"features each source measured. {remedy}"
+        )
+    assert (
+        list_artifacts(
+            store.zw, scope="assay", assay="RNA", kind="perturbation_associations"
+        )
+        == saved
+    )
+    # Over the left source's cells, which measured them, the pairs are tested.
+    store, _, labels = _screen(screen_sources, "merged", "left")
+    tests = store.perturbation.load_associations(
+        store.perturbation.associations(
+            labels, pairs=table, positive_controls=None, **_ASSOCIATIONS_FAST
+        )
+    )
+    # The pairs are tested in the order of their rows and features.
+    assert tests.discovery["feature"].tolist() == ["L7", "G5", "L2"]
+
+
+def test_perturbation_analyses_read_the_sources_of_every_cell_that_they_compare(
+    screen_sources,
+) -> None:
+    """Every left cell and the right source's cells of gB, beside no right control cell.
+
+    The right source's cells of gB are compared with the control cells, so
+    the genes that only the left source measured are left out, as in the
+    intersection merge, though every control cell is a left cell.
+    """
+    targets = {"gB": "L3"}
+
+    def analyses(name: str) -> tuple[Any, ...]:
+        store, _, labels = _screen(
+            screen_sources, name, "left_and_right_gB", targets=targets
+        )
+        every = _every_gene(store)
+
+        def run() -> tuple[Any, ...]:
+            return (
+                store.perturbation.efficiency(labels, id_column=None),
+                store.perturbation.profiles(
+                    labels, every, min_cells=10, id_column=None
+                ),
+                store.perturbation.associations(
+                    labels, features=every, positive_controls=None, **_ASSOCIATIONS_FAST
+                ),
+            )
+
+        (efficiency, profiles, tests), texts, diagnostic = warnings_of(run)
+        return (
+            store.perturbation.load_efficiency(efficiency).table,
+            store.perturbation.load_profiles(profiles).values,
+            store.perturbation.load_associations(tests).discovery,
+            [text for text in texts if "leaves out" in text],
+            [str(item) for item in diagnostic],
+        )
+
+    found, expected = analyses("merged"), analyses("intersection")
+    for found_frame, expected_frame in zip(found[:3], expected[:3], strict=True):
+        pd.testing.assert_frame_equal(
+            found_frame, expected_frame, check_exact=False, rtol=1e-8
+        )
+    assert list(found[1].columns) == _SCREEN_SHARED
+    assert found[0].set_index("target").loc["L3", "status"] == "no_feature"
+    assert found[3] == [
+        _leaves_out("perturbation.profiles", "the profiled cells"),
+        _leaves_out("perturbation.associations", "the compared cells"),
+    ]
+    assert found[4] == [_L3_UNMEASURED]
+
+
+def test_the_perturbation_pipeline_measures_targets_that_some_source_did_not_measure(
+    screen_sources, tmp_path
+) -> None:
+    """The recipe runs efficiency by default, which gives such a target no feature rather than stopping the run."""
+    shutil.copytree(screen_sources.base / "merged.zarr", tmp_path / "merged.zarr")
+    store = _ScreenSources(tmp_path, screen_sources.coordinates).open("merged")
+    run, _, diagnostic = warnings_of(
+        lambda: store.pipeline.perturbation(
+            labels={"controls": ["NT"], "targets": {"gB": "L3"}},
+            filtering=False,
+            guide_calling={"method": "fixed", "min_umi": 10},
+            efficiency={"id_column": None},
+            hvg={"top_n": 20},
+            pca={"dims": 3},
+            edistance=False,
+        )
+    )
+    table = store.perturbation.load_efficiency(run["efficiency"]).table
+    assert table.set_index("target")["status"].to_dict() == {
+        "G0": "tested",
+        "L3": "no_feature",
+    }
+    assert _L3_UNMEASURED in [str(item) for item in diagnostic]
+
+
+def _perturbation_results(
+    screens: _ScreenSources, name: str, source: str | None = None
+) -> dict[str, ArtifactRef]:
+    """Run each perturbation analysis that reads the record over a store's cells, or a source's cells of a merge."""
+    store, cells, labels = _screen(screens, name, source)
+    every = _every_gene(store)
+    signature = store.perturbation.signature(
+        labels,
+        _screen_coordinates(screens, store, name, cells),
+        features=every,
+        dims=5,
+        n_neighbors=10,
+    )
+    return {
+        "efficiency": store.perturbation.efficiency(labels, id_column=None),
+        "profiles": store.perturbation.profiles(
+            labels, every, min_cells=10, id_column=None
+        ),
+        "signature": signature,
+        "mixscape": store.perturbation.mixscape(signature),
+        **{
+            f"associations ({moi} MOI)": store.perturbation.associations(
+                labels, features=every, moi=moi, **_ASSOCIATIONS_FAST
+            )
+            for moi in ("low", "high")
+        },
+    }
+
+
+@pytest.mark.slow
+def test_perturbation_results_record_the_measured_features_only_when_the_record_changes_them(
+    screen_sources, tmp_path
+) -> None:
+    """Results over cells whose sources measured every feature keep their identity.
+
+    Dropping the record gives such a call the result that it saved with the
+    record, while a result that the record changed is computed again.
+    """
+    shutil.copytree(screen_sources.base / "merged.zarr", tmp_path / "merged.zarr")
+    screens = _ScreenSources(tmp_path, screen_sources.coordinates)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        saved = {
+            source: _perturbation_results(screens, "merged", source)
+            for source in ("left", None)
+        }
+    store = screens.open("merged")
+    # Mixscape's classes record the signature, whose identity holds the
+    # features.
+    for name, ref in saved[None].items():
+        assert (
+            "measured_features_fingerprint" in (store.artifacts.inspect(ref).parameters)
+        ) == (name != "mixscape"), name
+    for name, ref in saved["left"].items():
+        assert "measured_features_fingerprint" not in (
+            store.artifacts.inspect(ref).parameters
+        ), name
+    for source in ("left", "right"):
+        store.RNA.feats.drop(f"measured_in_{source}")
+    again = {}
+    for source in ("left", None):
+        again[source], left_out = _warned(
+            lambda source=source: _perturbation_results(screens, "merged", source)
+        )
+        assert left_out == []
+    assert again["left"] == saved["left"]
+    for name, ref in again[None].items():
+        assert ref != saved[None][name], name
+
+
+def test_perturbation_analyses_of_a_store_without_a_record_take_no_other_totals(
+    screen_sources, tmp_path, monkeypatch
+) -> None:
+    """A screen's own store takes each cell's prepared totals and records no measured features."""
+    from cytearc.assay import hvg_statistics
+
+    def refuse(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("a store without a record read what its sources measured")
+
+    monkeypatch.setattr(hvg_statistics, "cell_totals_over_features", refuse)
+    monkeypatch.setattr(membership_module, "sources_of_cells", refuse)
+    shutil.copytree(screen_sources.base / "left.zarr", tmp_path / "left.zarr")
+    screens = _ScreenSources(tmp_path, screen_sources.coordinates)
+    results, left_out = _warned(lambda: _perturbation_results(screens, "left"))
+    assert left_out == []
+    store = screens.open("left")
+    every = _every_gene(store)
+    for name, ref in results.items():
+        status = store.artifacts.inspect(ref)
+        assert "measured_features_fingerprint" not in status.parameters, name
+        if "feature_selection" in status.inputs:
+            assert status.input_ref("feature_selection") == every, name

@@ -421,21 +421,19 @@ def unshared_features_warning(
     lacks it, and a union composite reads them. Both record which features
     each source measured in a feature column of its own
     (:func:`~cytearc.storage.metadata_keys.measured_features_column`), from
-    which analyses leave the zeros out or refuse them, and the warning ends
-    with those that do and the perturbation analyses that still read them as
-    counts. The warning counts
-    the merged features of ``assay_name`` that not every source holding the
-    assay measured, then gives each such source's number of missing features
-    and names the first ``UNSHARED_FEATURE_EXAMPLES`` of them in merged
-    order. A source whose assay holds no features lacks every merged feature,
-    and the warning says that it holds none. A source without the assay is
-    left out, since a merge marks its cells as not measured. A merged source
-    of ``nested`` counts as each of its own sources that the record holds
-    (:func:`feature_record`); when it alone holds the assay, a merge's warning
-    says that the merged source holds the zeros, which the merge keeps. A
-    composite's warning ends with ``features='intersection'`` as the
-    alternative, or says that it would keep no feature when every source
-    lacks some.
+    which analyses leave the zeros out or refuse them, as the warning ends.
+    The warning counts the merged features of ``assay_name`` that not every
+    source holding the assay measured, then gives each such source's number
+    of missing features and names the first ``UNSHARED_FEATURE_EXAMPLES`` of
+    them in merged order. A source whose assay holds no features lacks every
+    merged feature, and the warning says that it holds none. A source
+    without the assay is left out, since a merge marks its cells as not
+    measured. A merged source of ``nested`` counts as each of its own
+    sources that the record holds (:func:`feature_record`); when it alone
+    holds the assay, a merge's warning says that the merged source holds the
+    zeros, which the merge keeps. A composite's warning ends with
+    ``features='intersection'`` as the alternative, or says that it would
+    keep no feature when every source lacks some.
 
     Args:
         assay_name: The merged assay, named in the warning.
@@ -496,10 +494,7 @@ def unshared_features_warning(
         f"{adjective} features {'was' if unshared == 1 else 'were'} not measured "
         "by every source that holds the assay. "
         + " ".join(lacking)
-        + f"{zeros}; {record}, so analyses leave those zeros out or refuse them, "
-        "except perturbation.efficiency, perturbation.signature, "
-        "perturbation.associations and perturbation.profiles, which still read "
-        "them as counts."
+        + f"{zeros}; {record}, so analyses leave those zeros out or refuse them."
     )
     if combination == "merge":
         return warning

@@ -1329,7 +1329,7 @@ def _feature_warnings():
         logger.remove(sink)
 
 
-def _zeros_read_as_counts(first: str, *, shared: bool = True) -> str:
+def _record_ending(first: str, *, shared: bool = True) -> str:
     """Return how a composite's warning about unmeasured features ends.
 
     ``first`` is the first source that holds the assay, and ``shared``
@@ -1338,9 +1338,7 @@ def _zeros_read_as_counts(first: str, *, shared: bool = True) -> str:
     zeros = (
         " The composite reads zero counts for the features a source lacks; columns "
         f"such as 'measured_in_{first}' record what each source measured, so "
-        "analyses leave those zeros out or refuse them, except perturbation.efficiency, "
-        "perturbation.signature, perturbation.associations and perturbation.profiles, "
-        "which still read them as counts."
+        "analyses leave those zeros out or refuse them."
     )
     return zeros + (
         " Pass features='intersection' to keep only the features that every "
@@ -1380,7 +1378,7 @@ def test_union_composite_warns_of_the_features_that_each_source_lacks(
     assert messages == [
         "Assay 'RNA': 3 of the 10 composite features were not measured by every "
         "source that holds the assay. Source 'a' lacks 1: 'g9'. Source 'b' "
-        "lacks 2: 'g8', 'g1'." + _zeros_read_as_counts("a")
+        "lacks 2: 'g8', 'g1'." + _record_ending("a")
     ]
     # The composite reads the zeros that the warning describes.
     ids = joint.RNA.feats.fetch_all("ids").tolist()
@@ -1411,7 +1409,7 @@ def test_union_composite_warns_of_an_antibody_that_one_of_three_panels_lacks(
     assert messages == [
         "Assay 'ADT': 1 of the 3 composite features was not measured by every "
         "source that holds the assay. Source 'p3' lacks 1: 'CD8'."
-        + _zeros_read_as_counts("p1")
+        + _record_ending("p1")
     ]
     assert joint.ADT.feats.fetch_all("ids").tolist() == ["CD3", "CD4", "CD8"]
     counts = joint.ADT.matrixGroup["counts"][:]
@@ -1538,7 +1536,7 @@ def test_a_composite_of_a_merged_store_keeps_the_source_of_each_of_its_cells(tmp
         "Assay 'ADT': 4 of the 5 composite features were not measured by every "
         "source that holds the assay. Source 'inner__p1' lacks 2: 'CD19', 'CD56'. "
         "Source 'inner__p2' lacks 2: 'CD8', 'CD56'. Source 'p3' lacks 3: 'CD4', "
-        "'CD8', 'CD19'." + _zeros_read_as_counts("inner__p1")
+        "'CD8', 'CD19'." + _record_ending("inner__p1")
     ]
     ids = joint.cells.fetch_all("ids").astype(str)
     expected = np.array(
@@ -1816,7 +1814,7 @@ def test_union_composite_gives_one_warning_for_sources_that_share_few_features(
         "Assay 'RNA': 20 of the 21 composite features were not measured by every "
         "source that holds the assay. Source 'left' lacks 10: 'y1', 'y2', 'y3', "
         "'y4', 'y5' and 5 more. Source 'right' lacks 10: 'x1', 'x2', 'x3', 'x4', "
-        "'x5' and 5 more." + _zeros_read_as_counts("left")
+        "'x5' and 5 more." + _record_ending("left")
     ]
     assert joint.RNA.feats.N == 21
 
@@ -1852,9 +1850,7 @@ def test_union_composite_of_sources_that_share_no_feature_offers_no_intersection
             sources, at=tmp_path / "joint.zarr", assay="ADT", features="union"
         )
 
-    assert messages == [
-        "Assay 'ADT': " + lacking + _zeros_read_as_counts("p1", shared=False)
-    ]
+    assert messages == ["Assay 'ADT': " + lacking + _record_ending("p1", shared=False)]
     # The cells of the last source read a zero of each antibody that it lacks,
     # and an intersection of the same sources keeps none, as the warning says.
     counts = joint.ADT.matrixGroup["counts"][:]
@@ -1914,13 +1910,11 @@ def test_unshared_features_warning_names_its_combinations():
     ) == shared.format("merged") + (
         " The merge writes zero counts for the features a source lacks; columns "
         "such as 'measured_in_a' record what each source measured, so analyses "
-        "leave those zeros out or refuse them, except perturbation.efficiency, "
-        "perturbation.signature, perturbation.associations and "
-        "perturbation.profiles, which still read them as counts."
+        "leave those zeros out or refuse them."
     )
     assert unshared_features_warning(
         "RNA", alignment, ["a", "b"], combination="composite"
-    ) == shared.format("composite") + _zeros_read_as_counts("a")
+    ) == shared.format("composite") + _record_ending("a")
     with pytest.raises(ValueError, match="combination must be 'merge' or 'composite'"):
         unshared_features_warning(
             "RNA",

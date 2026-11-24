@@ -610,6 +610,13 @@ def measured_mask(measured: CellsMeasuredFeatures | None) -> np.ndarray | None:
     return measured.measured
 
 
+def measured_positions(measured: np.ndarray | None, n_features: int) -> np.ndarray:
+    """Return the positions of the features of the Boolean mask ``measured``, as :func:`measured_mask` gives it, or of all ``n_features`` features when it is None."""
+    if measured is None:
+        return np.arange(n_features, dtype=np.int64)
+    return np.flatnonzero(measured).astype(np.int64)
+
+
 def measured_feature_mask(
     cells: Any, features: Any, rows: CellRows, *, assay: str
 ) -> np.ndarray | None:

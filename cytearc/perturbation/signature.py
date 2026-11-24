@@ -234,8 +234,9 @@ def normalize_counts(
 
     Args:
         counts: The cells' counts, cells x features.
-        totals: Each cell's total counts over every feature of the assay; a
-            cell without counts gets values of 0.
+        totals: Each cell's total counts over every feature of the assay, or
+            of a merged store over the features that every source of the
+            cells measured; a cell without counts gets values of 0.
         scale_factor: The counts each cell is scaled to.
 
     Returns:
@@ -424,8 +425,9 @@ def signature_rows(
     Args:
         counts: The cells' counts of the signature's features, cells x
             features.
-        totals: Each cell's total counts over every feature of the assay; a
-            cell without counts has normalized values of 0.
+        totals: Each cell's total counts over every feature of the assay, or
+            of a merged store over the features that every source of the
+            cells measured; a cell without counts has normalized values of 0.
         neighbors: Each cell's nearest controls, as rows of ``control_scaled``.
         control_scaled: The control cells' normalized values, as
             :func:`normalize_counts` gives them, controls x features.

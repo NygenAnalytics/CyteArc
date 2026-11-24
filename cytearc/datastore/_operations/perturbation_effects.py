@@ -9,7 +9,9 @@ from ...metadata.arguments import (
     PerturbationEfficiencyArguments,
     PerturbationLabelArguments,
 )
+from ...assay.hvg_statistics import cell_totals
 from ...metadata.artifacts import write_cell_data_artifact
+from ...metadata.membership import cells_measured_features, measured_mask
 from ...metadata.rows import array_row_selection_parts
 from ...perturbation.edistance import (
     EDISTANCE_STATUSES,
@@ -20,7 +22,6 @@ from ...perturbation.edistance import (
     edistance_settings,
 )
 from ...perturbation.efficiency import (
-    EFFICIENCY_NO_FEATURE,
     EFFICIENCY_STATUSES,
     EFFICIENCY_TESTED,
     PerturbationEfficiency,
@@ -32,6 +33,7 @@ from ...storage.artifact_writer import ArrayRequirement, AttributeRequirement
 from ...storage.artifacts import (
     ArtifactRef,
     artifact_group,
+    fingerprint_array,
     inspect_artifact,
     require_complete_artifact,
 )
@@ -40,8 +42,10 @@ from ...storage.types import as_zarr_array, read_array
 from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument
 from ...utils.logging import logger
+from ...utils.warnings import DiagnosticWarning, warn
 from .perturbation_store import (
     _COORDINATE_KINDS,
+    _ComparedCells,
     _cell_selection_check_bytes,
     _column_read_bytes,
     _compared_cells,
@@ -97,8 +101,20 @@ def _float64_rows(data: zarr.Array, rows: np.ndarray) -> np.ndarray:
     return values
 
 
+def _row_examples(
+    names: np.ndarray, targets: np.ndarray, rows: np.ndarray, by: str
+) -> list[str]:
+    """Name up to ``EXAMPLES`` of ``rows``: each target, or by guide each guide with its target."""
+    return [
+        repr(str(names[row]))
+        if by == "target"
+        else f"guide {str(names[row])!r} (target {str(targets[row])!r})"
+        for row in rows[:EXAMPLES]
+    ]
+
+
 def _efficiency_diagnostics(
-    names: np.ndarray, targets: np.ndarray, status: np.ndarray, by: str
+    names: np.ndarray, targets: np.ndarray, unmatched: np.ndarray, by: str
 ) -> dict[str, Any]:
     """Return the diagnostics of an efficiency table: its rows whose target matches no feature.
 
@@ -108,18 +124,13 @@ def _efficiency_diagnostics(
     Args:
         names: Each row's name: its target, or its guide.
         targets: Each row's target.
-        status: Each row's status, as a position in ``EFFICIENCY_STATUSES``.
+        unmatched: Whether each row's target matches no feature.
         by: ``"target"`` or ``"guide"``, which the rows are.
     """
-    unmatched = np.flatnonzero(np.asarray(status) == EFFICIENCY_NO_FEATURE)
+    rows = np.flatnonzero(unmatched)
     return {
-        "rowsWithoutFeature": len(unmatched),
-        "rowWithoutFeatureExamples": [
-            repr(str(names[row]))
-            if by == "target"
-            else f"guide {str(names[row])!r} (target {str(targets[row])!r})"
-            for row in unmatched[:EXAMPLES]
-        ],
+        "rowsWithoutFeature": len(rows),
+        "rowWithoutFeatureExamples": _row_examples(names, targets, rows, by),
     }
 
 
@@ -201,6 +212,19 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
         with its target, such as ``guide 'CRISPR2' (target 'ENH1')``. Such rows
         give a ``DiagnosticWarning`` each time the table is measured or reused.
 
+        On a store merged from sources that measured different features, as
+        its feature columns ``measured_in_<source>`` record, a target whose
+        gene some source of the compared cells, the cells that carry a
+        perturbation alone and the control cells, did not measure has the
+        status ``"no_feature"``, since its zero counts in that source's cells
+        are not measurements, as in a store of the genes that every such
+        source measured, and a ``DiagnosticWarning`` that names the gene and
+        the sources that lack it each time the table is measured or reused.
+        Each cell's library size is its total over the features that every
+        such source measured, as a store of those features alone holds it,
+        and the table then records those features as
+        ``measured_features_fingerprint``.
+
         Args:
             labels: A ``perturbation_labels`` artifact from
                 :meth:`~cytearc.datastore.namespaces.PerturbationAccessor.labels`.
@@ -254,16 +278,64 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
             status.input_ref("cell_selection"),
             operation=PerturbationEfficiencyArguments.operation,
         )
+        # The compared cells are found once: before the plan when a merge's
+        # record of what each source measured needs their sources, and
+        # otherwise only when the table is computed.
+        compared: _ComparedCells | None = None
+        finding = 0
+
+        def compared_cells() -> np.ndarray:
+            nonlocal compared, finding
+            compared, finding = _compared_cells(self, labels, rows, by)
+            return compared.cells
+
+        cells_measured = cells_measured_features(
+            expression.cells, expression.feats, compared_cells, assay=expression.name
+        )
+        unmatched = row_features < 0
+        row_targets = rows.target_names[rows.codes]
+        # A target whose gene some source of the compared cells did not
+        # measure has no feature, as in a store of the other genes, and a
+        # warning names the gene and the sources that lack it.
+        unmeasured_warning = None
+        if cells_measured is not None:
+            lacked = ~unmatched & ~cells_measured.measured[np.maximum(row_features, 0)]
+            if lacked.any():
+                lacked_rows = np.flatnonzero(lacked)
+                unmeasured_warning = (
+                    f"{len(lacked_rows)} of {len(row_names)} rows have no feature "
+                    f"of assay {expression.name!r} for their target, since some "
+                    "source of the compared cells did not measure its gene, whose "
+                    "zero counts in that source's cells are not measurements, for "
+                    "example "
+                    + ", ".join(_row_examples(row_names, row_targets, lacked_rows, by))
+                    + ". "
+                    + cells_measured.lacking(
+                        np.unique(row_features[lacked_rows]), feature_names
+                    )
+                    + " Measure them over the cells of the sources that measured "
+                    "them: call the guides of those cells, with a cell_selection "
+                    "that leaves the others out, and label those calls."
+                )
+                row_features = np.where(lacked, -1, row_features)
         row_feature_ids = _matched_ids(row_features, feature_ids)
         del feature_ids, feature_names
+        measured = measured_mask(cells_measured)
         arguments = PerturbationEfficiencyArguments(
             labels=labels,
             dataset_fingerprint=self._ensure_dataset_fingerprint(expression.name),
             target_features_fingerprint=_pairs_fingerprint(row_names, row_feature_ids),
             by=by,
             invalidate_cache=invalidate_cache,
+            measured_features_fingerprint=(
+                None if measured is None else fingerprint_array(measured)
+            ),
         )
         n_rows = len(row_names)
+        # The record gives the warning, whether the table is measured or
+        # reused.
+        if unmeasured_warning is not None:
+            warn(DiagnosticWarning(unmeasured_warning, arguments.operation))
         planned = arguments.plan(
             self.zw,
             scope="assay",
@@ -294,7 +366,8 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
                 self.zw, arguments, planned.ref, n_rows=n_rows, assay=expression.name
             )
             return planned.ref
-        compared, finding = _compared_cells(self, labels, rows, by)
+        if compared is None:
+            compared, finding = _compared_cells(self, labels, rows, by)
         n_compared = len(compared.cells)
         needed_features = np.unique(row_features[row_features >= 0])
         n_features = len(needed_features)
@@ -330,7 +403,7 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
             f"Comparing {n_features} target genes over {n_compared} cells holds about",
             remedy=f"Raise mem_budget to at least {needed} bytes.",
         )
-        library = expression._cell_count_totals(compared.cells)
+        library = cell_totals(expression, compared.cells, measured, held_bytes=held)
         if not np.any(library > 0):
             raise ValueError(
                 f"None of the {n_compared} compared cells, those that carry a "
@@ -360,7 +433,6 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
         arrays = efficiency_arrays(
             counts, library, compared.groups, compared.control, row_columns
         )
-        row_targets = rows.target_names[rows.codes]
         write_cell_data_artifact(
             self.zw,
             planned,
@@ -379,9 +451,7 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
                 },
             },
             attributes={"status_names": list(EFFICIENCY_STATUSES), "by": by},
-            diagnostics=_efficiency_diagnostics(
-                row_names, row_targets, arrays.status, by
-            ),
+            diagnostics=_efficiency_diagnostics(row_names, row_targets, unmatched, by),
         )
         _warn_efficiency(
             self.zw, arguments, planned.ref, n_rows=n_rows, assay=expression.name

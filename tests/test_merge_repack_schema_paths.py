@@ -1435,14 +1435,12 @@ def test_merge_reads_signed_counts_within_its_own_budget_whatever_the_sources_bu
 _GENES = ["G0", "G1"]
 
 
-def _zeros_read_as_counts(first: str = "left") -> str:
+def _record_ending(first: str = "left") -> str:
     """Return how a merge's warning about unmeasured features ends, ``first`` the first source that holds the assay."""
     return (
         " The merge writes zero counts for the features a source lacks; columns "
         f"such as 'measured_in_{first}' record what each source measured, so "
-        "analyses leave those zeros out or refuse them, except perturbation.efficiency, "
-        "perturbation.signature, perturbation.associations and perturbation.profiles, "
-        "which still read them as counts."
+        "analyses leave those zeros out or refuse them."
     )
 
 
@@ -1480,11 +1478,11 @@ def test_merge_gives_one_warning_naming_each_assay_whose_sources_share_few_featu
         "Assay 'ADT': 18 of the 19 merged features were not measured by every "
         "source that holds the assay. Source 'left' lacks 9: 'b1', 'b2', 'b3', "
         "'b4', 'b5' and 4 more. Source 'right' lacks 9: 'a1', 'a2', 'a3', 'a4', "
-        "'a5' and 4 more." + _zeros_read_as_counts(),
+        "'a5' and 4 more." + _record_ending(),
         "Assay 'RNA': 20 of the 21 merged features were not measured by every "
         "source that holds the assay. Source 'left' lacks 10: 'y1', 'y2', 'y3', "
         "'y4', 'y5' and 5 more. Source 'right' lacks 10: 'x1', 'x2', 'x3', 'x4', "
-        "'x5' and 5 more." + _zeros_read_as_counts(),
+        "'x5' and 5 more." + _record_ending(),
     ]
 
 
@@ -1523,7 +1521,7 @@ def test_merge_warns_of_the_antibodies_that_each_panel_lacks(tmp_path):
     assert messages == [
         "Assay 'ADT': 5 of the 8 merged features were not measured by every "
         "source that holds the assay. Source 'left' lacks 3: 'CD14', 'CD16', "
-        "'CD19'. Source 'right' lacks 2: 'CD45RA', 'CD27'." + _zeros_read_as_counts()
+        "'CD19'. Source 'right' lacks 2: 'CD45RA', 'CD27'." + _record_ending()
     ]
     # The merged counts hold the zeros that the warning describes.
     root = zarr.open_group(destination, mode="r")
@@ -1565,8 +1563,7 @@ def test_merge_names_at_most_five_of_the_genes_that_each_source_lacks(tmp_path):
     )
     assert tail.endswith(
         "xxx', 'h1', 'h2', 'h3', 'h4' and 2,995 more. Source 'right' lacks 200: "
-        "'g1000', 'g1001', 'g1002', 'g1003', 'g1004' and 195 more."
-        + _zeros_read_as_counts()
+        "'g1000', 'g1001', 'g1002', 'g1003', 'g1004' and 195 more." + _record_ending()
     )
     # Five names of each source and a count of the others keep it short.
     assert "x" * 100 not in message
@@ -1611,7 +1608,7 @@ def test_merge_plan_counts_the_antibodies_that_every_one_of_three_panels_measure
     adt = next(item for item in plan.assays if item.assayName == "ADT")
     assert adt.nFeatures == 4
     assert adt.featureOverlapFraction == fraction
-    assert messages == ["Assay 'ADT': " + warning + _zeros_read_as_counts("a")]
+    assert messages == ["Assay 'ADT': " + warning + _record_ending("a")]
 
 
 def test_three_panels_of_which_two_overlap_merge_with_no_antibody_in_all_three(
@@ -1633,7 +1630,7 @@ def test_three_panels_of_which_two_overlap_merge_with_no_antibody_in_all_three(
         "Assay 'ADT': 4 of the 4 merged features were not measured by every "
         "source that holds the assay. Source 'a' lacks 2: 'CD8', 'CD14'. Source "
         "'b' lacks 2: 'CD8', 'CD14'. Source 'c' lacks 2: 'CD3', 'CD4'."
-        + _zeros_read_as_counts("a")
+        + _record_ending("a")
     ]
     rows = _rows_by_cell(destination, "ADT/counts")
     assert [rows["a__c0"], rows["b__c0"], rows["c__c0"]] == [
@@ -1724,7 +1721,7 @@ def test_merge_of_sources_that_measured_one_panel_names_no_feature(
 _NO_ANTIBODIES = (
     "Assay 'ADT': 2 of the 2 merged features were not measured by every source "
     "that holds the assay. Source 'c' holds no features of the assay, so it "
-    "lacks every merged feature." + _zeros_read_as_counts("a")
+    "lacks every merged feature." + _record_ending("a")
 )
 
 
@@ -2262,7 +2259,7 @@ def test_a_merge_of_merged_stores_records_what_every_cell_of_each_source_measure
         "source that holds the assay. Source 'inner__left' lacks 3: 'CD14', "
         "'CD16', 'CD19'. Source 'inner__right' lacks 2: 'CD45RA', 'CD27'. "
         "Source 'third' lacks 4: 'CD27', 'CD14', 'CD16', 'CD19'."
-        + _zeros_read_as_counts("inner__left")
+        + _record_ending("inner__left")
     ]
     assert _measured_columns(union) == {
         "measured_in_inner__left": [name in _LEFT_PANEL for name in ids],
@@ -2630,9 +2627,7 @@ def test_a_merged_store_that_alone_holds_an_assay_keeps_its_zero_counts(tmp_path
         "source 'inner' holds zero counts for the features its sources lack, "
         "which the merge keeps; columns such as 'measured_in_inner__left' record "
         "what each source measured, so analyses leave those zeros out or refuse "
-        "them, except perturbation.efficiency, perturbation.signature, "
-        "perturbation.associations and perturbation.profiles, which still read "
-        "them as counts."
+        "them."
     ]
     assert set(_measured_columns(str(tmp_path / "outer.zarr"))) == {
         "measured_in_inner__left",

@@ -5,8 +5,10 @@ profiles, with each feature measured in standard deviations of the control
 cells of the cell's own sample, such as its GEM group:
 
 1. Each cell's counts are scaled so that its total, the sum of its counts
-   over every feature of the assay, equals the median total of the control
-   cells, ``x = count / total * target``.
+   over every feature of the assay, or of a store merged from sources that
+   measured different features over those that every source of the cells
+   measured, as the datastore reference describes, equals the median total
+   of the control cells, ``x = count / total * target``.
 2. Within each sample, each feature's scaled values are centered on the mean
    of the sample's control cells and divided by their standard deviation with
    the n - 1 divisor, ``z = (x - mean) / sd``, for every cell, control cells
@@ -96,7 +98,9 @@ def depth_target(totals: np.ndarray, control: np.ndarray) -> float:
     every cell to the median total of their control cells.
 
     Args:
-        totals: Each cell's total counts over every feature of the assay.
+        totals: Each cell's total counts over every feature of the assay, or
+            of a merged store over the features that every source of the
+            cells measured.
         control: Whether each cell is a control cell.
 
     Returns:
@@ -209,7 +213,8 @@ def control_moments(
         blocks: The control cells' counts, cells x features, in blocks of
             cells in the order of ``totals``.
         totals: Each control cell's total counts over every feature of the
-            assay; a cell without counts has values of 0.
+            assay, or of a merged store over the features that every source
+            of the cells measured; a cell without counts has values of 0.
         target: The total that every cell is scaled to.
         samples: Each control cell's sample, from 0 to ``n_samples - 1``.
         n_samples: The samples.
@@ -265,7 +270,9 @@ def z_score_sums(
     Args:
         blocks: The perturbed cells' counts, cells x features, in blocks of
             cells in the order of ``totals``.
-        totals: Each cell's total counts over every feature of the assay.
+        totals: Each cell's total counts over every feature of the assay, or
+            of a merged store over the features that every source of the
+            cells measured.
         target: The total that every cell is scaled to.
         samples: Each cell's sample, a row of ``means`` and ``sds``.
         groups: Each cell's perturbation, from 0 to ``n_groups - 1``.
