@@ -2621,7 +2621,7 @@ def test_harmony_doublets_are_scored_within_each_batch_without_another_graph(
         artifact_group(datastore.zw, samples)["pipeline_batch"][:], batch
     )
     doublet_status = datastore.artifacts.inspect(run["doublets"])
-    assert doublet_status.revision == 3
+    assert doublet_status.revision == 4
     assert doublet_status.parameters["sample_columns"] == ["pipeline_batch"]
     payload = artifact_group(datastore.zw, run["doublets"])
     parents = payload["simulated_parents"][:]

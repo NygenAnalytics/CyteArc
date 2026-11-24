@@ -224,6 +224,18 @@ def _hvg_selection_1_3(
     return variance_bound or earlier_bounds or earlier_blacklist
 
 
+def _chooses_its_doublet_thresholds(
+    kind: str, parameters: Mapping[str, Any], inputs: Mapping[str, Any]
+) -> bool:
+    """Select the doublet scores that choose each sample's threshold automatically.
+
+    Such scores record ``threshold`` as None. Scores of a given threshold call
+    the same cells. Scores of revision 1, which called no doublets, record no
+    ``threshold`` and are selected too, as every later revision selects them.
+    """
+    return parameters.get("threshold") is None
+
+
 def _scores_batches_under_an_unrecorded_normalizer(
     kind: str, parameters: Mapping[str, Any], inputs: Mapping[str, Any]
 ) -> bool:
@@ -319,6 +331,18 @@ _OPERATION_REVISIONS: dict[str, tuple[OperationRevision, ...]] = {
                 "threshold estimates a doublet rate of at most 50%"
             ),
             applies=None,
+        ),
+        OperationRevision(
+            revision=4,
+            release="1.5.0",
+            change=(
+                "A sample whose automatic threshold, the histogram minimum or "
+                "Otsu's threshold, would estimate a doublet rate above 50% has "
+                "no threshold: it calls no cell and records the threshold method "
+                "'none' and a threshold of 1; affects scores with an automatic "
+                "threshold"
+            ),
+            applies=_chooses_its_doublet_thresholds,
         ),
     ),
     "run_harmony": (_HARMONY2,),
