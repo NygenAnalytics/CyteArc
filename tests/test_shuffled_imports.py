@@ -1142,7 +1142,9 @@ def test_a_shuffled_import_of_a_reader_names_the_budget_that_passes_its_spill(
 
 
 @pytest.mark.parametrize("shuffle_cells", [False, True], ids=["file", "shuffled"])
-@pytest.mark.parametrize("kind", ["10x-cutoff", "mtx-cellMajor-filtered", "csv"])
+@pytest.mark.parametrize(
+    "kind", ["10x-cutoff", "mtx-cellMajor-filtered", "csv", "sparse"]
+)
 def test_an_import_charges_its_counts_t_write_with_what_it_still_holds(
     tmp_path, monkeypatch, kind, shuffle_cells
 ) -> None:
@@ -1159,15 +1161,17 @@ def test_an_import_charges_its_counts_t_write_with_what_it_still_holds(
     run, expected = _source(tmp_path, kind)
     run(tmp_path / "store.zarr", {"shuffle_cells": shuffle_cells})
     cells = next(iter(expected.values())).shape[0]
-    # countsT runs beside the reader's arrays, or a CSV reader's IDs, NumPy
-    # text of 4 bytes a character of cell-156, and a shuffled import's order,
-    # 8 bytes a cell: the counts write lets go of the shuffled cells and the
-    # count summaries first.
-    reader = (
-        4 * len(f"cell-{_N_CELLS - 1}") * _N_CELLS
-        if kind == "csv"
-        else _held_before_the_shuffle(kind)
-    )
+    # countsT runs beside the reader's arrays, a CSV reader's IDs, NumPy text
+    # of 4 bytes a character of cell-156, or the in-memory matrix, as SciPy
+    # holds it, and a shuffled import's order, 8 bytes a cell: the counts
+    # write lets go of the shuffled cells and the count summaries first.
+    if kind == "csv":
+        reader = 4 * len(f"cell-{_N_CELLS - 1}") * _N_CELLS
+    elif kind == "sparse":
+        matrix = csr_matrix(_counts()[:, :9])
+        reader = matrix.data.nbytes + matrix.indices.nbytes + matrix.indptr.nbytes
+    else:
+        reader = _held_before_the_shuffle(kind)
     held = reader + (8 * cells if shuffle_cells else 0)
     # The layout fit plans the write and the write admits itself, both with
     # that charge.

@@ -521,6 +521,8 @@ class SparseToZarr:
                 alignedBatches=True,
             ),
             requested=requested,
+            # countsT runs beside the matrices and a shuffled import's order.
+            countsTResidentBytes=self._heldMatrixBytes,
         )
 
     def dump(self, batch_size: int | None = None) -> None:
@@ -597,6 +599,9 @@ class SparseToZarr:
             f"to assay {assay.name}"
         )
         finalize_counts(store, summary=summary)
+        # countsT runs beside the matrices and a shuffled import's order, and
+        # not the count summary.
+        del summary
         finalize_writer_counts_t(
             self.z,
             assay.name,
@@ -605,4 +610,5 @@ class SparseToZarr:
             resources=self.resources,
             profile=self.profile,
             io=self.io,
+            resident_bytes=self._heldMatrixBytes,
         )

@@ -132,10 +132,10 @@ def test_fit_also_admits_the_counts_t_transpose():
 
 
 def test_fit_stops_at_count_shards_of_one_row():
-    seen: list[int] = []
+    seen: list[tuple[int, int]] = []
 
     def refuse(specs, resources: ResourceBudget) -> None:
-        seen.append(specs[0].shards[0])
+        seen.append((specs[0].shards[0], resources.memoryBytes))
         raise _refusal("does not fit", resources)
 
     with pytest.raises(
@@ -144,8 +144,12 @@ def test_fit_stops_at_count_shards_of_one_row():
     ) as refused:
         _fit(refuse)
     assert type(refused.value) is MemoryBudgetError
-    assert seen[-1] == 1
-    assert seen.count(1) == 1
+    # The halvings stop at count shards of one row; the refusal then checks
+    # them at larger budgets alone, for the least budget that writes them.
+    at_budget = [rows for rows, budget in seen if budget == 1 << 40]
+    assert at_budget[-1] == 1
+    assert at_budget.count(1) == 1
+    assert {rows for rows, budget in seen if budget > 1 << 40} == {1}
 
 
 def _write_h5ad(
@@ -273,8 +277,24 @@ def test_a_count_layout_refusal_states_the_producer_apart_from_resident_data(
     resident, producer = (int(number) for number in found.groups())
     # The matrix's resident data is a small part of what the plan refuses.
     assert 0 < resident < producer
-    # The budget the refusal names is unchanged: both parts and one task.
-    assert refused.value.needed_bytes == resident + producer + 1
+    # The producer's share grows with the budget, so both parts and one task
+    # at the refused budget are refused again; the refusal names the least
+    # budget that writes the layout, and one byte less is refused naming it.
+    needed = refused.value.needed_bytes
+    assert needed > resident + producer + 1
+
+    def layout_at(budget: int) -> None:
+        try:
+            _build(path, tmp_path / f"at-{budget}.zarr", mem_budget=budget, nthreads=1)
+        except CountLayoutMemoryError:
+            raise
+        except MemoryError:
+            pass
+
+    layout_at(needed)
+    with pytest.raises(CountLayoutMemoryError) as below:
+        layout_at(needed - 1)
+    assert below.value.needed_bytes == needed
 
 
 @pytest.fixture(scope="module")
