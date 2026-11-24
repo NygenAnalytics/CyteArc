@@ -894,8 +894,8 @@ def test_heatmaps_print_values_black_from_viridis_index_111() -> None:
             plt.close(figure)
     # viridis' colors at indices 110 and 111 round to #27808e and #26818e of
     # LABEL_CONTRASTS, where white leads black at 4.60 to 4.56:1 and black
-    # leads white at 4.61 to 4.55:1. The values from 113 to 158, 46 colors,
-    # were white below 4.5:1, down to 2.86:1, where black reaches 4.69 to 7.34.
+    # leads white at 4.61 to 4.55:1. On the 46 colors from 113 to 158, white
+    # falls below 4.5:1, down to 2.86:1, where black reaches 4.69 to 7.34.
     assert labels == {at: "#ffffff" if at < 111 else "#000000" for at in range(256)}
 
 
