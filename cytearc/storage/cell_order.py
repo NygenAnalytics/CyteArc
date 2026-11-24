@@ -118,9 +118,10 @@ def shuffled_order(n_rows: int, seed: int) -> np.ndarray:
     """Return the permutation that shuffles ``n_rows`` cells: row ``r`` holds row ``order[r]``.
 
     Each row index is hashed with SplitMix64's finalizer, keyed by ``seed``,
-    and the rows are ranked by their hashes, ties broken by the index. The
-    hashes are exact 64-bit integer arithmetic, so a seed gives the same
-    permutation on every platform and NumPy version.
+    and the rows are ranked by their hashes. Both mixing steps are bijections
+    of 64-bit integers, so the hashes of distinct rows differ and any sort
+    ranks them alike. The hashes are exact 64-bit integer arithmetic, so a
+    seed gives the same permutation on every platform and NumPy version.
 
     Args:
         n_rows: Number of cells, at least 0.
@@ -139,7 +140,7 @@ def shuffled_order(n_rows: int, seed: int) -> np.ndarray:
     hashes = mix64_array(
         key ^ mix64_array(np.arange(n_rows, dtype=np.uint64) + _GOLDEN)
     )
-    order: np.ndarray = np.argsort(hashes, kind="stable").astype(np.int64, copy=False)
+    order: np.ndarray = np.argsort(hashes).astype(np.int64, copy=False)
     return order
 
 

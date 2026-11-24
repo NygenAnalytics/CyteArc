@@ -63,6 +63,31 @@ def test_the_order_is_a_permutation_equal_to_the_reference(n_rows, seed) -> None
     assert order.tolist() == _reference_order(n_rows, seed)
 
 
+@pytest.mark.parametrize("trial", range(6))
+def test_the_order_is_the_stable_sort_of_distinct_hashes(trial) -> None:
+    from cytearc.utils.digest import mix64_array
+
+    # The hashes of the rows are distinct, so the sort that ranks them needs
+    # no rule for ties and gives the stable sort's order.
+    rng = np.random.default_rng(trial)
+    n_rows = int(rng.integers(0, 300_000))
+    seed = int(rng.integers(0, 2**63)) * 2 + int(rng.integers(0, 2))
+    key = mix64_array(
+        np.array([seed], dtype=np.uint64)
+        ^ np.uint64(int.from_bytes(b"CellOrdr", "big"))
+    )
+    hashes = mix64_array(
+        key
+        ^ mix64_array(
+            np.arange(n_rows, dtype=np.uint64) + np.uint64(0x9E3779B97F4A7C15)
+        )
+    )
+    assert np.unique(hashes).size == n_rows
+    np.testing.assert_array_equal(
+        shuffled_order(n_rows, seed), np.argsort(hashes, kind="stable")
+    )
+
+
 def test_a_large_order_is_a_permutation_unlike_its_neighbours() -> None:
     order = shuffled_order(200_003, 0)
     np.testing.assert_array_equal(np.sort(order), np.arange(200_003))
