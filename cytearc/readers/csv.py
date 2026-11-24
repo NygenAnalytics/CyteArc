@@ -29,6 +29,10 @@ _QUOTING_SETTINGS = ("quotechar", "doublequote", "escapechar", "skipinitialspace
 _OPENING_SETTINGS = frozenset({"compression", "memory_map", "storage_options"})
 # read_csv settings that split lines in ways Python's csv module cannot follow.
 _UNSUPPORTED_SETTINGS = frozenset({"comment", "dialect", "lineterminator"})
+# The encoding_errors handlers that can keep bytes that the encoding cannot
+# decode as text that UTF-8 cannot encode: a store whose IDs hold such text
+# cannot be opened, and no export writes it.
+_SURROGATE_ERRORS = frozenset({"surrogateescape", "surrogatepass"})
 # read_csv settings that the reader sets from its own arguments, with the
 # argument that sets each. delimiter, and delim_whitespace before pandas 3,
 # set the separator as sep does.
@@ -327,7 +331,10 @@ class CSVReader:
                        must be text in ``encoding`` here, or UTF-8 without it: bytes that
                        this encoding cannot decode raise ValueError, naming the first line
                        that holds them, unless pandas reads them under
-                       ``encoding_errors`` here.
+                       ``encoding_errors`` here. ``encoding_errors`` cannot be
+                       ``surrogateescape`` or ``surrogatepass``, which can keep such bytes
+                       as text that UTF-8 cannot encode: a store that holds such text
+                       cannot be opened or exported.
         temp_dir: Parent directory of the temporary files of an import that
                   shuffles cells. None uses the system temporary directory.
 
@@ -378,6 +385,16 @@ class CSVReader:
                 f"pandas_kwargs cannot set {', '.join(unsupported)}: the reader "
                 "checks the fields of every row with sep and the quoting "
                 "settings alone"
+            )
+        errors = pandas_kwargs.get("encoding_errors")
+        if isinstance(errors, str) and errors in _SURROGATE_ERRORS:
+            raise ValueError(
+                f"pandas_kwargs cannot set encoding_errors to {quoted_value(errors)}: "
+                "it can keep bytes that the encoding cannot decode as text that UTF-8 "
+                "cannot encode, and a store that holds such text cannot be opened or "
+                "exported. Pass the file's encoding as encoding in pandas_kwargs, or "
+                "encoding_errors 'backslashreplace' to import each such byte as text "
+                "such as \\xe9"
             )
         if "usecols" in pandas_kwargs:
             raise ValueError(

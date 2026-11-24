@@ -1542,16 +1542,6 @@ _UTF8 = "CSV files must be UTF-8 text"
             r"b'\x00\xd8'",
             id="utf-16-lone-surrogate",
         ),
-        # The field check reads this file, and pandas' C engine refused it
-        # with a UnicodeDecodeError.
-        pytest.param(
-            b"cell,a\ncaf\xe9,1\n",
-            {"id_column": 0, "pandas_kwargs": {"encoding_errors": "surrogateescape"}},
-            _UTF8,
-            2,
-            r"b'caf\xe9'",
-            id="surrogateescape-in-the-c-engine",
-        ),
     ],
 )
 def test_csv_reader_refuses_text_that_its_encoding_cannot_decode(
@@ -1673,13 +1663,6 @@ def test_csv_reader_refuses_text_that_its_encoding_cannot_decode(
             ["g\ufffdne"],
             id="replaced-memory-mapped",
         ),
-        pytest.param(
-            b"cell,a\ncaf\xe9,1\nc2,2\n",
-            {"encoding_errors": "surrogateescape", "engine": "python"},
-            ["caf\udce9", "c2"],
-            ["a"],
-            id="surrogateescape-in-the-python-engine",
-        ),
     ],
 )
 def test_csv_text_that_pandas_reads_imports_as_before(
@@ -1703,6 +1686,37 @@ def test_csv_text_that_pandas_reads_imports_as_before(
     assert root["cellData/ids"][:].tolist() == cells
     assert root["RNA/featureData/ids"][:].tolist() == features
     np.testing.assert_array_equal(root["RNA/counts"][:], [[1], [2]])
+
+
+@pytest.mark.parametrize("engine", ["c", "python"])
+@pytest.mark.parametrize("errors", ["surrogateescape", "surrogatepass"])
+def test_csv_reader_refuses_encoding_errors_that_keep_bytes_utf8_cannot_encode(
+    tmp_path: Path, engine: str, errors: str
+) -> None:
+    # Such text imported, but a store whose IDs held it could not be opened,
+    # and no export wrote cell metadata that held it. The reader refuses the
+    # handler before it reads the file, so a UTF-8 file is refused too, and a
+    # file that is not there.
+    path = tmp_path / "counts.csv"
+    path.write_text("cell,gène\ncafé,1\n", encoding="utf-8")
+
+    for source in (path, tmp_path / "absent.csv"):
+        with pytest.raises(ValueError) as refused:
+            CSVReader(
+                str(source),
+                id_column=0,
+                pandas_kwargs={"encoding_errors": errors, "engine": engine},
+            )
+
+        assert type(refused.value) is ValueError
+        assert str(refused.value) == (
+            f"pandas_kwargs cannot set encoding_errors to '{errors}': it can keep "
+            "bytes that the encoding cannot decode as text that UTF-8 cannot "
+            "encode, and a store that holds such text cannot be opened or "
+            "exported. Pass the file's encoding as encoding in pandas_kwargs, or "
+            "encoding_errors 'backslashreplace' to import each such byte as text "
+            "such as \\xe9"
+        )
 
 
 def test_csv_text_at_a_url_imports_under_its_encoding_errors(tmp_path: Path) -> None:
