@@ -36,9 +36,9 @@ SCAN_BAND_BYTES = 64 * 1024**2
 #: A read in bands orders the indices of the axis it slices by chunk, and
 #: keeps their order, the ordered indices and their chunks while it reads,
 #: each band's indices within the band, and where each band starts and
-#: stops among them, which a band of one index holds for its index: 48 bytes
-#: an index of int64. Its stable sort and masks held less beside them, 26
-#: bytes an index traced.
+#: stops among them, 16 bytes a band, which a band of one index holds for
+#: that index: 48 bytes an index of int64 in all. Its stable sort and masks
+#: held less beside them, 26 bytes an index traced.
 _BAND_INDEX_BYTES = 48
 #: Passes over a selection's indices take at most this many at a time, or,
 #: where they take whole bands, one band that holds more, so a pass holds 9
@@ -142,7 +142,7 @@ def band_shards(
     of chunks. A band counts each row of shards it touches once, in whatever
     order its rows come, as Zarr reads each shard of a selection once. The
     entries are counted a piece of whole bands at a time, at most 65,536
-    entries or one band, so the count holds about 9 bytes for each entry of
+    entries or one band, so the count holds about 11 bytes for each entry of
     a piece, not of the selection, and sorts a piece only if its entries are
     not in order already.
     """
@@ -435,8 +435,9 @@ def row_read_parts(
     bands, as :func:`indexed_read_parts` charges, unless its rows form one
     run, which Zarr reads in one request over the rows of shards that a run
     of ``band_rows`` rows touches, as :func:`run_shards` counts them, and no
-    more than ``shards``. Without ``band_rows`` the run is charged
-    ``shards``, and the bands those of a row chunk's rows.
+    more than ``shards``. Without ``band_rows``, the run is charged
+    ``shards`` rows of shards and the bands are charged as a block of a row
+    chunk's rows.
     """
     if geometry is None or columns.size == 0:
         return 0, 0
