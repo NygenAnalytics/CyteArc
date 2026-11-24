@@ -558,7 +558,6 @@ def _feature_alignment(
     assays: list[Any],
     names: list[str],
     features: FeatureSet,
-    assay_type: str,
     nested: list[NestedSources | None],
 ) -> tuple[FeatureAlignment, np.ndarray, str]:
     """Return the composite's alignment of ``assay``, the source column of each of its features, and its counts dtype, after logging the warning of the features that the sources share or lack.
@@ -580,7 +579,6 @@ def _feature_alignment(
             alignment,
             names,
             combination="composite",
-            assay_type=assay_type,
             nested=nested,
         )
         if unshared is not None:
@@ -1020,14 +1018,13 @@ def _write_composite(
     for source, source_assay in zip(datasets, assays, strict=True):
         prefetch_metadata_listing(source.cells._group)
         prefetch_metadata_listing(source_assay.feats._group)
-    (assay_type,) = assay_types
     # A merged source is recorded by its own sources, as a merge records it.
     nested = [
         nested_sources(source.cells, {assay: source_assay.feats})
         for source, source_assay in zip(datasets, assays, strict=True)
     ]
     alignment, feature_columns, dtype = _feature_alignment(
-        assay, assays, names, features, assay_type, nested
+        assay, assays, names, features, nested
     )
     # Names whose record columns would collide fail here, before anything is
     # written.

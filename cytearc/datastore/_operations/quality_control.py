@@ -1326,6 +1326,10 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
                 i = f"{self._defaultAssay}_{i}"
                 if i in available:
                     attrs.append(i)
+                else:
+                    self._get_assay(self._defaultAssay)._warn_unavailable_percentages(
+                        [i], "qc.auto_filter"
+                    )
 
         attrs_list, metric_artifacts, resolved_sample_artifact = (
             validate_cell_filter_sources(

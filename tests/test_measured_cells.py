@@ -5080,9 +5080,804 @@ def test_a_projection_and_its_stream_refuse_a_malformed_record_of_sources(
         )
 
 
+def test_prepared_percentages_count_only_the_genes_that_every_source_measured(
+    tmp_path,
+) -> None:
+    """The left source annotates MT-B and RPS2 beside the MT-A and RPS1 that both sources annotate."""
+    from cytearc.datastore._pipeline.filtering import default_filter_columns
+    from cytearc.datastore._pipeline.recipes.rna import (
+        FILTER_SUFFIXES as RNA_FILTER_SUFFIXES,
+    )
+    from cytearc.utils.logging import logger
+
+    rng = np.random.default_rng(4)
+    shared = [*(f"G{index}" for index in range(40)), "MT-A", "RPS1"]
+    features = {"left": [*shared, "MT-B", "RPS2"], "right": shared}
+    counts = {
+        name: rng.poisson(3, (60, len(genes))) for name, genes in features.items()
+    }
+    for name, values in counts.items():
+        write_count_store(
+            str(tmp_path / f"{name}.zarr"),
+            {"RNA": values},
+            "uint32",
+            feature_ids={"RNA": features[name]},
+        )
+    stores = _MergedSources(tmp_path, "RNA")
+    sources = {name: stores.open(name) for name in counts}
+    for target in ("merged", "unprepared"):
+        DataStoreMerge(
+            list(sources.values()),
+            str(tmp_path / f"{target}.zarr"),
+            list(counts),
+            nthreads=1,
+        ).dump()
+    # The first open prepares the merge.
+    with pytest.warns(UserWarning) as caught:
+        store = stores.open()
+    lacks = "since their zero counts in its cells are not measurements. Source 'right'"
+    assert _left_out(caught) == [
+        "RNA_percentMito leaves out 1 gene that some source of the cells did not "
+        f"measure, {lacks} lacks 1: 'MT-B'.",
+        "RNA_percentRibo leaves out 1 gene that some source of the cells did not "
+        f"measure, {lacks} lacks 1: 'RPS2'.",
+    ]
+    # Each cell's share of its own total of the gene that both sources
+    # measured: the right source's own column, and not the left source's,
+    # which also counts the gene that the right source lacks.
+    ids = store.cells.fetch_all("ids").astype(str)
+    for column, gene, unshared in (
+        ("RNA_percentMito", "MT-A", "MT-B"),
+        ("RNA_percentRibo", "RPS1", "RPS2"),
+    ):
+        found = pd.Series(
+            np.asarray(store.cells.fetch_all(column), dtype=np.float64), index=ids
+        )
+        for name, values in counts.items():
+            genes = np.asarray(features[name])
+            own = sources[name]
+            index = [
+                f"{name}__{cell}" for cell in own.cells.fetch_all("ids").astype(str)
+            ]
+            expected = 100 * values[:, genes == gene].sum(axis=1) / values.sum(axis=1)
+            np.testing.assert_allclose(found.loc[index], expected, rtol=1e-12)
+            prepared = np.asarray(own.cells.fetch_all(column), dtype=np.float64)
+            if unshared in genes:
+                assert not np.allclose(prepared, expected)
+            else:
+                np.testing.assert_allclose(found.loc[index], prepared, rtol=1e-12)
+
+    # Another open with the pattern finds the genes that the column records,
+    # without warning again, and once the record is dropped, the pattern
+    # matches other genes.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        DataStore(
+            str(tmp_path / "merged.zarr"),
+            default_assay="RNA",
+            min_features_per_cell=0,
+            nthreads=1,
+            mito_pattern="^MT-",
+        )
+    assert _left_out(caught) == []
+    # A column prepared before percentages left genes out records the
+    # fingerprint of every matching gene, so the pattern refuses it, with
+    # the advice to merge the sources again.
+    column = zarr.open_array(store.zw.store, mode="r+", path="cellData/RNA_percentMito")
+    prepared_fingerprint = column.attrs["feature_selection_fingerprint"]
+    column.attrs["feature_selection_fingerprint"] = "0" * 64
+    with pytest.raises(ValueError) as refused:
+        DataStore(
+            str(tmp_path / "merged.zarr"),
+            default_assay="RNA",
+            min_features_per_cell=0,
+            nthreads=1,
+            mito_pattern="^MT-",
+        )
+    assert str(refused.value).endswith(
+        "separate quality-metric artifact, or merge the sources again to prepare "
+        "the column over the genes that every source measured."
+    )
+    column.attrs["feature_selection_fingerprint"] = prepared_fingerprint
+    store.RNA.feats.drop("measured_in_left")
+    store.RNA.feats.drop("measured_in_right")
+    with pytest.raises(ValueError) as refused:
+        DataStore(
+            str(tmp_path / "merged.zarr"),
+            default_assay="RNA",
+            min_features_per_cell=0,
+            nthreads=1,
+            mito_pattern="^MT-",
+        )
+    assert str(refused.value).startswith("Cannot apply pattern '^MT-' to existing")
+    assert str(refused.value).endswith("separate quality-metric artifact.")
+
+    # A pattern none of whose genes every source measured leaves no column,
+    # and cell filtering, which would filter on it, says so.
+    messages: list[str] = []
+    sink = logger.add(
+        lambda message: messages.append(message.record["message"]), level="WARNING"
+    )
+    try:
+        with pytest.warns(UserWarning) as caught:
+            unprepared = DataStore(
+                str(tmp_path / "unprepared.zarr"),
+                default_assay="RNA",
+                min_features_per_cell=0,
+                nthreads=1,
+                mito_pattern="^MT-B",
+            )
+    finally:
+        logger.remove(sink)
+    assert not any("No matches found" in message for message in messages)
+    assert [str(warning.message) for warning in caught] == [
+        "RNA_percentMito is unavailable: no gene that matches pattern ^MT-B was "
+        "measured by every source of the cells. Source 'right' lacks 1: 'MT-B'. "
+        "Filter each source's cells on qc.feature_percentage of those genes "
+        "instead.",
+        "RNA_percentRibo leaves out 1 gene that some source of the cells did not "
+        f"measure, {lacks} lacks 1: 'RPS2'.",
+    ]
+    assert "RNA_percentMito" not in unprepared.cells.columns
+    assert "RNA_percentRibo" in unprepared.cells.columns
+    unavailable = (
+        "leaves out RNA_percentMito, which preparation left unavailable: no gene "
+        "that matches pattern ^MT-B was measured by every source of the cells. "
+        "Filter each source's cells on qc.feature_percentage of those genes instead."
+    )
+    with pytest.warns(UserWarning) as caught:
+        columns = default_filter_columns(unprepared, "RNA", RNA_FILTER_SUFFIXES)
+    assert [str(warning.message) for warning in caught] == [
+        f"Cell filtering {unavailable}"
+    ]
+    assert columns == ("RNA_nCounts", "RNA_nFeatures", "RNA_percentRibo")
+    with pytest.warns(UserWarning) as caught:
+        filtered = unprepared.qc.auto_filter(
+            cell_selection=unprepared.snapshot_cell_selection("I")
+        )
+    assert f"qc.auto_filter {unavailable}" in [
+        str(warning.message) for warning in caught
+    ]
+    assert "RNA_percentMito" not in str(
+        unprepared.artifacts.inspect(filtered).parameters
+    )
+    # Another open with the pattern leaves the column out again, without a
+    # second warning.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        DataStore(
+            str(tmp_path / "unprepared.zarr"),
+            default_assay="RNA",
+            min_features_per_cell=0,
+            nthreads=1,
+            mito_pattern="^MT-B",
+        )
+    assert [str(warning.message) for warning in caught] == []
+    # A store whose patterns match no gene filters without such a warning.
+    write_count_store(
+        str(tmp_path / "plain.zarr"),
+        {"RNA": rng.poisson(3, (20, 10))},
+        "uint32",
+        feature_ids={"RNA": [f"G{index}" for index in range(10)]},
+    )
+    plain = stores.open("plain")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        columns = default_filter_columns(plain, "RNA", RNA_FILTER_SUFFIXES)
+    assert [str(warning.message) for warning in caught] == []
+    assert columns == ("RNA_nCounts", "RNA_nFeatures")
+
+
+def test_readers_of_the_record_read_it_over_the_cells_that_their_assay_measured(
+    tmp_path,
+) -> None:
+    """A source of antibodies alone holds neither RNA nor ATAC, so the records of those assays name the other two sources only.
+
+    Preparation and melding read the records over the cells that their assay
+    measured, and a trajectory analysis of RNA features over every cell
+    refuses the cells that RNA did not measure.
+    """
+    rng = np.random.default_rng(6)
+    genes = [*(f"G{index}" for index in range(30)), "MT-A"]
+    sources = {
+        "left": {
+            "RNA": (rng.poisson(3, (40, 32)), [*genes, "MT-B"]),
+            "ATAC": (rng.binomial(1, 0.3, (40, 80)), _PEAKS_LEFT_ONLY + _PEAKS_SHARED),
+            "ADT": (rng.poisson(5, (40, 2)), ["CD3", "CD4"]),
+        },
+        "right": {
+            "RNA": (rng.poisson(3, (40, 31)), genes),
+            "ATAC": (rng.binomial(1, 0.3, (40, 60)), _PEAKS_SHARED),
+            "ADT": (rng.poisson(5, (40, 2)), ["CD3", "CD4"]),
+        },
+        "adtonly": {"ADT": (rng.poisson(5, (20, 2)), ["CD3", "CD4"])},
+    }
+    for name, assays in sources.items():
+        write_count_store(
+            str(tmp_path / f"{name}.zarr"),
+            {assay: values for assay, (values, _ids) in assays.items()},
+            "uint32",
+            feature_ids={assay: ids for assay, (_values, ids) in assays.items()},
+        )
+    DataStoreMerge(
+        [
+            DataStore(
+                str(tmp_path / f"{name}.zarr"),
+                default_assay="ADT" if name == "adtonly" else "RNA",
+                min_features_per_cell=0,
+                nthreads=1,
+            )
+            for name in sources
+        ],
+        str(tmp_path / "merged.zarr"),
+        list(sources),
+        nthreads=1,
+    ).dump()
+    with pytest.warns(UserWarning) as caught:
+        store = _MergedSources(tmp_path, "RNA").open()
+    assert _left_out(caught) == [
+        "RNA_percentMito leaves out 1 gene that some source of the cells did not "
+        "measure, since their zero counts in its cells are not measurements. "
+        "Source 'right' lacks 1: 'MT-B'."
+    ]
+    ids = store.cells.fetch_all("ids").astype(str)
+    antibodies_only = np.char.startswith(ids, "adtonly__")
+    percentages = np.asarray(store.cells.fetch_all("RNA_percentMito"), dtype=float)
+    assert np.isnan(percentages[antibodies_only]).all()
+    assert not np.isnan(percentages[~antibodies_only]).any()
+
+    # Melding reads the ATAC record over the cells that ATAC measured.
+    with pytest.warns(UserWarning, match="add_melded_assay leaves out 6 peaks"):
+        store.add_melded_assay(
+            from_assay="ATAC",
+            external_bed_fn=_melded_bed(
+                tmp_path / "genes.bed",
+                [("chr1", 0, 5000, "GA"), ("chr2", 0, 6000, "GC")],
+            ),
+            assay_label="GENES",
+        )
+    melded = _assay_frame(store, "GENES")
+    assert not melded.loc[ids[antibodies_only]].to_numpy().any()
+    assert melded.loc[ids[~antibodies_only], "GA"].any()
+
+    # A pseudotime of every cell, on the antibodies, which every source
+    # measured: an analysis of its RNA features refuses the cells of the
+    # source without RNA, as on a store without a record. Those cells have
+    # no RNA features, so the first open left them out of "I".
+    store.cells.insert("every", by_cell_id(store.cells, np.ones(len(ids), bool)))
+    cells = store.snapshot_cell_selection("every")
+    number = np.arange(len(ids))
+    coordinates = pd.DataFrame(
+        {"t": number / len(ids), "y": 0.0001 * (number % 7)}, index=ids
+    )
+    stage = np.where(number < 10, "start", np.where(number >= 90, "end", "middle"))
+    store.cells.insert("stage", by_cell_id(store.cells, stage))
+    imported = store.reduction.import_coordinates(
+        coordinates, cell_selection=cells, name="process", from_assay="ADT"
+    )
+    graph = store.graph.connectivity(
+        store.graph.neighbors(
+            store.graph.ann_index(imported), coordinates=imported, k=10
+        )
+    )
+    pseudotime = store.trajectory.pseudotime(
+        graph,
+        source_sink=store.snapshot_cluster_labels("stage", cell_selection=cells),
+        sources=["start"],
+        sinks=["end"],
+    )
+    universe = store.features.universe(from_assay="RNA")
+
+    def selections() -> int:
+        return len(
+            list_artifacts(
+                store.zw, scope="assay", assay="RNA", kind="feature_selection"
+            )
+        )
+
+    saved = selections()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pytest.raises(UnmeasuredCellsError):
+            store.trajectory.markers(pseudotime, features=universe)
+    # The refusal comes first, so nothing is left out or saved.
+    assert _left_out(caught) == []
+    assert selections() == saved
+
+
+def _potency_network(tmp_path: Path, monkeypatch: Any, genes: list[str]) -> Path:
+    """Record a network of ``genes`` as the human network: a ring, with a chord from every third gene to the seventh after it."""
+    import hashlib
+    import json
+
+    from cytearc import datasets
+    from cytearc.datastore._operations import trajectory as trajectory_operations
+    from tests.test_potency import write_network
+
+    n = len(genes)
+    pairs = {tuple(sorted((index, (index + 1) % n))) for index in range(n)} | {
+        tuple(sorted((index, (index + 7) % n))) for index in range(0, n, 3)
+    }
+    path = write_network(
+        tmp_path / "human_9606.npz",
+        [f"ENSG{index:011d}" for index in range(n)],
+        genes,
+        np.array(sorted(pairs)).T,
+        json.dumps({"source": "synthetic"}),
+    )
+    data = path.read_bytes()
+    monkeypatch.setattr(
+        datasets,
+        "STRING_NETWORKS",
+        {
+            "human": datasets.NetworkFile(
+                species="human",
+                taxid=9606,
+                string_version="12.5",
+                name="human_9606.npz",
+                size=len(data),
+                sha256=hashlib.sha256(data).hexdigest(),
+            )
+        },
+    )
+    monkeypatch.setattr(trajectory_operations, "_MIN_NETWORK_GENES", 20)
+    return path
+
+
+def test_potency_leaves_out_genes_that_a_source_of_their_cells_did_not_measure(
+    rna_sources, tmp_path, monkeypatch
+) -> None:
+    from cytearc import datasets
+
+    # A network of 60 shared genes and 20 of the left source's own.
+    path = _potency_network(
+        tmp_path, monkeypatch, [*_RNA_SHARED[:60], *_RNA_LEFT_ONLY[:20]]
+    )
+
+    def scores(
+        opened: DataStore, cells: ArtifactRef, prefix: str = ""
+    ) -> tuple[ArtifactRef, Any, pd.DataFrame]:
+        ref = opened.scores.potency(cells, species="human", network=path)
+        result = opened.scores.load_potency(ref)
+        ids = opened.cells.fetch_all("ids").astype(str)[_rows_of(opened, cells)]
+        frame = pd.DataFrame(
+            {
+                name: getattr(result, name)
+                for name in ("ccat", "signaling_entropy", "potency")
+            },
+            index=[f"{prefix}{cell}" for cell in ids],
+        )
+        return ref, result, frame
+
+    store = rna_sources.open()
+    names = store.RNA.feats.fetch_all("names").astype(str)
+    with pytest.warns(UserWarning) as caught:
+        ref, result, found = scores(store, store.snapshot_cell_selection("I"))
+    assert _left_out(caught) == [
+        "scores.potency leaves out 40 genes that some source of the selected cells "
+        "did not measure, since their zero counts in its cells are not "
+        f"measurements. {_RNA_LACK}"
+    ]
+    assert store.artifacts.inspect(ref).parameters[
+        "measured_features_fingerprint"
+    ] == fingerprint_array(np.isin(names, _RNA_SHARED))
+    # The network matches the shared genes alone, and each cell's total is
+    # its total over them, as in the intersection merge, a store of the
+    # shared genes alone.
+    intersection = rna_sources.open("intersection")
+    _, expected_result, expected = scores(
+        intersection, intersection.snapshot_cell_selection("I")
+    )
+    assert result.genes_used == expected_result.genes_used == 60
+    assert result.genes_matched == expected_result.genes_matched == 60
+    assert result.edges_used == expected_result.edges_used
+    pd.testing.assert_frame_equal(found.loc[expected.index], expected, rtol=1e-10)
+
+    # Each source's cells score as the source's own store scores them: the
+    # left source measured its own genes, which its scores read.
+    for source, warned in (("right", 1), ("left", 0)):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            ref, result, found = scores(
+                store, store.snapshot_cell_selection(f"{source}_cells")
+            )
+        assert len(_left_out(caught)) == warned
+        own = rna_sources.open(source)
+        _, own_result, expected = scores(
+            own, own.snapshot_cell_selection("I"), prefix=f"{source}__"
+        )
+        assert result.genes_used == own_result.genes_used
+        pd.testing.assert_frame_equal(found.loc[expected.index], expected, rtol=1e-10)
+    assert result.genes_used == 80
+    assert "measured_features_fingerprint" not in (
+        store.artifacts.inspect(ref).parameters
+    )
+
+    # A network that only the genes of the left source keep large enough is
+    # refused over every cell, naming them, and scores the left source's cells.
+    from cytearc.datastore._operations import trajectory as trajectory_operations
+
+    monkeypatch.setattr(trajectory_operations, "_MIN_NETWORK_GENES", 70)
+    with pytest.warns(UserWarning, match="scores.potency leaves out 40 genes"):
+        with pytest.raises(ValueError) as refused:
+            store.scores.potency(
+                store.snapshot_cell_selection("I"),
+                species="human",
+                network=path,
+                invalidate_cache=True,
+            )
+    assert str(refused.value) == (
+        f"Only 60 genes of the {datasets.STRING_NETWORKS['human'].label} match the "
+        "features of assay 'RNA' that every source of the selected cells measured, "
+        "and potency scoring needs at least 70: the scores left out 20 genes of the "
+        "network that some source did not measure, 'L0', 'L1', 'L2', 'L3', 'L4' "
+        "and 15 more. Score the cells of the sources that measured them."
+    )
+    store.scores.potency(
+        store.snapshot_cell_selection("left_cells"),
+        species="human",
+        network=path,
+        invalidate_cache=True,
+    )
+    # A network too small with every gene is refused as on any store.
+    monkeypatch.setattr(trajectory_operations, "_MIN_NETWORK_GENES", 90)
+    with pytest.warns(UserWarning, match="scores.potency leaves out 40 genes"):
+        with pytest.raises(ValueError, match="^Only 60 genes .* Score an assay that"):
+            store.scores.potency(
+                store.snapshot_cell_selection("I"),
+                species="human",
+                network=path,
+                invalidate_cache=True,
+            )
+    monkeypatch.setattr(trajectory_operations, "_MIN_NETWORK_GENES", 20)
+
+    # A recorded fingerprint that is not one is refused when the scores load.
+    copied = rna_sources.copy(tmp_path / "malformed")
+    with pytest.warns(UserWarning, match="scores.potency leaves out 40 genes"):
+        ref, _, _ = scores(copied, copied.snapshot_cell_selection("I"))
+    group = zarr.open_group(copied.zw.store, mode="r+", path=artifact_path(ref))
+    provenance = dict(group.attrs["provenance"])
+    provenance["parameters"] = {
+        **provenance["parameters"],
+        "measured_features_fingerprint": "not a fingerprint",
+    }
+    group.attrs["provenance"] = provenance
+    with pytest.raises(ValueError, match="measured_features_fingerprint is malformed"):
+        copied.scores.load_potency(ref)
+
+
+def _melded_bed(path: Path, genes: list[tuple[str, int, int, str]]) -> str:
+    """Write a BED file of ``(chromosome, start, end, ID)`` genes, each named by its ID."""
+    pd.DataFrame([(*gene, gene[3]) for gene in genes]).to_csv(
+        path, sep="\t", header=False, index=False
+    )
+    return str(path)
+
+
+def test_melded_assays_leave_out_peaks_that_a_source_of_their_cells_did_not_call(
+    atac_sources, tmp_path, monkeypatch
+) -> None:
+    from cytearc.assay import hvg_statistics
+
+    # Each pass that sums counts of some peaks for each cell's total.
+    passes: list[int] = []
+    sum_counts = hvg_statistics.cell_totals_over_features
+
+    def counted(*args: Any, **kwargs: Any) -> np.ndarray:
+        passes.append(1)
+        return sum_counts(*args, **kwargs)
+
+    monkeypatch.setattr(hvg_statistics, "cell_totals_over_features", counted)
+    # Genes over shared peaks 0-4, 10-19 and 30-35, and one over six of the
+    # left source's own peaks.
+    bed = _melded_bed(
+        tmp_path / "genes.bed",
+        [
+            ("chr1", 0, 5000, "GA"),
+            ("chr1", 10000, 20000, "GB"),
+            ("chr2", 0, 6000, "GC"),
+            ("chr1", 30000, 36000, "GD"),
+        ],
+    )
+
+    def melded(
+        opened: DataStore,
+        cell_key: str = "I",
+        prefix: str = "",
+        label: str = "GENES",
+        genes: str = bed,
+        **options: Any,
+    ) -> Any:
+        opened.add_melded_assay(
+            from_assay="ATAC",
+            external_bed_fn=genes,
+            assay_label=label,
+            cell_key=cell_key,
+            **options,
+        )
+        return _assay_frame(opened, label, prefix)
+
+    store = atac_sources.copy(tmp_path / "merged")
+    with pytest.warns(UserWarning) as caught:
+        found = melded(store)
+    # Rescaled scores divide out each cell's term-frequency denominator, so
+    # they read no totals.
+    assert passes == []
+    assert _left_out(caught) == [
+        "add_melded_assay leaves out 6 peaks that some source of the cells did not "
+        "measure, since their zero counts in its cells are not measurements. Source "
+        "'right' lacks 6: 'chr2:0-500', 'chr2:1000-1500', 'chr2:2000-2500', "
+        "'chr2:3000-3500', 'chr2:4000-4500' and 1 more."
+    ]
+    peaks = store.ATAC.feats.fetch_all("ids").astype(str)
+    assert store.GENES.z.attrs["measuredFeaturesFingerprint"] == fingerprint_array(
+        np.isin(peaks, _PEAKS_SHARED)
+    )
+    # Every cell scores as in the intersection merge, a store of the shared
+    # peaks alone: the left source's own peaks add to no gene, and its
+    # cells' term frequencies divide by their totals over the shared peaks.
+    intersection = atac_sources.copy(tmp_path / "intersection", "intersection")
+    expected = melded(intersection)
+    assert "measuredFeaturesFingerprint" not in intersection.GENES.z.attrs
+    assert not expected["GC"].any() and expected[["GA", "GB", "GD"]].any().all()
+    pd.testing.assert_frame_equal(found.loc[expected.index], expected, rtol=1e-10)
+    # Scores left unscaled keep each cell's term frequencies, which divide by
+    # its total over the shared peaks.
+    with pytest.warns(UserWarning, match="add_melded_assay leaves out 6 peaks"):
+        found = melded(store, label="UNSCALED", renormalization=False)
+    assert passes == [1]
+    expected = melded(intersection, label="UNSCALED", renormalization=False)
+    pd.testing.assert_frame_equal(found.loc[expected.index], expected, rtol=1e-10)
+    # Genes over shared peaks alone leave out no peak, so rescaled scores
+    # record nothing, while unscaled ones still divide by each cell's total
+    # over the shared peaks, and record them.
+    shared_bed = _melded_bed(
+        tmp_path / "shared.bed",
+        [("chr1", 0, 5000, "GA"), ("chr1", 10000, 20000, "GB")],
+    )
+    for label, options, records in (
+        ("SHARED", {}, False),
+        ("SHARED_UNSCALED", {"renormalization": False}, True),
+    ):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            found = melded(store, label=label, genes=shared_bed, **options)
+        assert _left_out(caught) == []
+        assert (
+            "measuredFeaturesFingerprint" in store._get_assay(label).z.attrs
+        ) is records
+        expected = melded(intersection, label=label, genes=shared_bed, **options)
+        pd.testing.assert_frame_equal(found.loc[expected.index], expected, rtol=1e-10)
+
+    # The left source's cells, which the document frequencies are learned
+    # over, measured every peak, but the right source's cells, which the
+    # assay also scores, did not, so the left source's own peaks are left
+    # out, as in the intersection merge over the same cells.
+    with pytest.warns(UserWarning, match="add_melded_assay leaves out 6 peaks"):
+        found = melded(store, cell_key="left_cells", label="LEFT_IDF")
+    expected = melded(intersection, cell_key="left_cells", label="LEFT_IDF")
+    pd.testing.assert_frame_equal(found.loc[expected.index], expected, rtol=1e-10)
+
+    # The right source's cells, which the document frequencies are learned
+    # over, score as the right source's own store scores them.
+    store = atac_sources.copy(tmp_path / "right_cells")
+    with pytest.warns(UserWarning, match="add_melded_assay leaves out 6 peaks"):
+        found = melded(store, cell_key="right_cells")
+    own = atac_sources.copy(tmp_path / "right", "right")
+    expected = melded(own, prefix="right__")
+    pd.testing.assert_frame_equal(found.loc[expected.index], expected, rtol=1e-10)
+
+    # Genes over the left source's own peaks alone keep no peak.
+    store = atac_sources.copy(tmp_path / "refused")
+    with pytest.raises(ValueError) as refused:
+        store.add_melded_assay(
+            from_assay="ATAC",
+            external_bed_fn=_melded_bed(
+                tmp_path / "left.bed", [("chr2", 0, 6000, "GC")]
+            ),
+            assay_label="GENES",
+        )
+    assert str(refused.value) == (
+        "add_melded_assay would leave out every selected peak, since none was "
+        "measured by every source of the cells. Source 'right' lacks 6: "
+        "'chr2:0-500', 'chr2:1000-1500', 'chr2:2000-2500', 'chr2:3000-3500', "
+        "'chr2:4000-4500' and 1 more. Meld features that peaks of every source "
+        "overlap."
+    )
+    assert "GENES" not in store.assay_names
+
+
+def _trajectory_maps(store: DataStore) -> tuple[ArtifactRef, ArtifactRef]:
+    """Return a pseudotime and a fate map of every cell, on a graph of coordinates that each cell's ID gives.
+
+    A cell's place ``t`` along the process and its branch come from the
+    number in its ID, so stores of the same cells build the same graph:
+    cells start at ``t < 0.1`` and end at ``t > 0.9`` in one of two
+    branches, which part after ``t = 0.5``.
+    """
+    ids = store.cells.fetch_all("ids").astype(str)
+    number = np.array([int(cell.rpartition("cell")[2]) for cell in ids])
+    left = np.char.startswith(ids, "left__")
+    place = ((number * 37 + 11 * left) % 200 + 0.5) / 200
+    branch = (number + left) % 2
+    coordinates = pd.DataFrame(
+        {
+            "t": place,
+            "y": (2 * branch - 1) * 2 * np.maximum(place - 0.5, 0) + 0.001 * number,
+        },
+        index=ids,
+    )
+    stage = np.where(
+        place < 0.1,
+        "start",
+        np.where(place > 0.9, np.where(branch == 0, "end_a", "end_b"), "middle"),
+    )
+    store.cells.insert("stage", by_cell_id(store.cells, stage), overwrite=True)
+    cells = store.snapshot_cell_selection("I")
+    labels = store.snapshot_cluster_labels("stage", cell_selection=cells)
+    imported = store.reduction.import_coordinates(
+        coordinates, cell_selection=cells, name="process"
+    )
+    graph = store.graph.connectivity(
+        store.graph.neighbors(
+            store.graph.ann_index(imported), coordinates=imported, k=10
+        )
+    )
+    pseudotime = store.trajectory.pseudotime(
+        graph, source_sink=labels, sources=["start"], sinks=["end_a", "end_b"]
+    )
+    fate = store.trajectory.fate(pseudotime, labels, sinks=["end_a", "end_b"])
+    return pseudotime, fate
+
+
+def _trajectory_results(
+    store: DataStore, pseudotime: ArtifactRef, fate: ArtifactRef, **options: Any
+) -> dict[str, Any]:
+    """Run each trajectory analysis of features over every gene, each cell normalized by its total over them."""
+    features = store.features.universe(from_assay="RNA")
+    trajectory = store.trajectory
+    options = {"renormalize_subset": True, **options}
+    return {
+        "markers": trajectory.load_markers(
+            trajectory.markers(pseudotime, features=features, **options)
+        ),
+        "aggregation": trajectory.load_aggregation(
+            trajectory.aggregation(
+                pseudotime, features=features, **_AGGREGATION, **options
+            )
+        ),
+        "lineage_markers": trajectory.load_lineage_markers(
+            trajectory.lineage_markers(fate, features=features, **options)
+        ),
+        "lineage_aggregation": trajectory.load_lineage_aggregation(
+            trajectory.lineage_aggregation(
+                fate, features=features, n_bins=8, n_clusters=3, **options
+            )
+        ),
+        "drivers": trajectory.load_drivers(
+            trajectory.drivers(fate, features=features, **options)
+        ),
+    }
+
+
+def _by_feature(store: DataStore, name: str, result: Any) -> Any:
+    """Return a trajectory result's values by feature name, for comparison across stores."""
+    names = store.RNA.feats.fetch_all("names").astype(str)
+    if name.endswith("aggregation"):
+        indices = np.asarray(result.feature_indices)
+        return pd.Series(
+            np.asarray(result.feature_clusters), index=names[indices]
+        ).sort_index()
+    table = result.table.copy()
+    keys = [column for column in ("lineage", "feature_name") if column in table]
+    return table.sort_values(keys).reset_index(drop=True)
+
+
+def test_trajectory_analyses_leave_out_features_that_a_source_of_their_cells_did_not_measure(
+    rna_sources, tmp_path
+) -> None:
+    store = rna_sources.copy(tmp_path / "merged")
+    intersection = rna_sources.copy(tmp_path / "intersection", "intersection")
+    maps = {opened: _trajectory_maps(opened) for opened in (store, intersection)}
+    # Both merges hold the same cells in the same order, so they build the
+    # same pseudotime.
+    np.testing.assert_array_equal(
+        store.cells.fetch_all("ids"), intersection.cells.fetch_all("ids")
+    )
+    np.testing.assert_array_equal(
+        store.trajectory.load_pseudotime(maps[store][0]).values,
+        intersection.trajectory.load_pseudotime(maps[intersection][0]).values,
+    )
+    with pytest.warns(UserWarning) as caught:
+        found = _trajectory_results(store, *maps[store])
+    assert _left_out(caught) == [
+        f"trajectory.{name} leaves out 40 features that some source of the selected "
+        "cells did not measure, since their zero counts in its cells are not "
+        f"measurements. {_RNA_LACK}"
+        for name in (
+            "markers",
+            "aggregation",
+            "lineage_markers",
+            "lineage_aggregation",
+            "drivers",
+        )
+    ]
+    # Each result records the shared genes as its input and gives what the
+    # intersection merge, a store of them alone, gives.
+    expected = _trajectory_results(intersection, *maps[intersection])
+    for name, result in found.items():
+        assert _selected_names(store, result.feature_selection) == _RNA_SHARED, name
+        found_values = _by_feature(store, name, result)
+        expected_values = _by_feature(intersection, name, expected[name])
+        if isinstance(found_values, pd.Series):
+            pd.testing.assert_series_equal(found_values, expected_values)
+        else:
+            pd.testing.assert_frame_equal(
+                found_values.drop(columns="feature_index", errors="ignore"),
+                expected_values.drop(columns="feature_index", errors="ignore"),
+                rtol=1e-9,
+                check_dtype=False,
+            )
+
+    # Drivers read their own cells: those of the left source measured every
+    # gene, which they keep, while those of the right source leave out the
+    # left source's own genes, as an explicit selection of the shared genes
+    # does.
+    fate = maps[store][1]
+    universe = store.features.universe(from_assay="RNA")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        left = store.trajectory.load_drivers(
+            store.trajectory.drivers(
+                fate,
+                features=universe,
+                cells=store.snapshot_cell_selection("left_cells"),
+            )
+        )
+    assert _left_out(caught) == []
+    assert left.feature_selection == universe
+    with pytest.warns(UserWarning, match="trajectory.drivers leaves out 40 features"):
+        right = store.trajectory.load_drivers(
+            store.trajectory.drivers(
+                fate,
+                features=universe,
+                cells=store.snapshot_cell_selection("right_cells"),
+            )
+        )
+    shared = store.features.snapshot(
+        from_assay="RNA", feature_indexes=_feature_indexes(store, "RNA", _RNA_SHARED)
+    )
+    assert right.feature_selection == shared
+    explicit = store.trajectory.load_drivers(
+        store.trajectory.drivers(
+            fate,
+            features=shared,
+            cells=store.snapshot_cell_selection("right_cells"),
+            invalidate_cache=True,
+        )
+    )
+    pd.testing.assert_frame_equal(right.table, explicit.table)
+
+    # Features of the left source alone keep no feature.
+    with pytest.raises(ValueError) as refused:
+        store.trajectory.markers(
+            maps[store][0],
+            features=store.features.snapshot(
+                from_assay="RNA",
+                feature_indexes=_feature_indexes(store, "RNA", _RNA_LEFT_ONLY[:3]),
+            ),
+        )
+    assert str(refused.value) == (
+        "trajectory.markers would leave out every selected feature, since none was "
+        "measured by every source of the selected cells. Source 'right' lacks 3: "
+        "'L0', 'L1', 'L2'. Analyze the cells of the sources that measured them, or "
+        "features that every source measured."
+    )
+
+
 @pytest.mark.slow
 def test_results_record_the_measured_features_only_when_the_record_changes_them(
-    rna_sources, atac_sources, query_sources, measured, tmp_path
+    rna_sources, atac_sources, query_sources, measured, tmp_path, monkeypatch
 ) -> None:
     """A result over cells whose sources measured every feature keeps its identity.
 
@@ -5092,6 +5887,9 @@ def test_results_record_the_measured_features_only_when_the_record_changes_them(
     rna = rna_sources.copy(tmp_path / "rna")
     atac = atac_sources.copy(tmp_path / "atac")
     query = query_sources.copy(tmp_path / "query")
+    network = _potency_network(
+        tmp_path, monkeypatch, [*_RNA_SHARED[:60], *_RNA_LEFT_ONLY[:20]]
+    )
 
     def shared_genes(store: DataStore) -> ArtifactRef:
         return store.features.snapshot(
@@ -5145,6 +5943,11 @@ def test_results_record_the_measured_features_only_when_the_record_changes_them(
             query,
             "RNA",
             lambda cells: query.mapping.run(measured.reference, cells),
+        ),
+        "potency": (
+            rna,
+            "RNA",
+            lambda cells: rna.scores.potency(cells, species="human", network=network),
         ),
     }
     # The cells of the source that measured every feature, and of both.
@@ -5319,3 +6122,29 @@ def test_stores_without_a_record_take_no_other_totals_and_keep_their_parameters(
     rna.RNA.feats.insert("module", np.where(np.isin(names, _RNA_SHARED[:5]), 1, -1))
     rna.add_grouped_assay("module", assay_label="MODULES")
     assert "grouped_measured_features_fingerprint" not in rna.MODULES.z.attrs
+
+    # Potency scores, melded assays and the trajectory analyses of features
+    # record what they recorded before, and read every feature.
+    path = _potency_network(
+        tmp_path, monkeypatch, [*_RNA_SHARED[:60], *_RNA_LEFT_ONLY[:20]]
+    )
+    potency = rna.artifacts.inspect(
+        rna.scores.potency(cells[rna], species="human", network=path)
+    )
+    assert (set(potency.parameters), set(potency.inputs)) == (
+        {"measure", "species", "string_network"},
+        {"cell_selection"},
+    )
+    atac.add_melded_assay(
+        from_assay="ATAC",
+        external_bed_fn=_melded_bed(tmp_path / "genes.bed", [("chr1", 0, 20000, "GA")]),
+        assay_label="GENES",
+    )
+    assert "measuredFeaturesFingerprint" not in atac.GENES.z.attrs
+    pseudotime, fate = _trajectory_maps(rna)
+    universe = rna.features.universe(from_assay="RNA")
+    for ref in (
+        rna.trajectory.markers(pseudotime, features=universe),
+        rna.trajectory.drivers(fate, features=universe),
+    ):
+        assert rna.artifacts.inspect(ref).input_ref("feature_selection") == universe

@@ -1,5 +1,5 @@
 import threading
-from collections.abc import Callable, Generator, Iterator, Sequence
+from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Sequence
 from typing import Any, cast
 
 import numpy as np
@@ -9,6 +9,13 @@ from scipy.sparse import csr_matrix, vstack
 
 from ..matrix import ChunkedArray
 from ..metadata import MetaData
+from ..metadata.membership import (
+    CellsMeasuredFeatures,
+    cells_measured_features,
+    measured_features_by_source,
+    measured_rows,
+    warn_left_out,
+)
 from ..metadata.rows import read_metadata_rows_chunkwise
 from ..storage.artifacts import provenance_hash
 from ..storage.budget import ResourceBudget, resolve_budget
@@ -23,6 +30,7 @@ from ..utils.arguments import RANDOM_STATE_MAX, bool_argument, integer_argument
 from ..utils.arrays import array_digest, regex_match_mask
 from ..utils.compute import controlled_compute
 from ..utils.logging import logger
+from ..utils.warnings import warn
 from .normalization import (
     PearsonResidualNormalizer,
     require_counts_for,
@@ -483,8 +491,12 @@ class Assay:
                 self.matrixGroup,
                 require_transpose=self.requiresCountsT,
             )
+            measured = self._percent_sources(percent_patterns)
             for name, pattern in percent_patterns.items():
-                if pattern and self._plan_percent_feature(pattern, name) is not None:
+                if (
+                    pattern
+                    and self._plan_percent_feature(pattern, name, measured) is not None
+                ):
                     raise ValueError(
                         f"Percentage {name!r} was not computed when assay "
                         f"{self.name!r} was first prepared, and a prepared assay "
@@ -509,11 +521,17 @@ class Assay:
                 )
             clear_column(cells, name)
         self.attrs["percentFeatures"] = {}
+        measured = self._percent_sources(percent_patterns)
         planned = {
             name: result
             for name, pattern in percent_patterns.items()
             if pattern
-            and (result := self._plan_percent_feature(pattern, name)) is not None
+            and (
+                result := self._plan_percent_feature(
+                    pattern, name, measured, announce=True
+                )
+            )
+            is not None
         }
         n_counts, n_features, n_cells = load_count_summaries(
             self.matrixGroup, as_zarr_array(self.matrixGroup["counts"], name="counts")
@@ -616,14 +634,63 @@ class Assay:
             pass
         return {**found, **totals}
 
+    def _percent_sources(
+        self, patterns: Mapping[str, str | None]
+    ) -> CellsMeasuredFeatures | None:
+        """Read, once for every pattern, which genes every source of the assay's cells measured.
+
+        On a store merged from sources that measured different genes, as its
+        feature columns ``measured_in_<source>`` record, a gene that some
+        source did not measure holds zero counts in that source's cells,
+        which are no measurement, so a percentage leaves it out
+        (:meth:`_plan_percent_feature`). The sources of the cells that the
+        assay measured are read only when some source did not measure a gene
+        that some pattern matches, and nothing is read without a pattern.
+        """
+        # An open without patterns, as a prepared store's usually is, reads
+        # nothing here.
+        if not any(patterns.values()):
+            return None
+        names = self.feats.fetch_all("names")
+        matches = np.zeros(self.feats.N, dtype=bool)
+        for pattern in patterns.values():
+            if pattern:
+                matches |= regex_match_mask(names, pattern)
+
+        def rows() -> np.ndarray:
+            members = measured_rows(self.cells, self.name, np.arange(self.cells.N))
+            return (
+                np.arange(self.cells.N, dtype=np.int64)
+                if members is None
+                else np.flatnonzero(members)
+            )
+
+        return cells_measured_features(
+            self.cells, self.feats, rows, assay=self.name, selected=matches
+        )
+
     def _plan_percent_feature(
         self,
         feat_pattern: str,
         name: str,
+        measured: CellsMeasuredFeatures | None,
+        *,
+        announce: bool = False,
     ) -> tuple[np.ndarray, str] | None:
-        feat_idx = np.flatnonzero(
-            regex_match_mask(self.feats.fetch_all("names"), feat_pattern)
-        )
+        """Return the features of percentage ``name`` and their fingerprint, or None when it needs no computing.
+
+        The features are those whose names match ``feat_pattern`` and that
+        every source of the assay's cells measured, as ``measured``, a reading
+        of :meth:`_percent_sources`, gives them. The column divides by each
+        cell's own total, as ``qc.feature_percentage`` does. ``announce``, as
+        a first preparation passes it, warns about the others, and when it
+        leaves none, records the column in the assay's attribute
+        ``percentFeaturesLeftOut``, which cell filtering warns about.
+        """
+        names = np.asarray(self.feats.fetch_all("names")).astype(str)
+        matches = regex_match_mask(names, feat_pattern)
+        kept = matches if measured is None else matches & measured.measured
+        feat_idx = np.flatnonzero(kept)
         fingerprint = provenance_hash(
             {
                 "pattern": feat_pattern,
@@ -647,15 +714,58 @@ class Assay:
                 "its recorded pattern or matched-feature provenance differs or "
                 "is missing. Omit the pattern to preserve the stored values. "
                 "Use qc.feature_percentage with an explicit feature selection "
-                "to compute a separate quality-metric artifact."
+                "to compute a separate quality-metric artifact"
+                + (
+                    "."
+                    if measured_features_by_source(self.feats) is None
+                    else ", or merge the sources again to prepare the column "
+                    "over the genes that every source measured."
+                )
             )
+        unmeasured = np.flatnonzero(matches & ~kept)
+        if announce and unmeasured.size:
+            assert measured is not None
+            lacking = measured.lacking(unmeasured, names)
+            if feat_idx.size:
+                warn_left_out(name, "gene", "the cells", unmeasured.size, lacking)
+            else:
+                warn(
+                    f"{name} is unavailable: no gene that matches pattern "
+                    f"{feat_pattern} was measured by every source of the cells. "
+                    f"{lacking} Filter each source's cells on qc.feature_percentage "
+                    "of those genes instead."
+                )
+                self.attrs["percentFeaturesLeftOut"] = {
+                    **self._percent_features_left_out(),
+                    name: feat_pattern,
+                }
         if len(feat_idx) == 0:
-            logger.warning(
-                f"No matches found for pattern {feat_pattern}. "
-                f"Percentage feature {name} is unavailable"
-            )
+            if not matches.any():
+                logger.warning(
+                    f"No matches found for pattern {feat_pattern}. "
+                    f"Percentage feature {name} is unavailable"
+                )
             return None
         return feat_idx, fingerprint
+
+    def _percent_features_left_out(self) -> PercentFeatures:
+        """Return the percentage columns that preparation left unavailable, since no gene of their pattern was measured by every source, with their patterns."""
+        left_out = cast(
+            Mapping[str, object], self.attrs.get("percentFeaturesLeftOut", {})
+        )
+        return {str(name): str(pattern) for name, pattern in left_out.items()}
+
+    def _warn_unavailable_percentages(self, names: Iterable[str], step: str) -> None:
+        """Warn that ``step`` leaves out each of ``names`` that preparation left unavailable, since no gene of its pattern was measured by every source."""
+        left_out = self._percent_features_left_out()
+        for name in names:
+            if name in left_out:
+                warn(
+                    f"{step} leaves out {name}, which preparation left unavailable: "
+                    f"no gene that matches pattern {left_out[name]} was measured "
+                    "by every source of the cells. Filter each source's cells on "
+                    "qc.feature_percentage of those genes instead."
+                )
 
     def _write_percent_feature(
         self,

@@ -1,6 +1,6 @@
 import os
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, Self, cast
 
@@ -9,6 +9,7 @@ import pandas as pd
 from scipy.sparse import coo_matrix, csr_matrix
 
 from ...assay import Assay, RNAassay
+from ...assay.hvg_statistics import cell_totals
 from ...assay.normalization import (
     feature_value_blocks,
     reject_unknown_normalization_params,
@@ -36,7 +37,10 @@ from ...metadata.alignment import (
     keyed_values_remedy,
     require_keyed,
 )
-from ...metadata.membership import require_measured_features
+from ...metadata.membership import (
+    leave_out_unmeasured_features,
+    require_measured_features,
+)
 from ...metadata.rows import (
     fingerprint_stored_rows,
     read_array_rows_chunkwise,
@@ -85,6 +89,7 @@ from ...storage.artifacts import (
     artifact_group,
     callable_identity,
     fingerprint_array,
+    is_fingerprint,
     fingerprint_stored_arrays,
     fingerprint_stored_strings,
     inspect_artifact,
@@ -242,6 +247,7 @@ from ...trajectory.potency import (
     MIN_NETWORK_GENES as _MIN_NETWORK_GENES,
     MatchedNetwork,
     match_network as _match_network_impl,
+    network_features as _network_features_impl,
     network_scores as _network_scores_impl,
     read_network as _read_network_impl,
     smooth_on_graph as _smooth_on_graph_impl,
@@ -287,6 +293,7 @@ from ...utils.arguments import (
     bool_argument,
     float_argument,
     integer_argument,
+    quoted_examples,
 )
 from ...utils.arrays import array_digest, sorted_places
 from ...utils.logging import logger
@@ -388,6 +395,35 @@ def _feature_names_at(assay: Assay, feature_indices: np.ndarray) -> np.ndarray:
     return np.asarray(read_array_rows_chunkwise(names, feature_indices)).astype(str)
 
 
+def _measured_features(
+    store: Any,
+    assay: Assay,
+    feature_selection: ArtifactRef,
+    feature_indices: np.ndarray,
+    cell_indices: np.ndarray,
+    analysis: str,
+) -> tuple[ArtifactRef, np.ndarray]:
+    """Return the selected features that every source of the cells measured, as a selection and its feature indices.
+
+    The trajectory analyses of features call it after their membership check,
+    so the cells are cells that the assay measured.
+    """
+    selected = np.zeros(assay.feats.N, dtype=bool)
+    selected[feature_indices] = True
+    narrowed, kept = store._measured_feature_selection(
+        assay,
+        feature_selection,
+        selected,
+        cell_indices,
+        analysis=analysis,
+        remedy=(
+            "Analyze the cells of the sources that measured them, or features "
+            "that every source measured."
+        ),
+    )
+    return narrowed, np.flatnonzero(kept).astype(np.int64, copy=False)
+
+
 def _resolve_feature_indices(
     store: Any,
     assay: Assay,
@@ -460,6 +496,14 @@ class _PseudotimeFeatureCells:
                     self.ordering,
                 )
             )
+        )
+
+    def narrowed(
+        self, feature_selection: ArtifactRef, feature_indices: np.ndarray
+    ) -> "_PseudotimeFeatureCells":
+        """Return these axes over another feature selection, such as the features that every source measured."""
+        return replace(
+            self, feature_selection=feature_selection, feature_indices=feature_indices
         )
 
 
@@ -765,6 +809,9 @@ _POTENCY_ARRAYS: tuple[str, ...] = (
     "signaling_entropy",
     "ccat",
 )
+#: What potency scoring asks of a caller whose cells' sources measured
+#: different genes.
+_POTENCY_SOURCES_REMEDY = "Score the cells of the sources that measured them."
 _POTENCY_INPUTS = frozenset({"cell_selection"})
 _POTENCY_SMOOTHED_INPUTS = frozenset({"cell_selection", "graph"})
 _POTENCY_PARAMETERS = frozenset({"measure", "species", "string_network"})
@@ -4925,6 +4972,15 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         without counts enters at ``log2(1.1)``. Only the network's genes are
         read, in blocks that fit the memory budget.
 
+        On a store merged from sources that measured different genes, as its
+        feature columns ``measured_in_<source>`` record, a gene that some
+        source of the selected cells did not measure holds zero counts in
+        that source's cells, which are no measurement. Such genes are left
+        out, with a warning that names them: the network matches the others
+        alone, and each cell's total is its total over them, as a store of
+        those genes alone holds it. The artifact then records those genes as
+        ``measured_features_fingerprint``.
+
         The network is STRING v12.5's for the species, its links without
         STRING's ``database`` channel at a recombined score of at least 0.700
         (Szklarczyk et al. (2025), Nucleic Acids Research 53:D730-D737,
@@ -5057,6 +5113,18 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 "Potency ranks cells against each other, so cell_selection must "
                 f"hold at least two cells; it holds {n_cells}"
             )
+        # A gene that some source of the cells did not measure leaves the
+        # network and each cell's total.
+        measured = leave_out_unmeasured_features(
+            assay.cells,
+            assay.feats,
+            cell_idx,
+            assay=assay.name,
+            analysis="scores.potency",
+            kind="gene",
+            of_cells="the selected cells",
+            remedy=_POTENCY_SOURCES_REMEDY,
+        )
         arguments = PotencyArguments(
             cell_selection=cell_selection,
             measure=measure,
@@ -5070,6 +5138,9 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             invalidate_cache=invalidate_cache,
             graph=graph,
             smoothing=None if graph is None else smoothing,
+            measured_features_fingerprint=(
+                None if measured is None else fingerprint_array(measured)
+            ),
         )
         record = arguments.to_record()
         planned = plan_cell_data_artifact(
@@ -5095,7 +5166,24 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             if key == "ensembl"
             else np.asarray(assay.feats.fetch_all("names")).astype(str)
         )
-        matched = _match_network_impl(_read_network_impl(path), feature_keys, key)
+        network_genes = _read_network_impl(path)
+        matched = _match_network_impl(
+            network_genes, feature_keys, key, measured=measured
+        )
+        if matched.genes_matched < _MIN_NETWORK_GENES and measured is not None:
+            # The genes that some source lacks may be what cut the network.
+            on_network = _network_features_impl(network_genes, feature_keys, key)
+            left_out = np.flatnonzero(on_network & ~measured)
+            if left_out.size and on_network.sum() >= _MIN_NETWORK_GENES:
+                examples = quoted_examples(feature_keys[left_out].tolist())
+                raise ValueError(
+                    f"Only {matched.genes_matched:,} genes of the {entry.label} "
+                    f"match the features of assay {assay.name!r} that every "
+                    "source of the selected cells measured, and potency scoring "
+                    f"needs at least {_MIN_NETWORK_GENES:,}: the scores left out "
+                    f"{left_out.size:,} genes of the network that some source did "
+                    f"not measure, {examples}. {_POTENCY_SOURCES_REMEDY}"
+                )
         if matched.genes_matched < _MIN_NETWORK_GENES:
             how = "Ensembl gene ID" if key == "ensembl" else "symbol"
             raise ValueError(
@@ -5117,7 +5205,9 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         held = matched.nbytes + 3 * np.dtype(np.float64).itemsize * n_cells
         if graph is not None:
             self._require_potency_smoothing_budget(graph, held_bytes=held)
-        entropy, correlation = self._potency_measures(assay, cell_idx, matched)
+        entropy, correlation = self._potency_measures(
+            assay, cell_idx, matched, measured=measured
+        )
         raw = entropy if measure == "signaling_entropy" else correlation
         if graph is not None:
             raw = self._smoothed_potency(graph, raw, smoothing)
@@ -5141,13 +5231,20 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         return planned.ref
 
     def _potency_measures(
-        self, assay: RNAassay, cell_idx: np.ndarray, matched: MatchedNetwork
+        self,
+        assay: RNAassay,
+        cell_idx: np.ndarray,
+        matched: MatchedNetwork,
+        *,
+        measured: np.ndarray | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Stream the network genes' counts and return each cell's SR and CCAT.
 
-        The scores, the totals and the network are held throughout, beside
-        each thread's two vectors over the network's genes; the counts arrive
-        in blocks that fit what is left of the budget.
+        Each cell's total is its prepared total, or its total over the
+        features of the Boolean mask ``measured``. The scores, the totals and
+        the network are held throughout, beside each thread's two vectors
+        over the network's genes; the counts arrive in blocks that fit what
+        is left of the budget.
         """
         n_cells = len(cell_idx)
         ledger = MemoryLedger(
@@ -5163,7 +5260,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             "each thread's values over the network's genes",
             2 * itemsize * matched.genes_used * max(1, int(self.nthreads)),
         )
-        totals = assay._cell_count_totals(cell_idx)
+        totals = cell_totals(assay, cell_idx, measured, held_bytes=ledger.held_bytes)
         empty = np.flatnonzero(totals <= 0)
         if empty.size:
             raise ValueError(
@@ -5288,11 +5385,17 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             _POTENCY_SMOOTHED_INPUTS if smoothed else _POTENCY_INPUTS,
             "Potency inputs",
         )
+        # Scores of a merged store's cells whose sources measured different
+        # genes record the genes that every source measured.
+        recorded = "measured_features_fingerprint" in parameters
         _require_exact_record_keys(
             parameters,
-            _POTENCY_SMOOTHED_PARAMETERS if smoothed else _POTENCY_PARAMETERS,
+            (_POTENCY_SMOOTHED_PARAMETERS if smoothed else _POTENCY_PARAMETERS)
+            | ({"measured_features_fingerprint"} if recorded else set()),
             "Potency parameters",
         )
+        if recorded and not is_fingerprint(parameters["measured_features_fingerprint"]):
+            raise ValueError("Potency measured_features_fingerprint is malformed")
         selection = parse_artifact_ref(
             inputs.get("cell_selection"), "Potency cell selection input"
         )
@@ -5567,6 +5670,10 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
     ) -> ArtifactRef:
         """Store feature correlations with an explicit pseudotime artifact.
 
+        Features that some source of a merged store's cells did not measure
+        are left out, with a warning, as the DataStore API reference's
+        contracts for stores merged from sources of different features say.
+
         Args:
             pseudotime: Explicit pseudotime artifact defining cells and ordering.
             features: Explicit assay-scoped feature-selection artifact.
@@ -5623,6 +5730,16 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             axes.cell_indices,
             operation="run_pseudotime_marker_search",
             remedy="graph",
+        )
+        axes = axes.narrowed(
+            *_measured_features(
+                self,
+                assay,
+                axes.feature_selection,
+                axes.feature_indices,
+                axes.cell_indices,
+                "trajectory.markers",
+            )
         )
         feature_index = axes.feature_indices
         logger.info(
@@ -5816,6 +5933,10 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
         profiles give the same modules on every platform. The modules are
         numbered from 1 by the median bin of their features' peaks.
 
+        Features that some source of a merged store's cells did not measure
+        are left out, with a warning, as the DataStore API reference's
+        contracts for stores merged from sources of different features say.
+
         Args:
             pseudotime: Explicit pseudotime artifact defining cells and ordering.
             features: Explicit assay-scoped feature-selection artifact.
@@ -5892,6 +6013,22 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             "Pseudotime aggregation",
         )
         axes = self._pseudotime_feature_cells(assay, pseudotime, features)
+        self._require_measured_cells(
+            assay.name,
+            axes.cell_indices,
+            operation="run_pseudotime_aggregation",
+            remedy="graph",
+        )
+        axes = axes.narrowed(
+            *_measured_features(
+                self,
+                assay,
+                axes.feature_selection,
+                axes.feature_indices,
+                axes.cell_indices,
+                "trajectory.aggregation",
+            )
+        )
         if len(axes.feature_indices) < 2:
             raise ValueError("At least two selected features are required")
         if n_neighbors >= len(axes.feature_indices):
@@ -5900,12 +6037,6 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             )
         if n_clusters > len(axes.feature_indices):
             raise ValueError("n_clusters cannot exceed the selected feature count")
-        self._require_measured_cells(
-            assay.name,
-            axes.cell_indices,
-            operation="run_pseudotime_aggregation",
-            remedy="graph",
-        )
         (
             cell_ordering,
             cell_indices,
@@ -6366,6 +6497,10 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
         tested features. They treat cells as independent and are not
         inference across biological replicates.
 
+        Features that some source of a merged store's cells did not measure
+        are left out, with a warning, as the DataStore API reference's
+        contracts for stores merged from sources of different features say.
+
         Args:
             fate: Explicit fate-map artifact. Its pseudotime, or the score
                 that directs it, and its probabilities define the cells, their
@@ -6428,6 +6563,14 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             axes.cell_indices,
             operation="run_lineage_marker_search",
             remedy="graph",
+        )
+        feature_selection, feature_indices = _measured_features(
+            self,
+            assay,
+            feature_selection,
+            feature_indices,
+            axes.cell_indices,
+            "trajectory.lineage_markers",
         )
         n_lineages = len(axes.lineages)
         n_features = assay.feats.N
@@ -6715,6 +6858,10 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
         by which to rank the genes that rise with each fate and compare the
         two.
 
+        Features that some source of a merged store's cells did not measure
+        are left out, with a warning, as the DataStore API reference's
+        contracts for stores merged from sources of different features say.
+
         Args:
             fate: Explicit fate-map artifact.
             features: Explicit assay-scoped feature-selection artifact.
@@ -6791,6 +6938,14 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             driver_indices,
             operation="run_lineage_driver_search",
             remedy="graph",
+        )
+        feature_selection, feature_indices = _measured_features(
+            self,
+            assay,
+            feature_selection,
+            feature_indices,
+            driver_indices,
+            "trajectory.drivers",
         )
         n_lineages = len(axes.lineages)
         n_features = assay.feats.N
@@ -6987,6 +7142,10 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
         profiles across all lineages are grouped into ``n_clusters`` modules,
         as :meth:`aggregation` groups them along one pseudotime.
 
+        Features that some source of a merged store's cells did not measure
+        are left out, with a warning, as the DataStore API reference's
+        contracts for stores merged from sources of different features say.
+
         Args:
             fate: Explicit fate-map artifact.
             features: Explicit assay-scoped feature-selection artifact.
@@ -7068,14 +7227,6 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
         n_neighbors = validated["n_neighbours"]
         n_clusters = validated["n_clusters"]
         nan_cluster_value = validated["nan_cluster_value"]
-        if len(feature_indices) < 2:
-            raise ValueError("At least two selected features are required")
-        if n_neighbors >= len(feature_indices):
-            raise ValueError(
-                "n_neighbors must be smaller than the selected feature count"
-            )
-        if n_clusters > len(feature_indices):
-            raise ValueError("n_clusters cannot exceed the selected feature count")
         check_normalization = _normalization_guard(
             assay, validated, "Lineage aggregation"
         )
@@ -7085,6 +7236,22 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             operation="run_lineage_aggregation",
             remedy="graph",
         )
+        feature_selection, feature_indices = _measured_features(
+            self,
+            assay,
+            feature_selection,
+            feature_indices,
+            axes.cell_indices,
+            "trajectory.lineage_aggregation",
+        )
+        if len(feature_indices) < 2:
+            raise ValueError("At least two selected features are required")
+        if n_neighbors >= len(feature_indices):
+            raise ValueError(
+                "n_neighbors must be smaller than the selected feature count"
+            )
+        if n_clusters > len(feature_indices):
+            raise ValueError("n_clusters cannot exceed the selected feature count")
         n_lineages = len(axes.lineages)
         lineage_totals = axes.weights.sum(axis=0)
         light = np.flatnonzero(lineage_totals < n_bins)

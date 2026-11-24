@@ -241,8 +241,9 @@ _CONTRACTS = (
         },
         model_only={
             # The network file's source, version, name and digest, which the
-            # species and CyteArc's record of the networks give.
-            **_classified("derived", "string_network"),
+            # species and CyteArc's record of the networks give, and the genes
+            # that every source of a merged store's cells measured.
+            **_classified("derived", "string_network", "measured_features_fingerprint"),
         },
     ),
     OperationContract(

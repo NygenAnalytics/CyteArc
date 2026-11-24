@@ -1329,25 +1329,18 @@ def _feature_warnings():
         logger.remove(sink)
 
 
-def _zeros_read_as_counts(first: str, *, adt: bool = False, shared: bool = True) -> str:
+def _zeros_read_as_counts(first: str, *, shared: bool = True) -> str:
     """Return how a composite's warning about unmeasured features ends.
 
-    ``first`` is the first source that holds the assay, ``adt`` whether the
-    assay is of type ADT, which the ADT recipe reads, and ``shared`` whether
-    every source measured some feature.
+    ``first`` is the first source that holds the assay, and ``shared``
+    whether every source measured some feature.
     """
     zeros = (
         " The composite reads zero counts for the features a source lacks; columns "
         f"such as 'measured_in_{first}' record what each source measured, so "
-        + (
-            "analyses leave those zeros out or refuse them, except the pseudotime "
-            "and lineage analyses of features, which still read them as counts."
-            if adt
-            else "analyses leave those zeros out or refuse them, except prepared "
-            "percentage columns, potency scores, add_melded_assay and the "
-            "pseudotime and lineage analyses of features, which still read them "
-            "as counts."
-        )
+        "analyses leave those zeros out or refuse them, except perturbation.efficiency, "
+        "perturbation.signature, perturbation.associations and perturbation.profiles, "
+        "which still read them as counts."
     )
     return zeros + (
         " Pass features='intersection' to keep only the features that every "
@@ -1418,7 +1411,7 @@ def test_union_composite_warns_of_an_antibody_that_one_of_three_panels_lacks(
     assert messages == [
         "Assay 'ADT': 1 of the 3 composite features was not measured by every "
         "source that holds the assay. Source 'p3' lacks 1: 'CD8'."
-        + _zeros_read_as_counts("p1", adt=True)
+        + _zeros_read_as_counts("p1")
     ]
     assert joint.ADT.feats.fetch_all("ids").tolist() == ["CD3", "CD4", "CD8"]
     counts = joint.ADT.matrixGroup["counts"][:]
@@ -1545,7 +1538,7 @@ def test_a_composite_of_a_merged_store_keeps_the_source_of_each_of_its_cells(tmp
         "Assay 'ADT': 4 of the 5 composite features were not measured by every "
         "source that holds the assay. Source 'inner__p1' lacks 2: 'CD19', 'CD56'. "
         "Source 'inner__p2' lacks 2: 'CD8', 'CD56'. Source 'p3' lacks 3: 'CD4', "
-        "'CD8', 'CD19'." + _zeros_read_as_counts("inner__p1", adt=True)
+        "'CD8', 'CD19'." + _zeros_read_as_counts("inner__p1")
     ]
     ids = joint.cells.fetch_all("ids").astype(str)
     expected = np.array(
@@ -1860,7 +1853,7 @@ def test_union_composite_of_sources_that_share_no_feature_offers_no_intersection
         )
 
     assert messages == [
-        "Assay 'ADT': " + lacking + _zeros_read_as_counts("p1", adt=True, shared=False)
+        "Assay 'ADT': " + lacking + _zeros_read_as_counts("p1", shared=False)
     ]
     # The cells of the last source read a zero of each antibody that it lacks,
     # and an intersection of the same sources keeps none, as the warning says.
@@ -1917,28 +1910,23 @@ def test_unshared_features_warning_names_its_combinations():
 
     # A merge writes the zeros and, unlike a composite, names no alternative.
     assert unshared_features_warning(
-        "RNA", alignment, ["a", "b"], combination="merge", assay_type="RNA"
+        "RNA", alignment, ["a", "b"], combination="merge"
     ) == shared.format("merged") + (
         " The merge writes zero counts for the features a source lacks; columns "
         "such as 'measured_in_a' record what each source measured, so analyses "
-        "leave those zeros out or refuse them, except prepared percentage "
-        "columns, potency scores, add_melded_assay and the pseudotime and lineage "
-        "analyses of features, which still read them as counts."
+        "leave those zeros out or refuse them, except perturbation.efficiency, "
+        "perturbation.signature, perturbation.associations and "
+        "perturbation.profiles, which still read them as counts."
     )
     assert unshared_features_warning(
-        "RNA", alignment, ["a", "b"], combination="composite", assay_type="RNA"
+        "RNA", alignment, ["a", "b"], combination="composite"
     ) == shared.format("composite") + _zeros_read_as_counts("a")
-    # Only the warning of an ADT assay names the ADT recipe.
-    assert unshared_features_warning(
-        "RNA", alignment, ["a", "b"], combination="composite", assay_type="ADT"
-    ) == shared.format("composite") + _zeros_read_as_counts("a", adt=True)
     with pytest.raises(ValueError, match="combination must be 'merge' or 'composite'"):
         unshared_features_warning(
             "RNA",
             alignment,
             ["a", "b"],
             combination="mount",  # type: ignore[arg-type]
-            assay_type="RNA",
         )
 
 

@@ -199,6 +199,10 @@ class PotencyArguments(OperationArguments):
     # Smoothing over a graph is recorded only when a graph smooths the scores.
     graph: ArtifactRef | None = artifact_input(None, omit_if_none=True)
     smoothing: float | None = parameter(None, omit_if_none=True)
+    # The genes that every source of a merged store's cells measured, which
+    # the network and each cell's total cover, recorded only when some
+    # source did not measure some gene.
+    measured_features_fingerprint: str | None = parameter(None, omit_if_none=True)
 
 
 @dataclass(frozen=True, slots=True)

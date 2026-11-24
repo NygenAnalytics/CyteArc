@@ -3190,6 +3190,17 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         are complete. If the write fails or is interrupted, the partial assay is
         removed or left pending until :meth:`discard_interrupted_assay` removes it.
 
+        On a store merged from sources that called different peaks, as its
+        feature columns ``measured_in_<source>`` record, a peak that some
+        source of the assay's cells did not call holds zero counts in that
+        source's cells, which are no measurement. Such peaks are left out of
+        every feature, with a warning that names them, and each cell's term
+        frequencies divide its counts by its total over the other peaks, as a
+        store of those peaks alone does, which changes the scores only
+        without ``renormalization``. The new assay then records those peaks
+        as its attribute ``measuredFeaturesFingerprint`` when they change its
+        scores.
+
         Args:
             from_assay: Name of assay to be used. If no value is provided then the default assay will be used.
             external_bed_fn: This is mandatory parameter. This file should be a BED format file with at least five
@@ -3211,12 +3222,14 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
 
         Raises:
             PermissionError: If the store is not opened with ``zarr_mode='r+'``.
+            ValueError: If no peak that overlaps a feature of the BED file was
+                called by every source of the cells.
         """
         renormalization = bool_argument(renormalization, "renormalization")
 
         from ...assay.classification import preset_assay_types, validate_assay_type
         from ...features.genomic.melding import write_melded_counts
-        from ...metadata.membership import resolve_assay_membership
+        from ...metadata.membership import measured_rows, resolve_assay_membership
         from ...storage.schema import derived_assay_transaction
         from ...storage.stores import zarr_group_root
         from ...writers.counts_t import finalize_writer_counts_t
@@ -3243,6 +3256,17 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         # A melded cell that the source did not measure holds no counts, so
         # the new assay measures the source's cells.
         membership = resolve_assay_membership(assay.cells, assay.name)
+        # The peaks that every source of those cells called. Only a store
+        # whose record leaves out some peak reads the cells here.
+        every_cell = np.arange(assay.cells.N, dtype=np.int64)
+
+        def measured_cells() -> np.ndarray:
+            members = measured_rows(assay.cells, assay.name, every_cell)
+            return every_cell if members is None else every_cell[members]
+
+        measured = cells_measured_features(
+            assay.cells, assay.feats, measured_cells, assay=assay.name
+        )
         idf_cell_idx = assay.cells.active_index(cell_key)
         if len(idf_cell_idx) == 0:
             raise ValueError("Gene-score IDF requires at least one selected cell")
@@ -3285,6 +3309,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                 renormalization=renormalization,
                 peaks_coords=peaks_coords,
                 idf_cell_idx=idf_cell_idx,
+                measured=measured,
             )
             # RNA gene scores need countsT before the assay can be prepared.
             finalize_writer_counts_t(

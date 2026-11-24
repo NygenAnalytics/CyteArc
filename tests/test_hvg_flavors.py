@@ -874,9 +874,11 @@ def test_cell_totals_read_the_smaller_set_of_features_and_sum_whole_counts_exact
     read: list[list[int]] = []
     sum_counts = hvg_statistics.cell_totals_over_features
 
-    def recorded(assay: Any, cells: np.ndarray, features: np.ndarray) -> np.ndarray:
+    def recorded(
+        assay: Any, cells: np.ndarray, features: np.ndarray, **options: Any
+    ) -> np.ndarray:
         read.append(features.tolist())
-        return sum_counts(assay, cells, features)
+        return sum_counts(assay, cells, features, **options)
 
     monkeypatch.setattr(hvg_statistics, "cell_totals_over_features", recorded)
     cells = np.arange(0, _N_CELLS, 2)
@@ -924,7 +926,9 @@ def test_cell_totals_of_counts_with_fractions_stay_within_rounding_and_above_zer
     monkeypatch.setattr(
         hvg_statistics,
         "cell_totals_over_features",
-        lambda _assay, _cells, _features: np.array([0.6000000000000001, 0.5]),
+        lambda _assay, _cells, _features, **_options: np.array(
+            [0.6000000000000001, 0.5]
+        ),
     )
     prepared = SimpleNamespace(_cell_count_totals=lambda _cells: np.array([0.6, 2.0]))
     assert hvg_statistics.cell_totals(

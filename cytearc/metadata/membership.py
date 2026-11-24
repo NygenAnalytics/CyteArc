@@ -714,13 +714,25 @@ def leave_out_unmeasured(
             f"{analysis} would leave out every selected {kind}, since none was "
             f"measured by every source of {of_cells}. {lacking} {remedy}"
         )
-    plural = "" if unmeasured.size == 1 else "s"
+    warn_left_out(analysis, kind, of_cells, unmeasured.size, lacking)
+    return kept
+
+
+def warn_left_out(
+    analysis: str, kind: str, of_cells: str, count: int, lacking: str
+) -> None:
+    """Warn that ``analysis`` leaves out ``count`` ``kind`` features that some source of ``of_cells`` did not measure.
+
+    ``lacking`` names, for each such source, how many it lacks
+    (:meth:`CellsMeasuredFeatures.lacking`). This is the warning of
+    :func:`leave_out_unmeasured`.
+    """
+    plural = "" if count == 1 else "s"
     warn(
-        f"{analysis} leaves out {unmeasured.size:,} {kind}{plural} that some source "
+        f"{analysis} leaves out {count:,} {kind}{plural} that some source "
         f"of {of_cells} did not measure, since their zero counts in its cells are "
         f"not measurements. {lacking}"
     )
-    return kept
 
 
 def require_features_measured_by_cells(

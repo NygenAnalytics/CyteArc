@@ -6,11 +6,18 @@ import zarr
 from scipy.sparse import csc_matrix
 
 from ...assay import Assay
+from ...assay.hvg_statistics import cell_totals
 from ...assay.normalization import (
     inverse_document_frequency,
     stream_document_frequency,
     tfidf_values,
 )
+from ...metadata.membership import (
+    CellsMeasuredFeatures,
+    leave_out_unmeasured,
+    measured_mask,
+)
+from ...storage.artifacts import fingerprint_array
 from ...storage.budget import ResourceBudget
 from ...storage.identity import CountSummary, finalize_counts
 from ...storage.count_matrix import (
@@ -159,8 +166,14 @@ def create_counts_mat(
     renormalization: bool,
     *,
     idf_cell_idx: np.ndarray | None = None,
+    measured_peaks: np.ndarray | None = None,
 ) -> None:
-    """Populate and finalize a melded count matrix in a Zarr array."""
+    """Populate and finalize a melded count matrix in a Zarr array.
+
+    Each cell's term frequencies divide its counts by its prepared total, or
+    by its total over the peaks of the Boolean mask ``measured_peaks``, such
+    as those that every source of a merged store's cells called.
+    """
     n_docs = int(store.shape[0])
     n_source_features = int(mapping.shape[0])
     n_target_features = int(store.shape[1])
@@ -187,9 +200,10 @@ def create_counts_mat(
         selected_cells = np.unique(selected_cells)
         selected_cell_count = len(selected_cells)
 
-    n_term_per_doc = np.asarray(
-        assay.cells.fetch_all(assay.name + "_nCounts"),
-        dtype=np.float64,
+    n_term_per_doc = (
+        np.asarray(assay.cells.fetch_all(assay.name + "_nCounts"), dtype=np.float64)
+        if measured_peaks is None
+        else cell_totals(assay, np.arange(n_docs, dtype=np.int64), measured_peaks)
     )
     n_term_per_doc[n_term_per_doc == 0] = 1
     if selected_cell_count == n_docs:
@@ -295,16 +309,44 @@ def write_melded_counts(
     renormalization: bool,
     peaks_coords: np.ndarray | None,
     idf_cell_idx: np.ndarray | None,
+    measured: CellsMeasuredFeatures | None = None,
 ) -> None:
     """Write finalized melded counts and provenance into a pending assay.
 
     Callers own the transaction, so they can finish further writes, such as
-    RNA ``countsT``, before the assay is published.
+    RNA ``countsT``, before the assay is published. ``measured``, a reading
+    of :func:`~cytearc.metadata.membership.cells_measured_features` over the
+    assay's cells, leaves out of each feature the peaks that some source of
+    the cells did not call, with a warning that names them, and takes each
+    cell's term frequencies over the peaks that every source called, which
+    matters only without ``renormalization``; the assay then records those
+    peaks as ``measuredFeaturesFingerprint`` when they change its scores.
+
+    Raises:
+        ValueError: If no peak that overlaps a feature was called by every
+            source of the cells.
     """
     if peaks_coords is None:
         peaks_coords = assay.feats.fetch_all(peaks_col)
     peaks_bed = create_bed_from_coord_ids(peaks_coords)
     feat_ids, feat_names, mapping = get_feature_mappings(peaks_bed, feature_bed)
+    kept = leave_out_unmeasured(
+        measured,
+        assay.feats,
+        analysis="add_melded_assay",
+        kind="peak",
+        of_cells="the cells",
+        remedy="Meld features that peaks of every source overlap.",
+        selected=np.diff(mapping.tocsr().indptr) > 0,
+    )
+    if kept is not None:
+        # A peak that some source did not call adds to no feature.
+        mapping = csc_matrix(mapping.multiply(kept[:, None]))
+        mapping.eliminate_zeros()
+    measured_peaks = measured_mask(measured)
+    # Rescaling divides out each cell's term-frequency denominator, so only
+    # scores left unscaled take it over the measured peaks.
+    term_peaks = None if renormalization else measured_peaks
 
     from ...storage.profiles import resolve_storage_profile
 
@@ -350,6 +392,7 @@ def write_melded_counts(
         scalar_coeff=scalar_coeff,
         renormalization=renormalization,
         idf_cell_idx=idf_cell_idx,
+        measured_peaks=term_peaks,
     )
     selected_cells = (
         np.arange(assay.rawData.shape[0], dtype=np.int64)
@@ -366,3 +409,8 @@ def write_melded_counts(
             NORMALIZED_VALUES_ATTR: derived_normalized_values(),
         }
     )
+    # The peaks are recorded when they change the scores.
+    if measured_peaks is not None and (kept is not None or term_peaks is not None):
+        transaction.group.attrs["measuredFeaturesFingerprint"] = fingerprint_array(
+            measured_peaks
+        )
