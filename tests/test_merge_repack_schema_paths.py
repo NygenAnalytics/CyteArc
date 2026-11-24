@@ -22,7 +22,6 @@ from cytearc import DataStore, mount_datastore
 from cytearc.assay import ADTassay, ATACassay, RNAassay
 from cytearc.merge import DataStoreMerge
 from cytearc.merge.features import align_features
-from cytearc.merge.row_plan import iter_row_plan_segments
 from cytearc.metadata import MetaData
 from cytearc.metadata.membership import membership_attributes
 from cytearc.storage.arrays import create_metadata_column
@@ -900,9 +899,7 @@ def test_merge_refuses_a_feature_profile_beyond_its_budget(tmp_path):
     destination = tmp_path / "merged.zarr"
     assays = [source.get_assay("RNA") for source in sources]
     alignment = align_features(assays, _NAMES)
-    row_plan = build_row_plan(
-        [4, 4], [assay.rawData.chunksize[0] for assay in assays], _NAMES, seed=0
-    )
+    row_plan = build_row_plan([4, 4], _NAMES, seed=0)
     # Every phase holds the row plan, the feature alignment and the
     # destination's count summary, 40 bytes for each of the 8 merged cells
     # and 16 for each of the 25,000 features. Counting each merged cell's
@@ -929,6 +926,66 @@ def test_merge_refuses_a_feature_profile_beyond_its_budget(tmp_path):
         needed, needed - 1, "the count summaries of source 'left'"
     )
     assert not destination.exists()
+
+
+def test_counting_merged_cells_charges_what_placing_each_sources_counts_holds(
+    monkeypatch,
+):
+    import tracemalloc
+
+    import cytearc.merge.writer as merge_writer
+    from cytearc.merge.row_plan import RowPlan, build_row_plan
+    from cytearc.storage.budget import ResourceBudget
+    from cytearc.utils.memory_budget import MemoryBudgetError
+
+    counts = []
+    for n_cells in (40_000, 20_000):
+        values = np.ones((n_cells, 2), dtype=np.uint16)
+        values[::3, 1] = 0
+        counts.append(values)
+    sources = [
+        _open(_write_source(MemoryStore(), {"RNA": values})) for values in counts
+    ]
+    assays = [source.get_assay("RNA") for source in sources]
+    row_plan = build_row_plan([40_000, 20_000], _NAMES, seed=0)
+    # With the reads charged nothing, the refusal names the profile, a count
+    # for each merged cell and one more, and the charge of placing the larger
+    # source's counts at its merged rows.
+    monkeypatch.setattr(merge_writer, "_row_nnz_load_bytes", lambda assay, source: 0)
+    profile = 8 * (row_plan.nCells + 1)
+    with pytest.raises(MemoryBudgetError) as refused:
+        merge_writer._cumulative_row_nnz(
+            assays, row_plan, ResourceBudget(profile, 1), resident_bytes=0
+        )
+    place = refused.value.needed_bytes - profile
+
+    peaks = {}
+    find = RowPlan.destination_rows
+
+    def traced(plan: RowPlan, source: int) -> np.ndarray:
+        tracemalloc.reset_peak()
+        before = tracemalloc.get_traced_memory()[0]
+        rows = find(plan, source)
+        peaks[source] = tracemalloc.get_traced_memory()[1] - before
+        return rows
+
+    monkeypatch.setattr(RowPlan, "destination_rows", traced)
+    tracemalloc.start()
+    try:
+        cumulative, _, _ = merge_writer._cumulative_row_nnz(
+            assays, row_plan, ResourceBudget(profile + place, 1), resident_bytes=0
+        )
+    finally:
+        tracemalloc.stop()
+    np.testing.assert_array_equal(
+        np.diff(cumulative), _merged_order_values(row_plan, [("", c) for c in counts])
+    )
+    # Placing holds the source's counts, 8 bytes a cell, beside what finding
+    # their merged rows holds at its peak: the rows and their copy in the
+    # source's order. The charge also counts the flag of every merged cell,
+    # which the search frees before it copies the rows.
+    held = 8 * 40_000 + peaks[0]
+    assert held <= place <= held + row_plan.nCells + 4_096
 
 
 # Each pair of features shares a name, so a merge by name sums the pair and
@@ -1130,13 +1187,31 @@ def recorded_blocks(monkeypatch) -> list[tuple[int, int, int, int]]:
 def _merged_order_values(
     row_plan: Any, stores: Sequence[tuple[str, np.ndarray]]
 ) -> np.ndarray:
-    """Count each merged cell's nonzero values with NumPy, in the merged order."""
-    return np.concatenate(
-        [
-            np.count_nonzero(stores[segment.sourceIdx][1][segment.localRows], axis=1)
-            for segment in iter_row_plan_segments(row_plan)
-        ]
-    )
+    """Count each merged cell's nonzero values with NumPy, in the merged order.
+
+    Each source's cells take, in their stored order from the source's first
+    cell and then from its first stored cell, the merged rows that the plan
+    gives the source.
+    """
+    values = np.empty(row_plan.nCells, dtype=np.int64)
+    for source, (_, counts) in enumerate(stores):
+        values[np.flatnonzero(row_plan.owners == source)] = np.roll(
+            np.count_nonzero(counts, axis=1), -row_plan.firstCells[source]
+        )
+    return values
+
+
+def _most_shard_values(
+    stores: Sequence[tuple[str, np.ndarray]], shard_rows: int
+) -> list[int]:
+    """Count with NumPy the most nonzero values that a stored shard of each source holds."""
+    return [
+        max(
+            int(np.count_nonzero(counts[start : start + shard_rows]))
+            for start in range(0, len(counts), shard_rows)
+        )
+        for _, counts in stores
+    ]
 
 
 def test_merge_counts_signed_values_within_its_budget_or_names_the_budget_it_needs(
@@ -1155,7 +1230,7 @@ def test_merge_counts_signed_values_within_its_budget_or_names_the_budget_it_nee
     assays = [_opened_with_budget(path, 1_000).get_assay("RNA") for path, _ in stores]
     assert assays[0].rawData.chunksize == (12, 600)
     assert assays[0].rawData.chunk_columns() == 100
-    row_plan = build_row_plan([24, 24], [12, 12], _NAMES, seed=0)
+    row_plan = build_row_plan([24, 24], _NAMES, seed=0)
     expected = _merged_order_values(row_plan, stores)
     # Each band, one chunk column at a time, as the smallest read takes them.
     one_chunk_column = sorted(
@@ -1169,9 +1244,18 @@ def test_merge_counts_signed_values_within_its_budget_or_names_the_budget_it_nee
 
     def profile(budget: int, held: int = 1_000) -> np.ndarray:
         recorded_blocks.clear()
-        return merge_writer._cumulative_row_nnz(
+        cumulative, shard_values, head_values = merge_writer._cumulative_row_nnz(
             assays, row_plan, ResourceBudget(budget, 1), resident_bytes=held
         )
+        # Each source's two shards of 12 cells, counted the same way, and the
+        # cells of its first cell's shard before that cell, which it gives last.
+        assert shard_values == _most_shard_values(stores, 12)
+        assert head_values == [
+            int(np.count_nonzero(counts[first - first % 12 : first]))
+            for (_, counts), first in zip(stores, row_plan.firstCells, strict=True)
+        ]
+        assert any(head_values)
+        return cumulative
 
     np.testing.assert_array_equal(np.diff(profile(10**9)), expected)
     # Each source is read in blocks of a stored band and every column.
@@ -1251,13 +1335,17 @@ def test_merge_refuses_before_it_reads_any_source_when_one_cannot_be_read(
     ]
     assays = [_open(path).get_assay("RNA") for path, _ in stores]
     assert [assay.rawData.chunk_columns() for assay in assays] == [100, 300]
-    row_plan = build_row_plan([24, 24], [12, 12], _NAMES, seed=0)
+    row_plan = build_row_plan([24, 24], _NAMES, seed=0)
 
     def profile(budget: int) -> np.ndarray:
         recorded_blocks.clear()
-        return merge_writer._cumulative_row_nnz(
+        cumulative, shard_values, _ = merge_writer._cumulative_row_nnz(
             assays, row_plan, ResourceBudget(budget, 1), resident_bytes=1_000
         )
+        # Each source's two shards of 12 cells, counted with NumPy.
+        assert [assay.rawData.chunksize[0] for assay in assays] == [12, 12]
+        assert shard_values == _most_shard_values(stores, 12)
+        return cumulative
 
     with pytest.raises(MemoryBudgetError) as refused:
         profile(2_000)
@@ -1290,15 +1378,19 @@ def test_merge_names_the_count_summaries_that_its_budget_cannot_load(
         _counts_with_negative_values(tmp_path / "right.zarr", "float32", n_cells=200),
     ]
     assays = [_open(path).get_assay("RNA") for path, _ in stores]
-    row_plan = build_row_plan(
-        [400, 200], [assay.rawData.chunksize[0] for assay in assays], _NAMES, seed=0
-    )
+    row_plan = build_row_plan([400, 200], _NAMES, seed=0)
 
     def profile(budget: int) -> np.ndarray:
         recorded_blocks.clear()
-        return merge_writer._cumulative_row_nnz(
+        cumulative, shard_values, _ = merge_writer._cumulative_row_nnz(
             assays, row_plan, ResourceBudget(budget, 1), resident_bytes=1_000
         )
+        shard_rows = [int(assay.rawData.chunksize[0]) for assay in assays]
+        assert shard_values == [
+            _most_shard_values([store], rows)[0]
+            for store, rows in zip(stores, shard_rows, strict=True)
+        ]
+        return cumulative
 
     # Beside the 1,000 bytes held, a count of each of the 600 merged cells
     # and one more, 8 bytes each, and a whole read of the left source's
@@ -2338,6 +2430,149 @@ def test_a_merge_records_each_source_of_a_merged_source_in_every_assay(tmp_path)
         assay="RNA",
     )
     assert measured is not None and measured.measured.tolist() == inner_genes
+
+
+def _stored_cells_of_source(source: DataStore) -> dict[str, dict[str, dict[str, int]]]:
+    """Return each cell's RNA and ADT counts by feature ID of an opened source, keyed by cell ID."""
+    ids = np.asarray(source.cells.fetch_all("ids")).astype(str)
+    assays = {
+        assay: (
+            np.asarray(source.get_assay(assay).feats.fetch_all("ids")).astype(str),
+            np.asarray(source.get_assay(assay).rawData.compute()),
+        )
+        for assay in ("RNA", "ADT")
+    }
+    return {
+        cell: {
+            assay: dict(zip(features.tolist(), counts[row].tolist(), strict=True))
+            for assay, (features, counts) in assays.items()
+        }
+        for row, cell in enumerate(ids)
+    }
+
+
+def _stored_cells(location: str) -> dict[str, dict[str, Any]]:
+    """Return each stored cell's source label and RNA and ADT counts by feature ID, keyed by cell ID."""
+    root = zarr.open_group(location, mode="r")
+    ids = np.asarray(root["cellData/ids"][:]).astype(str)
+    categories = np.asarray(root["cellData/__cytearc_categories__dataset"][:]).astype(
+        str
+    )
+    labels = categories[np.asarray(root["cellData/dataset"][:])]
+    assays = {
+        assay: (
+            np.asarray(root[f"{assay}/featureData/ids"][:]).astype(str),
+            np.asarray(root[f"{assay}/counts"][:]),
+        )
+        for assay in ("RNA", "ADT")
+    }
+    return {
+        cell: {
+            "source": str(label),
+            **{
+                assay: dict(zip(features.tolist(), counts[row].tolist(), strict=True))
+                for assay, (features, counts) in assays.items()
+            },
+        }
+        for row, (cell, label) in enumerate(zip(ids, labels, strict=True))
+    }
+
+
+# Cell columns are written in windows of merged rows: all of them at once, or
+# 7 at a time, so that each window takes a few rows of each source.
+@pytest.mark.parametrize("window_rows", [None, 7])
+def test_a_merge_of_a_merged_store_keeps_each_cells_counts_and_source_in_its_interleaved_order(
+    tmp_path, monkeypatch, window_rows
+):
+    import cytearc.merge.metadata as merge_metadata
+
+    def panel_source(n_cells: int, panel: Sequence[str], first: int) -> DataStore:
+        # Every count is unique, numbered from ``first``, so a cell's counts
+        # tell it apart.
+        counts = {
+            assay: (first + offset + np.arange(n_cells * width))
+            .reshape(n_cells, width)
+            .astype(np.uint16)
+            for assay, offset, width in (
+                ("RNA", 0, len(_GENES)),
+                ("ADT", 1000, len(panel)),
+            )
+        }
+        return _open(
+            _write_source(MemoryStore(), counts, ids={"RNA": _GENES, "ADT": panel})
+        )
+
+    # Two panels of 40 and 30 cells merge into the inner store, which a merge
+    # with a third store of 20 cells takes again.
+    inner = str(tmp_path / "inner.zarr")
+    DataStoreMerge(
+        [panel_source(40, _LEFT_PANEL, 0), panel_source(30, _RIGHT_PANEL, 5000)],
+        inner,
+        ["left", "right"],
+        seed=3,
+        nthreads=1,
+    ).dump()
+    outer = str(tmp_path / "outer.zarr")
+    if window_rows is not None:
+        monkeypatch.setattr(
+            merge_metadata,
+            "effective_metadata_segment_rows",
+            lambda metadata_plan, row_plan: window_rows,
+        )
+    DataStoreMerge(
+        [panel_source(20, ["CD3", "CD56"], 9000), _open(inner)],
+        outer,
+        ["third", "inner"],
+        seed=4,
+        nthreads=1,
+    ).dump()
+
+    inner_cells, outer_cells = _stored_cells(inner), _stored_cells(outer)
+    third_cells = _stored_cells_of_source(panel_source(20, ["CD3", "CD56"], 9000))
+    order = np.asarray(zarr.open_group(outer, mode="r")["cellData/ids"][:]).astype(str)
+    # The merge interleaves the third store's cells with the inner store's,
+    # and keeps the inner store's cells in the inner store's own order, from
+    # a random first cell, wrapping round.
+    inner_order = [
+        f"inner__{cell}"
+        for cell in np.asarray(zarr.open_group(inner, mode="r")["cellData/ids"][:])
+        .astype(str)
+        .tolist()
+    ]
+    taken = [cell for cell in order.tolist() if cell.startswith("inner__")]
+    first = inner_order.index(taken[0])
+    assert taken == inner_order[first:] + inner_order[:first]
+    third_rows = np.flatnonzero(np.char.startswith(order, "third__"))
+    assert third_rows.size == 20
+    assert third_rows[-1] - third_rows[0] + 1 > third_rows.size
+    assert len(outer_cells) == 90
+    # Cell by cell, by ID, an inner cell keeps the inner store's counts, zero
+    # for the antibodies its store lacks, and the inner store's source of it
+    # under the inner store's name; a third cell keeps its own.
+    for cell, inner_cell in inner_cells.items():
+        merged = outer_cells[f"inner__{cell}"]
+        assert merged["source"] == f"inner__{inner_cell['source']}"
+        assert cell.startswith(f"{inner_cell['source']}__")
+        for assay in ("RNA", "ADT"):
+            assert {
+                feature: value
+                for feature, value in merged[assay].items()
+                if feature in inner_cell[assay]
+            } == inner_cell[assay]
+            assert not any(
+                value
+                for feature, value in merged[assay].items()
+                if feature not in inner_cell[assay]
+            )
+    for cell, counts in third_cells.items():
+        merged = outer_cells[f"third__{cell}"]
+        assert merged["source"] == "third"
+        for assay in ("RNA", "ADT"):
+            assert {
+                feature: value
+                for feature, value in merged[assay].items()
+                if feature in counts[assay]
+            } == counts[assay]
 
 
 def test_a_merge_records_an_assay_only_for_the_sources_of_a_merged_store_that_hold_it(

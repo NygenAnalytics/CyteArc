@@ -802,12 +802,12 @@ BAD_SHUFFLE_ARGUMENTS = [
     (
         {"shuffle_cells": True, "shuffle_seed": -1},
         ValueError,
-        "shuffle_seed must be at least 0",
+        "shuffle_seed must be from 0 to 2**64 - 1, not -1",
     ),
     (
         {"shuffle_cells": True, "shuffle_seed": 2**64},
         ValueError,
-        "shuffle_seed must be at most 18446744073709551615",
+        "shuffle_seed must be from 0 to 2**64 - 1, not 18446744073709551616",
     ),
     (
         {"shuffle_cells": True, "shuffle_seed": 1.5},

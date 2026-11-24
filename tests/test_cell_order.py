@@ -63,6 +63,31 @@ def test_the_order_is_a_permutation_equal_to_the_reference(n_rows, seed) -> None
     assert order.tolist() == _reference_order(n_rows, seed)
 
 
+@pytest.mark.parametrize("trial", range(6))
+def test_the_order_is_the_stable_sort_of_distinct_hashes(trial) -> None:
+    from cytearc.utils.digest import mix64_array
+
+    # The hashes of the rows are distinct, so the sort that ranks them needs
+    # no rule for ties and gives the stable sort's order.
+    rng = np.random.default_rng(trial)
+    n_rows = int(rng.integers(0, 300_000))
+    seed = int(rng.integers(0, 2**63)) * 2 + int(rng.integers(0, 2))
+    key = mix64_array(
+        np.array([seed], dtype=np.uint64)
+        ^ np.uint64(int.from_bytes(b"CellOrdr", "big"))
+    )
+    hashes = mix64_array(
+        key
+        ^ mix64_array(
+            np.arange(n_rows, dtype=np.uint64) + np.uint64(0x9E3779B97F4A7C15)
+        )
+    )
+    assert np.unique(hashes).size == n_rows
+    np.testing.assert_array_equal(
+        shuffled_order(n_rows, seed), np.argsort(hashes, kind="stable")
+    )
+
+
 def test_a_large_order_is_a_permutation_unlike_its_neighbours() -> None:
     order = shuffled_order(200_003, 0)
     np.testing.assert_array_equal(np.sort(order), np.arange(200_003))
@@ -98,8 +123,12 @@ def test_each_row_is_equally_likely_at_each_destination() -> None:
         (True, TypeError, "shuffle_seed must be an integer"),
         (1.0, TypeError, "shuffle_seed must be an integer"),
         ("1", TypeError, "shuffle_seed must be an integer"),
-        (-1, ValueError, "shuffle_seed must be at least 0"),
-        (2**64, ValueError, r"shuffle_seed must be at most 18446744073709551615"),
+        (-1, ValueError, r"^shuffle_seed must be from 0 to 2\*\*64 - 1, not -1$"),
+        (
+            2**64,
+            ValueError,
+            r"^shuffle_seed must be from 0 to 2\*\*64 - 1, not 18446744073709551616$",
+        ),
     ],
 )
 def test_a_bad_seed_is_refused(seed, error, message) -> None:

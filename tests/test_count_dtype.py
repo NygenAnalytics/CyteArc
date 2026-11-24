@@ -749,6 +749,45 @@ def test_count_summary_windows_carry_the_nonzero_values_of_their_rows():
     assert whole.hexdigest() == reference.hexdigest()
 
 
+def test_count_summary_of_rows_given_in_any_order_matches_numpy_on_the_matrix():
+    from cytearc.storage.identity import CountSummary
+
+    rng = np.random.default_rng(3)
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    counts = root.create_array("counts", shape=(9, 4), dtype=np.float32)
+    values = rng.integers(-2, 4, size=(9, 4)).astype(np.float32)
+    values[values == 1] = 0.5
+    values[4] = 0
+    # Rows reach their places in pieces of scattered rows, as a composite
+    # summarizes each source's cells at their composite rows.
+    summary = CountSummary(counts)
+    for piece in np.array_split(rng.permutation(9), 3):
+        summary.update_rows(piece, values[piece])
+
+    np.testing.assert_array_equal(summary.rowSums, values.sum(axis=1, dtype=np.float64))
+    np.testing.assert_array_equal(summary.rowNonzero, np.count_nonzero(values, axis=1))
+    np.testing.assert_array_equal(summary.rowPositive, (values > 0).sum(axis=1))
+    np.testing.assert_array_equal(summary.columnPositive, (values > 0).sum(axis=0))
+    reference = CountSummary(counts)
+    reference.update(0, values)
+    assert summary.hexdigest() == reference.hexdigest()
+    # A window takes rows of its own range, in any order.
+    window = CountSummary(counts, rows=(3, 6))
+    window.update_rows(np.array([5, 3, 4]), values[[5, 3, 4]])
+    np.testing.assert_array_equal(window.rowSums, values[3:6].sum(axis=1))
+    for rows in ([6], [2]):
+        with pytest.raises(ValueError, match="rows are outside their window"):
+            window.update_rows(np.array(rows), values[rows])
+    with pytest.raises(ValueError, match="block has the wrong shape"):
+        summary.update_rows(np.array([0, 1]), values[[0]])
+    with pytest.raises(ValueError, match="block has the wrong shape"):
+        summary.update_rows(np.array([0]), np.ones((1, 3), dtype=np.float32))
+    with pytest.raises(ValueError, match="finite values"):
+        summary.update_rows(
+            np.array([0]), np.array([[np.nan, 0, 0, 0]], dtype=np.float32)
+        )
+
+
 def test_nonzero_values_are_summed_from_the_stored_summaries(tmp_path) -> None:
     from cytearc.storage.identity import COUNT_SUMMARIES, nonzero_value_count
     from tests.storage_helpers import write_count_store

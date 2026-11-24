@@ -32,7 +32,12 @@ from scipy import sparse
 import cytearc
 from cytearc.embeddings.umap import fit_transform
 from cytearc.neighbors.graph import build_connectivity_arrays
-from cytearc.utils.arrays import rolling_window, union_sorted
+from cytearc.utils.arrays import (
+    csr_from_dense,
+    fill_dense_from_csr,
+    rolling_window,
+    union_sorted,
+)
 from cytearc.utils.logging import logger
 from cytearc.utils.numba import (
     _build_token,
@@ -1811,20 +1816,27 @@ def _kernels(directory: Path, package: str) -> dict[str, tuple[Any, bool]]:
 def test_every_cytearc_kernel_has_the_build_scoped_cache() -> None:
     kernels = _kernels(CYTEARC_DIR, "cytearc")
     wrapped = sorted(name for name, (_, is_wrapped) in kernels.items() if is_wrapped)
-    # rolling_window and union_sorted compile their kernels at their first
-    # call; a new kernel that compiles the same way needs its own line here.
-    assert wrapped == [
-        "cytearc.utils.arrays._rolling_window_kernel",
-        "cytearc.utils.arrays._union_kernel",
-    ]
+    # rolling_window, union_sorted, csr_from_dense and fill_dense_from_csr
+    # compile their kernels at their first call; a new kernel that compiles
+    # the same way needs its own line here.
+    arrays = importlib.import_module("cytearc.utils.arrays")
+    compiled_at_first_call = {
+        "cytearc.utils.arrays._fill_csr_kernel": "_fillCsrImpl",
+        "cytearc.utils.arrays._fill_dense_kernel": "_fillDenseImpl",
+        "cytearc.utils.arrays._rolling_window_kernel": "_rollingWindowImpl",
+        "cytearc.utils.arrays._union_kernel": "_unionImpl",
+    }
+    assert wrapped == sorted(compiled_at_first_call)
     rolling_window(np.ones((3, 1)), 2)
     union_sorted(np.asarray([1], dtype=np.int64), np.asarray([2], dtype=np.int64))
+    fill_dense_from_csr(
+        csr_from_dense(np.eye(2, dtype=np.float32)), 0, np.zeros((2, 2), np.float32)
+    )
     dispatchers = {
         name: kernel for name, (kernel, is_wrapped) in kernels.items() if not is_wrapped
     }
-    arrays = importlib.import_module("cytearc.utils.arrays")
-    dispatchers[wrapped[0]] = arrays._rollingWindowImpl
-    dispatchers[wrapped[1]] = arrays._unionImpl
+    for name, attribute in compiled_at_first_call.items():
+        dispatchers[name] = getattr(arrays, attribute)
 
     assert len(dispatchers) > 200
     token = _cytearc_build_token()

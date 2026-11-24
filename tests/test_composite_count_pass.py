@@ -249,7 +249,7 @@ def test_a_failing_segment_raises_and_stops_the_others(
             return await original_copy(*args, **kwargs)
 
     def segment(segment, **kwargs):  # type: ignore[no-untyped-def]
-        if segment.destStart == 0:
+        if (segment.sourceIdx, segment.start) == (0, 0):
             # The first segment fails once a later one is reading beside it.
             held.wait(timeout=DEADLINE)
             raise OSError("the first segment's read failed")

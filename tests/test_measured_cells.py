@@ -1094,11 +1094,11 @@ _N_OTHER = 20
 def _merge_partial_rna(base: Path) -> Path:
     """Merge 40 cells with RNA and ADT and 20 cells with ADT only.
 
-    RNA0 is detected in about half of the measured cells. The merge keeps
-    each source's cells together, so the first 40 cells are the measured
-    ones. ``grp`` alternates two groups over every cell, ``source`` names
-    each cell's source, ``adt_only`` marks the unmeasured cells, and ``xy``
-    is a live layout.
+    RNA0 is detected in about half of the measured cells. ``grp`` puts the
+    cells of even rows of their source in g0 and the others in g1, so each
+    group holds 20 of the 40 measured cells, ``source`` names each cell's
+    source, ``adt_only`` marks the unmeasured cells, and ``xy`` is a live
+    layout.
     """
     rng = np.random.default_rng(3)
     rna = rng.poisson(3.0, size=(_N_RNA, 12)) + 1
@@ -1126,11 +1126,12 @@ def _merge_partial_rna(base: Path) -> Path:
     DataStoreMerge(sources, str(path), ["full", "adt"], nthreads=1).dump()
     store = _open(path)
     n_cells = store.cells.N
+    ids = np.asarray(store.cells.fetch_all("ids")).astype(str)
+    source_rows = np.array([int(value.split("__cell")[1]) for value in ids])
     store.cells.insert(
         "grp",
-        by_cell_id(store.cells, np.where(np.arange(n_cells) % 2 == 0, "g0", "g1")),
+        by_cell_id(store.cells, np.where(source_rows % 2 == 0, "g0", "g1")),
     )
-    ids = np.asarray(store.cells.fetch_all("ids")).astype(str)
     store.cells.insert(
         "source",
         by_cell_id(store.cells, np.array([value.split("__")[0] for value in ids])),
@@ -1258,8 +1259,8 @@ def test_summary_statistics_cover_the_cells_with_a_value(partial_rna) -> None:
     """Every summary statistic has the measured cells of its group as cells.
 
     The review's merge: each group holds 30 cells, RNA measured 20 of them,
-    and RNA0 is detected in 10 and 11 of those. The fraction was the
-    detected cells over all 30 cells, 0.333 and 0.367, and ``n_cells``
+    and RNA0 is detected in 11 and 10 of those. The fraction was the
+    detected cells over all 30 cells, 0.367 and 0.333, and ``n_cells``
     counted 30. A group without a measured cell has no fraction, and an
     aggregate over samples skips such a sample as it skips its mean.
     """
@@ -1275,7 +1276,7 @@ def test_summary_statistics_cover_the_cells_with_a_value(partial_rna) -> None:
         )
         for group in ("g0", "g1")
     }
-    assert expected == {"g0": (20, 0.5), "g1": (20, 0.55)}
+    assert expected == {"g0": (20, 0.55), "g1": (20, 0.5)}
 
     result = plotting.dotplot(store, features=["RNA0"], group_by="grp", show=False)
     try:
@@ -1480,7 +1481,8 @@ def test_membership_reads_return_rows_in_order_and_skip_full_columns(
         every[::-1],
         np.array([0, 0, 3, 3, 70, 70, 79]),
         np.array([79, 3, 70, 3, 0]),
-        np.array([63, 64]),
+        # A cell that RNA measured beside one that it did not.
+        np.array([np.flatnonzero(membership)[0], np.flatnonzero(~membership)[0]]),
     ):
         np.testing.assert_array_equal(
             measured_rows(store.cells, "RNA", rows), membership[rows]
@@ -3715,10 +3717,12 @@ def test_hvgs_of_some_sources_name_the_genes_that_those_sources_lack(
     kept = np.isin(names, _THREE_SOURCES[first]) & np.isin(
         names, _THREE_SOURCES[second]
     )
+    # The two merges interleave the pair's cells in different orders, so the
+    # sums behind the scores round differently.
     np.testing.assert_allclose(
         np.asarray(store.artifacts.load(ref)["corrected_variance"][:])[kept],
         intersection.artifacts.load(expected)["corrected_variance"][:],
-        rtol=1e-9,
+        rtol=1e-6,
     )
     assert _selected_names(store, ref) == _selected_names(intersection, expected)
 

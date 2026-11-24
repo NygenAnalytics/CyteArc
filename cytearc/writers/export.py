@@ -43,6 +43,7 @@ from ..metadata.rows import apply_missing_mask, metadata_missing_mask
 from ..storage.categorical import CategoricalColumn
 from ..storage.cell_order import CellOrder, destination_rows, exported_cell_order
 from ..storage.refs import ArtifactRef
+from ..utils.arrays import csr_from_dense
 from ..utils.compute import compute_with_progress
 from ..utils.logging import logger
 from ..utils.memory_budget import MemoryBudgetError, MemoryLedger
@@ -212,34 +213,13 @@ def _dense_csr_pieces(block: np.ndarray) -> Iterator[csr_matrix]:
     """Yield a dense row block as CSR pieces of one conversion step each.
 
     Only nonzero values are stored, in row-major order, as
-    ``csr_matrix(block)`` stores them, and each piece holds what
-    :func:`h5ad_conversion_bytes` bounds. A block without rows yields
-    nothing.
+    ``csr_matrix(block)`` stores them (:func:`~cytearc.utils.arrays.csr_from_dense`),
+    and each piece holds no more than :func:`h5ad_conversion_bytes` bounds.
+    A block without rows yields nothing.
     """
-    n_rows, n_cols = block.shape
-    step = _csr_step_rows(n_cols)
-    index_dtype = _csr_index_dtype(n_cols, step * max(1, n_cols))
-    for start in range(0, n_rows, step):
-        rows = block[start : start + step]
-        n_step = int(rows.shape[0])
-        # A view of C-contiguous rows; a copy of the step otherwise.
-        flat = np.ravel(rows)
-        positions = np.flatnonzero(flat)
-        data = flat[positions]
-        del flat
-        row_starts = np.arange(1, n_step + 1, dtype=np.int64)
-        row_starts *= n_cols
-        indptr = np.empty(n_step + 1, dtype=index_dtype)
-        indptr[0] = 0
-        indptr[1:] = np.searchsorted(positions, row_starts)
-        del row_starts
-        np.remainder(positions, max(1, n_cols), out=positions)
-        indices = positions.astype(index_dtype, copy=False)
-        del positions
-        yield csr_matrix(
-            (data, indices, indptr), shape=(n_step, n_cols), dtype=block.dtype
-        )
-        del data, indices, indptr
+    step = _csr_step_rows(block.shape[1])
+    for start in range(0, block.shape[0], step):
+        yield csr_from_dense(block[start : start + step])
 
 
 def export_count_dtype(stored: Any, requested: Any | None = None) -> np.dtype[Any]:

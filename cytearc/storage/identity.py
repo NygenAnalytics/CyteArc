@@ -172,6 +172,48 @@ class CountSummary:
         )
         self._add(stop - start, columns)
 
+    def update_rows(self, rows: np.ndarray, block: Any) -> None:
+        """Summarize the rows of ``block``, which are rows ``rows`` of the matrix, as ``update`` does.
+
+        Raises:
+            ValueError: If the block has the wrong shape, ``rows`` lie outside
+                the window, or the block holds NaN or infinity.
+        """
+        from ..utils.digest import summarize_rows
+
+        values = np.ascontiguousarray(block, dtype=self.dtype)
+        targets = np.asarray(rows, dtype=np.int64) - self.start
+        if (
+            values.ndim != 2
+            or values.shape[1] != self.shape[1]
+            or targets.shape != (values.shape[0],)
+        ):
+            raise ValueError("Count summary block has the wrong shape")
+        if targets.size and (
+            int(targets.min()) < 0 or int(targets.max()) >= len(self.rowSums)
+        ):
+            raise ValueError("Count summary rows are outside their window")
+        n_rows = int(values.shape[0])
+        digests = np.zeros((n_rows, 2), dtype=np.uint64)
+        sums = np.zeros(n_rows, dtype=np.float64)
+        positive = np.zeros(n_rows, dtype=np.int64)
+        nonzero = np.zeros(n_rows, dtype=np.int64)
+        columns = np.zeros(self.shape[1], dtype=np.int64)
+        summarize_rows(
+            values,
+            values.view(f"u{values.dtype.itemsize}"),
+            digests,
+            sums,
+            positive,
+            nonzero,
+            columns,
+        )
+        self.digests[targets] = digests
+        self.rowSums[targets] = sums
+        self.rowPositive[targets] = positive
+        self.rowNonzero[targets] = nonzero
+        self._add(n_rows, columns)
+
     def merge(
         self,
         window: tuple[int, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray],

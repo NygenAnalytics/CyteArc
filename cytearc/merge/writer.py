@@ -40,13 +40,24 @@ from ..storage.sharding import (
     write_dense_from_row_batches,
 )
 from ..storage.types import as_zarr_array, as_zarr_group
-from ..utils.arrays import canonicalize_sparse, checked_sparse_cast, max_window_nnz
+from ..utils.arrays import (
+    canonicalize_sparse,
+    checked_sparse_cast,
+    csr_from_dense,
+    fill_dense_from_csr,
+    max_window_nnz,
+)
 from ..utils.compute import controlled_compute
 from ..utils.logging import logger
 from ..utils.memory_budget import MemoryBudgetError, memory_refusal
 from ..utils.progress import iter_progress
 from .features import FeatureAlignment
-from .row_plan import RowPlan, iter_row_plan_segments, max_row_plan_block_rows
+from .row_plan import (
+    WINDOW_BYTES_PER_ROW,
+    RowPlan,
+    RowPlanWindow,
+    iter_row_plan_windows,
+)
 
 
 CountsTReuseOutcome = Literal["reusable", "incomplete", "invalid"]
@@ -78,6 +89,10 @@ class _MergeImportRequirements:
     # The bytes of one source row of a batch, which extraProducerBytes counts
     # for each row beside the remap's staging and a read's decode.
     sourceRowBytes: int
+    # The most nonzero values that a stored shard of each source holds, and
+    # those of each source's head, 0 for a source without the assay.
+    shardValues: list[int]
+    headValues: list[int]
 
 
 def remap_block_to_coo(
@@ -97,10 +112,6 @@ def remap_block_to_coo(
     return canonicalize_sparse(mapped, destination_dtype)
 
 
-def empty_block_coo(n_rows: int, n_feats: int) -> coo_matrix:
-    return coo_matrix((n_rows, n_feats))
-
-
 # Column maps of fewer runs than this are copied run by run.
 _SCATTER_RUNS = 64
 
@@ -110,20 +121,24 @@ def scatter_block_dense(
     order_map: np.ndarray,
     n_feats: int,
     destination_dtype: np.dtype[Any],
-) -> np.ndarray:
-    """Place source columns at their merged positions in dense destination rows.
+    *,
+    out: np.ndarray,
+    rows: np.ndarray,
+) -> None:
+    """Place source columns at their merged positions in rows ``rows`` of dense ``out``.
 
-    ``order_map`` must give every source column its own merged column. The
-    rows equal the dense bands that ``remap_block_to_coo`` coordinates fill:
-    values are checked and cast in the same way, and as sparse coordinates
-    hold no zero, a negative zero is written as zero.
+    ``order_map`` must give every source column its own merged column, of
+    the ``n_feats`` columns of ``out``. Values are checked and cast to
+    ``destination_dtype`` as ``remap_block_to_coo`` casts its coordinates;
+    as these hold no zero, the caller turns the negative zeros of ``out`` to
+    zeros once it holds every row.
     """
     values = np.asarray(block)
     if np.can_cast(values.dtype, destination_dtype, casting="safe"):
         values = values.astype(destination_dtype, copy=False)
     else:
         values = checked_sparse_cast(values, destination_dtype)
-    dense = np.zeros((values.shape[0], n_feats), dtype=destination_dtype)
+    target = np.asarray(rows)
     # Merged columns mostly follow each other in runs, which copy as slices.
     breaks = np.flatnonzero(np.diff(order_map) != 1) + 1
     if breaks.size < _SCATTER_RUNS:
@@ -131,12 +146,9 @@ def scatter_block_dense(
             np.r_[0, breaks].tolist(), np.r_[breaks, order_map.size].tolist()
         ):
             first = int(order_map[start])
-            dense[:, first : first + stop - start] = values[:, start:stop]
+            out[target, first : first + stop - start] = values[:, start:stop]
     else:
-        dense[:, order_map] = values
-    if destination_dtype.kind in "fc":
-        np.copyto(dense, 0, where=dense == 0)
-    return dense
+        out[target[:, None], order_map] = values
 
 
 def shared_normalization(assay_name: str, sources: Mapping[str, Any]) -> dict[str, Any]:
@@ -384,15 +396,18 @@ def _cumulative_row_nnz(
     resources: ResourceBudget,
     *,
     resident_bytes: int,
-) -> np.ndarray:
-    """Return cumulative nonzero counts over merged rows.
+) -> tuple[np.ndarray, list[int], list[int]]:
+    """Return cumulative nonzero counts over merged rows, the most that a stored shard of each source holds, and what each source's head holds.
+
+    A source's head is the cells of its shard before the cell that it gives
+    first (:class:`~cytearc.merge.row_plan.RowPlan`), which it gives last.
 
     Each row count is the number of nonzero values of the source row, taken
     once per source from its count summaries
     (:func:`~cytearc.storage.identity.row_nonzero_counts`). The summaries
     of stores written by earlier CyteArc versions give it only for unsigned
     counts, so the values of other counts are counted in a read within the
-    merge's budget. Missing sources contribute zeros.
+    merge's budget. Missing sources contribute zeros, and hold no shard.
 
     Raises:
         MemoryBudgetError: If the profile and the summaries or the smallest
@@ -415,7 +430,13 @@ def _cumulative_row_nnz(
     budget = int(resources.memoryBytes)
     needed, item, assay_name = held, "each merged cell's count", None
     for index, assay, source in sources:
-        load = _row_nnz_load_bytes(assay, source)
+        # Placing a source's counts holds them, a flag for each merged cell
+        # and the merged rows of the source's cells, in merged and in the
+        # source's order (RowPlan.destination_rows).
+        place = row_plan.nCells * np.dtype(np.bool_).itemsize + 3 * np.dtype(
+            np.int64
+        ).itemsize * int(row_plan.sourceCells[index])
+        load = max(_row_nnz_load_bytes(assay, source), place)
         if held + load > needed:
             name = row_plan.sourceNames[index]
             needed, assay_name = held + load, assay.name
@@ -428,6 +449,8 @@ def _cumulative_row_nnz(
         raise _counting_refusal(assay_name, item, needed, budget)
     cumulative = np.zeros(row_plan.nCells + 1, dtype=np.int64)
     row_nnz = cumulative[1:]
+    shard_values = [0] * len(assays)
+    head_values = [0] * len(assays)
     for source_idx, assay, source in sources:
         if isinstance(source, ChunkedArray):
             row_values = _counted_row_values(
@@ -439,14 +462,24 @@ def _cumulative_row_nnz(
             )
         else:
             row_values = np.asarray(source[:])
-        for segment in iter_row_plan_segments(row_plan):
-            if segment.sourceIdx != source_idx:
-                continue
-            stop = segment.destStart + int(segment.localRows.size)
-            row_nnz[segment.destStart : stop] = row_values[segment.localRows]
+        # A merge takes every cell of each source.
+        row_nnz[row_plan.destination_rows(source_idx)] = row_values
+        if row_values.size:
+            shard_rows = max(1, int(assay.rawData.chunksize[0]))
+            shard_values[source_idx] = int(
+                np.add.reduceat(
+                    row_values,
+                    np.arange(0, row_values.size, shard_rows),
+                    dtype=np.int64,
+                ).max()
+            )
+            first = row_plan.firstCells[source_idx]
+            head_values[source_idx] = int(
+                row_values[first - first % shard_rows : first].sum(dtype=np.int64)
+            )
         del row_values
     np.cumsum(row_nnz, out=row_nnz)
-    return cumulative
+    return cumulative, shard_values, head_values
 
 
 def _merge_import_requirements(
@@ -466,7 +499,7 @@ def _merge_import_requirements(
         + CountSummary.nbytes_for(row_plan.nCells, alignment.nFeats)
         + max(0, int(additionalResidentBytes))
     )
-    cumulative = _cumulative_row_nnz(
+    cumulative, shard_values, head_values = _cumulative_row_nnz(
         assays,
         row_plan,
         resources,
@@ -509,7 +542,10 @@ def _merge_import_requirements(
             * max(1, int(source_n_feats))
             * (value_bytes + 2 * np.dtype(np.int32).itemsize)
         )
-        return int(dense_bytes + remap_bytes + max_decode_bytes)
+        # The batch's window of merged rows indexes its pieces.
+        return int(
+            dense_bytes + remap_bytes + max_decode_bytes + rows * WINDOW_BYTES_PER_ROW
+        )
 
     return _MergeImportRequirements(
         maxWindowNnz=lambda rows: max_window_nnz(cumulative, rows),
@@ -517,6 +553,8 @@ def _merge_import_requirements(
         residentBytes=resident_bytes,
         extraProducerBytes=extra_producer_bytes,
         sourceRowBytes=source_row_bytes,
+        shardValues=shard_values,
+        headValues=head_values,
     )
 
 
@@ -583,21 +621,22 @@ def write_assay_counts(
     additionalResidentBytes: int = 0,
     io: StorageIoPolicy | None = None,
 ) -> int:
-    """Stream remapped source blocks into the destination counts array.
+    """Stream remapped source rows into the destination counts array.
 
-    A row-plan block holds rows of one source chunk in a permuted order, so a
-    batch of some of its rows decodes the chunks of every column at those
-    rows. When a block spans several batches, the write holds as many of its
-    rows as fit beside the write, in whole batches up to the whole block, and
-    cuts its batches from them, so each chunk is decoded once for each run
-    of rows held rather than for each batch. Held rows are read a chunk
-    column at a time, a read that holds one chunk column's chunks where a
-    batch's read holds those of every column, so a budget that reads batch
-    by batch holds rows as well. When every source column has a merged
-    column of its own, as with ``feature_key="ids"``, batches are scattered
-    into dense destination rows; otherwise they pass through sparse
-    coordinates, which sum the features that share a merged column. Every
-    path writes the same values in the same bands.
+    Each batch of merged rows takes the next rows of every source, so the
+    write holds a window of the next rows of each source, read a chunk
+    column at a time, and cuts each batch's rows from them. A window never
+    crosses a source's shard, so with room for a shard of every source each
+    chunk is decoded once. The write holds a stored shard of each source
+    dense, or as CSR when dense shards do not fit or would leave the write
+    fewer bands at once (:func:`_held_windows`); the count summaries bound
+    the values of a CSR shard. When neither fits, it holds as many dense
+    rows as fit, and when no window of a batch's rows fits, each batch reads
+    its rows of every source as it comes. When every source column has a
+    merged column of its own, as with ``feature_key="ids"``, batches are
+    scattered into dense destination rows; otherwise they pass through
+    sparse coordinates, which sum the features that share a merged column.
+    Every path writes the same values in the same bands.
     """
     destination = load_count_array(root, assay_name, workspace)
     summary = CountSummary(destination)
@@ -630,7 +669,6 @@ def write_assay_counts(
             *(np.dtype(assay.rawData.dtype).itemsize for assay in present),
         ]
     )
-    block_rows = max_row_plan_block_rows(row_plan)
 
     # A source feature that the merged features leave out, as an
     # intersection does, maps to -1, and the read leaves its column out.
@@ -642,147 +680,267 @@ def write_assay_counts(
         for order_map, columns in zip(alignment.featOrderMap, kept_columns, strict=True)
     ]
     # The sources' counts are read within the merge's budget, not each
-    # source store's own.
+    # source store's own. A source without the assay, or without features,
+    # has no rows to read, and its cells keep zero counts.
     readers = [
         None
-        if assay is None
+        if assay is None or int(assay.feats.N) == 0
         else _kept_columns(assay.rawData._with_resources(resources), columns)
         for assay, columns in zip(assays, kept_columns, strict=True)
     ]
     column_runs = [
         None if reader is None else _chunk_column_runs(reader) for reader in readers
     ]
+    for index, reader in enumerate(readers):
+        if reader is not None and row_plan.selectedRows[index] is not None:
+            raise ValueError("A merge writes every cell of each source")
+    shard_rows = max(
+        (int(reader.chunksize[0]) for reader in readers if reader is not None),
+        default=0,
+    )
+    # The cells that a batch takes from the largest source read, on average.
+    part_rows = -(
+        -batch_rows
+        * max(
+            (
+                cells
+                for cells, reader in zip(row_plan.sourceCells, readers, strict=True)
+                if reader is not None
+            ),
+            default=0,
+        )
+        // max(1, row_plan.nCells)
+    )
+    # The most cells that a batch takes from one source, which bound a piece.
+    piece_rows = row_plan.most_source_cells(batch_rows)
 
-    def held_bytes(rows: int) -> int:
-        """Return the bytes of ``rows`` held rows of a block."""
-        return int(rows * source_n_feats * value_bytes)
+    # CSR windows of a stored shard of each source: what they hold, and the
+    # most that one refill and one piece taken from a window hold beside them.
+    csr_windows = [
+        _csr_window_bytes(reader, runs, values, piece_rows)
+        for reader, runs, values in zip(
+            readers, column_runs, requirements.shardValues, strict=True
+        )
+        if reader is not None and runs is not None
+    ]
+    # A source of more than one shard gives the cells before its first cell
+    # in their shard last. A window of whole shards keeps these heads apart
+    # once it moves on, rather than read their shard again.
+    head_rows = [
+        0
+        if reader is None or int(reader.shape[0]) <= int(reader.chunksize[0])
+        else row_plan.firstCells[index] % int(reader.chunksize[0])
+        for index, reader in enumerate(readers)
+    ]
 
-    def held_read_bytes(rows: int) -> int:
-        """Return the most that a read of ``rows`` rows of a source's chunk column holds."""
+    def held_bytes(rows: int, sparse: bool, heads: bool = False) -> int:
+        """Return the bytes of windows of ``rows`` rows of every source, or of ``sparse`` ones, with their ``heads``."""
+        if sparse:
+            held = sum(window for window, _, _ in csr_windows)
+            kept = sum(
+                _csr_rows_bytes(reader, runs, values, head)
+                for reader, runs, values, head in zip(
+                    readers,
+                    column_runs,
+                    requirements.headValues,
+                    head_rows,
+                    strict=True,
+                )
+                if reader is not None and runs is not None and head
+            )
+        else:
+            held = int(
+                rows
+                * sum(int(reader.shape[1]) for reader in readers if reader is not None)
+                * value_bytes
+            )
+            kept = sum(
+                head * int(reader.shape[1]) * value_bytes
+                for reader, head in zip(readers, head_rows, strict=True)
+                if reader is not None and rows >= int(reader.chunksize[0])
+            )
+        return held + (kept if heads else 0)
+
+    def held_read_bytes(rows: int, sparse: bool) -> int:
+        """Return the most that filling a window of ``rows`` rows of a source holds beside the windows, or filling a ``sparse`` one and taking a piece from it."""
+        if sparse:
+            return max((refill for _, refill, _ in csr_windows), default=0) + max(
+                (take for _, _, take in csr_windows), default=0
+            )
         return max(
-            [
-                _held_read_bytes(runs[0], rows)
-                for assay, runs in zip(assays, column_runs, strict=True)
-                if runs and assay is not None and int(assay.feats.N) > 0
-            ],
+            (_held_read_bytes(runs[0], rows) for runs in column_runs if runs),
             default=0,
         )
 
-    def source_batches(
-        held_rows: int,
-    ) -> Iterator[tuple[int, np.ndarray | None, int]]:
-        """Yield the source, dense source rows, and row count of each batch.
+    def batch_pieces(
+        window_rows: int, sparse: bool, heads: bool
+    ) -> Iterator[tuple[RowPlanWindow, Iterator[tuple[int, np.ndarray, np.ndarray]]]]:
+        """Yield each batch of merged rows with its pieces of source rows.
 
-        Batches follow the destination rows; a source without the assay has
-        no rows to read. A block's rows are held ``held_rows`` at a time,
-        read a chunk column at a time, when that spans several batches, and
-        read a batch at a time otherwise.
+        A piece is a source, the rows of the batch that it fills, and the
+        source rows for them. With ``window_rows``, each source's rows come
+        from a window of that many held rows, or with ``sparse`` from a CSR
+        window of a stored shard of the source, which keep their ``heads``
+        apart; otherwise each batch reads its rows of each source as it
+        comes. A piece's rows may be a view of a window that the next piece
+        refills, so each piece is used before the next is asked for.
         """
-        for block in iter_row_plan_segments(row_plan):
-            assay = assays[block.sourceIdx]
-            reader = readers[block.sourceIdx]
-            runs = column_runs[block.sourceIdx]
-            rows = np.asarray(block.localRows, dtype=np.int64)
-            if (
-                assay is None
-                or reader is None
-                or runs is None
-                or int(assay.feats.N) == 0
-            ):
-                for offset in range(0, rows.size, batch_rows):
-                    yield block.sourceIdx, None, min(batch_rows, rows.size - offset)
-                continue
-            if held_rows <= batch_rows:
-                for offset in range(0, rows.size, batch_rows):
-                    batch = rows[offset : offset + batch_rows]
-                    values = controlled_compute(reader[batch, :], resources.workers)
-                    yield block.sourceIdx, values, batch.size
-                continue
-            for start in range(0, rows.size, held_rows):
-                taken = rows[start : start + held_rows]
-                held = np.empty((taken.size, int(reader.shape[1])), dtype=reader.dtype)
-                column = 0
-                for run in runs:
-                    stop = column + int(run.shape[1])
-                    held[:, column:stop] = controlled_compute(
-                        run[taken, :], resources.workers
+        held = (
+            [
+                None
+                if reader is None or runs is None
+                else _HeldSourceRows(
+                    reader,
+                    runs,
+                    int(reader.chunksize[0]) if sparse else window_rows,
+                    resources.workers,
+                    sparse=sparse,
+                    first_row=first,
+                    keep_head=heads,
+                )
+                for reader, runs, first in zip(
+                    readers, column_runs, row_plan.firstCells, strict=True
+                )
+            ]
+            if window_rows
+            else None
+        )
+
+        def pieces(
+            window: RowPlanWindow,
+        ) -> Iterator[tuple[int, np.ndarray, np.ndarray]]:
+            for part in window.parts:
+                reader = readers[part.sourceIdx]
+                if reader is None:
+                    continue
+                first = int(part.localRows[0])
+                count = int(part.localRows.size)
+                if held is None:
+                    values = controlled_compute(
+                        reader[first : first + count, :], resources.workers
                     )
-                    column = stop
-                for offset in range(0, taken.size, batch_rows):
-                    values = held[offset : offset + batch_rows]
-                    yield block.sourceIdx, values, int(values.shape[0])
-                # The consumers let go of each batch before they ask for the
-                # next, so the next rows are read without these.
-                del held, values
+                    yield part.sourceIdx, part.positions, values
+                    del values
+                    continue
+                window_source = held[part.sourceIdx]
+                assert window_source is not None
+                for offset, values in window_source.take(first, count):
+                    yield (
+                        part.sourceIdx,
+                        part.positions[offset : offset + int(values.shape[0])],
+                        values,
+                    )
+                    del values
+
+        for window in iter_row_plan_windows(row_plan, batch_rows):
+            yield window, pieces(window)
+
+    destination_shard_rows = array_shard_rows(destination)
+
+    def band_writes(resident: int) -> int:
+        """Return the dense bands that the write writes at once beside ``resident`` bytes, or 0 when one does not fit."""
+        try:
+            return plan_dense_write(
+                destination,
+                resources,
+                row_band_task_count(row_plan.nCells, destination_shard_rows),
+                io=io,
+                residentBytes=resident,
+            ).writeWorkers
+        except MemoryBudgetError:
+            return 0
 
     if all(
         np.unique(order_map).size == order_map.size
-        for assay, order_map in zip(assays, kept_maps, strict=True)
-        if assay is not None and int(assay.feats.N) > 0
+        for reader, order_map in zip(readers, kept_maps, strict=True)
+        if reader is not None
     ):
-        shard_rows = array_shard_rows(destination)
         mask_bytes = np.dtype(bool).itemsize if destination_dtype.kind in "fc" else 0
-        # A batch holds the cast of its source rows, its destination rows and
-        # a float destination's zero mask, beside the band it is copied into.
-        # A batch read alone also holds its source rows and what its read
-        # decodes; a batch cut from held cells takes its rows as a view of
-        # them, beside the read of the held cells.
+        cast_bytes = (
+            destination_dtype.itemsize
+            if any(
+                reader.dtype != destination_dtype
+                for reader in readers
+                if reader is not None
+            )
+            else 0
+        )
+        # A batch holds the merged rows that it assembles, a float
+        # destination's zero mask and its window's index arrays, and, when a
+        # source's counts take another type, the cast of a piece's source
+        # rows, beside the band that the batch is copied into.
         batch_reserve = (
-            batch_rows * source_n_feats * destination_dtype.itemsize
+            piece_rows * source_n_feats * cast_bytes
             + batch_rows * alignment.nFeats * (destination_dtype.itemsize + mask_bytes)
-            + shard_rows * alignment.nFeats * destination_dtype.itemsize
+            + destination_shard_rows * alignment.nFeats * destination_dtype.itemsize
+            + batch_rows * WINDOW_BYTES_PER_ROW
         )
 
-        def dense_write(held_rows: int) -> tuple[int, int] | None:
-            """Return the bytes that a dense write holding ``held_rows`` rows keeps and reserves for its producer, or None when they do not fit."""
-            if held_rows > batch_rows:
-                held = held_bytes(held_rows)
-                reserve = batch_reserve + held_read_bytes(held_rows)
-            else:
-                held = 0
+        def dense_write(
+            window_rows: int, sparse: bool
+        ) -> tuple[int, int, int, bool] | None:
+            """Return the bytes that a dense write holding windows of ``window_rows`` rows, or ``sparse`` ones, keeps and reserves for its producer, the bands it writes at once, and whether the windows keep their heads, or None when they do not fit.
+
+            The windows keep their heads unless that leaves the write fewer
+            bands at once.
+            """
+            if not window_rows:
+                # A batch read alone also holds a piece's source rows and what
+                # its read decodes.
                 reserve = (
                     batch_reserve
-                    + batch_rows * source_n_feats * value_bytes
+                    + piece_rows * source_n_feats * value_bytes
                     + requirements.extraProducerBytes(0)
                 )
-            try:
-                plan_dense_write(
-                    destination,
-                    resources,
-                    row_band_task_count(row_plan.nCells, shard_rows),
-                    io=io,
-                    residentBytes=requirements.residentBytes + held + reserve,
-                )
-            except MemoryBudgetError:
-                return None
-            return held, reserve
+                writes = band_writes(requirements.residentBytes + reserve)
+                return (0, reserve, writes, False) if writes else None
+            reserve = batch_reserve + held_read_bytes(window_rows, sparse)
+            best = None
+            for heads in (True, False):
+                held = held_bytes(window_rows, sparse, heads)
+                writes = band_writes(requirements.residentBytes + held + reserve)
+                if writes and (best is None or writes > best[2]):
+                    best = (held, reserve, writes, heads)
+            return best
 
-        def dense_batches(held_rows: int) -> Iterator[np.ndarray]:
-            for source_idx, values, n_rows in source_batches(held_rows):
-                if values is None:
-                    dense = np.zeros(
-                        (n_rows, alignment.nFeats), dtype=destination_dtype
-                    )
-                else:
-                    dense = scatter_block_dense(
+        def dense_batches(
+            window_rows: int, sparse: bool, heads: bool
+        ) -> Iterator[np.ndarray]:
+            for window, pieces in batch_pieces(window_rows, sparse, heads):
+                dense = np.zeros(
+                    (window.nRows, alignment.nFeats), dtype=destination_dtype
+                )
+                for source_idx, positions, values in pieces:
+                    scatter_block_dense(
                         values,
                         kept_maps[source_idx],
                         alignment.nFeats,
                         destination_dtype,
+                        out=dense,
+                        rows=positions,
                     )
-                # The source rows may be a view of held rows.
-                del values
+                    # The source rows may be a view of a held window.
+                    del values
+                if destination_dtype.kind in "fc":
+                    # Sparse coordinates hold no negative zero.
+                    np.copyto(dense, 0, where=dense == 0)
                 yield dense
+                # The next batch is made without this one beside it.
+                del dense
 
-        held_rows = _held_block_rows(
-            block_rows, batch_rows, lambda rows: dense_write(rows) is not None
+        window_rows, sparse = _held_windows(
+            shard_rows,
+            part_rows,
+            lambda rows, sparse: (
+                0 if (planned := dense_write(rows, sparse)) is None else planned[2]
+            ),
         )
-        planned = dense_write(held_rows)
+        planned = dense_write(window_rows, sparse)
         if planned is not None:
-            held, reserve = planned
+            held, reserve, _, heads = planned
             counter = write_dense_from_row_batches(
                 destination,
-                dense_batches(held_rows),
+                dense_batches(window_rows, sparse, heads),
                 msg=f"Writing merged assay {assay_name}",
                 resources=resources,
                 io=io,
@@ -794,10 +952,12 @@ def write_assay_counts(
                 root, assay_name, workspace, destination, summary, counter
             )
 
-    def sparse_plan(held_rows: int) -> SparseImportPlan:
-        """Plan the sparse write of batches cut from ``held_rows`` held rows."""
-        # The held rows' reads replace what a batch's read decodes, and a
-        # batch takes its source rows as a view of the held rows.
+    def sparse_plan(
+        window_rows: int, sparse: bool, heads: bool = False
+    ) -> SparseImportPlan:
+        """Plan the sparse write of batches cut from windows of ``window_rows`` held rows, or from ``sparse`` ones, with their ``heads``."""
+        # The windows' reads replace what a batch's read decodes, and a
+        # piece takes its source rows as a view of a dense window.
         decode = requirements.extraProducerBytes(0)
         return resolve_sparse_import_batch(
             (destination,),
@@ -806,64 +966,82 @@ def write_assay_counts(
             maxWindowNnz=requirements.maxWindowNnz,
             sourceDtype=requirements.sourceDtype,
             batchRows=batch_rows,
-            residentBytes=requirements.residentBytes + held_bytes(held_rows),
+            residentBytes=requirements.residentBytes
+            + held_bytes(window_rows, sparse, heads),
             extraProducerBytes=lambda width: (
                 requirements.extraProducerBytes(width)
                 - decode
                 - width * requirements.sourceRowBytes
-                + held_read_bytes(held_rows)
+                + held_read_bytes(window_rows, sparse)
             ),
         )
 
-    def sparse_fits(held_rows: int) -> bool:
-        try:
-            sparse_plan(held_rows)
-        except MemoryBudgetError:
-            return False
-        return True
+    def sparse_writes(window_rows: int, sparse: bool) -> tuple[int, bool]:
+        """Return the bands that the sparse write writes at once beside the windows, or 0 when they do not fit, and whether the windows keep their heads, unless that leaves fewer bands at once."""
+        best = (0, False)
+        for heads in (True, False) if window_rows else (False,):
+            try:
+                plan = sparse_plan(window_rows, sparse, heads)
+            except MemoryBudgetError:
+                continue
+            # Each band the sparse write writes is a dense band, which the
+            # plan admitted beside the windows and the producer once.
+            writes = max(
+                1,
+                band_writes(
+                    requirements.residentBytes
+                    + held_bytes(window_rows, sparse, heads)
+                    + plan.producerReserveBytes
+                ),
+            )
+            if writes > best[0]:
+                best = (writes, heads)
+        return best
 
-    held_rows = _held_block_rows(block_rows, batch_rows, sparse_fits)
+    window_rows, sparse = _held_windows(
+        shard_rows, part_rows, lambda rows, sparse: sparse_writes(rows, sparse)[0]
+    )
+    heads = sparse_writes(window_rows, sparse)[1]
     held = 0
-    if held_rows > batch_rows:
-        plan = sparse_plan(held_rows)
-        held = held_bytes(held_rows)
+    if window_rows:
+        plan = sparse_plan(window_rows, sparse, heads)
+        held = held_bytes(window_rows, sparse, heads)
 
     def remapped_batches() -> Iterator[coo_matrix]:
-        for source_idx, values, n_rows in source_batches(held_rows):
-            coordinates = (
-                empty_block_coo(n_rows, alignment.nFeats)
-                if values is None
-                else remap_block_to_coo(
+        for window, pieces in batch_pieces(window_rows, sparse, heads):
+            # A batch of cells of sources without the assay has no coordinates.
+            rows = [np.empty(0, dtype=np.int64)]
+            columns = [np.empty(0, dtype=np.int64)]
+            data = [np.empty(0, dtype=destination_dtype)]
+            for source_idx, positions, values in pieces:
+                coordinates = remap_block_to_coo(
                     values,
                     kept_maps[source_idx],
                     alignment.nFeats,
                     resources.workers,
                     destination_dtype,
                 )
+                # The source rows may be a view of a held window.
+                del values
+                rows.append(positions[coordinates.row])
+                columns.append(np.asarray(coordinates.col))
+                data.append(np.asarray(coordinates.data))
+                del coordinates
+            # Each source's coordinates are canonical and the sources fill
+            # different rows; the shard buffer sorts the rows of the batch.
+            yield coo_matrix(
+                (np.concatenate(data), (np.concatenate(rows), np.concatenate(columns))),
+                shape=(window.nRows, alignment.nFeats),
             )
-            # The source rows may be a view of held rows.
-            del values
-            yield coordinates
-
-    def block_stream() -> Iterator[coo_matrix]:
-        # Split each row-plan block into planner-admitted batch widths so peak
-        # residency matches resolve_sparse_import_batch without restacking.
-        total_batches = sum(
-            1
-            for _ in iter_row_plan_segments(
-                row_plan,
-                segment_rows=batch_rows,
-            )
-        )
-        yield from iter_progress(
-            remapped_batches(),
-            total=total_batches,
-            desc=f"Writing merged assay {assay_name}",
-        )
+            del rows, columns, data
 
     counter = accumulate_sparse_to_shards(
         destination,
-        block_stream(),
+        iter_progress(
+            remapped_batches(),
+            total=-(-row_plan.nCells // batch_rows),
+            desc=f"Writing merged assay {assay_name}",
+        ),
         resources=resources,
         residentBytes=requirements.residentBytes + held,
         producerReserveBytes=plan.producerReserveBytes,
@@ -888,32 +1066,224 @@ def _chunk_column_runs(counts: ChunkedArray) -> list[ChunkedArray]:
 def _held_read_bytes(run: ChunkedArray, rows: int) -> int:
     """Return what a read of ``rows`` rows of ``run``, one chunk column, holds beside the rows held.
 
-    The read takes the rows by an index array, so its charge counts Zarr's
-    indexers of them and its copy of the rows that it takes from each chunk,
-    which within one chunk column can be as large as the rows read.
+    A window reads its rows as a slice of ``run``, which keeps their
+    positions in an index array. The charge is that of a read of the rows
+    by an index array, which counts Zarr's indexers of them and its copy of
+    the rows that it takes from each chunk, and so holds the positions too.
     """
     selected = int(rows) * int(run.shape[1]) * run.dtype.itemsize
     return run._read_bytes(selected, rows_indexed=True)
 
 
-def _held_block_rows(
-    block_rows: int, batch_rows: int, fits: Callable[[int], bool]
+def _csr_rows_bytes(
+    reader: ChunkedArray, runs: list[ChunkedArray], values: int, rows: int
 ) -> int:
-    """Return the rows of a block of ``block_rows`` rows that a merge holds at once.
+    """Return what CSR pieces of ``rows`` rows of a source, one a chunk column of ``runs``, hold with ``values`` values: each value, with a spare one, its column and the row offsets, indexed as SciPy keeps them."""
+    index_bytes = (
+        4 if max(values, int(reader.shape[1])) <= np.iinfo(np.int32).max else 8
+    )
+    pieces = len(runs)
+    return (values + pieces) * (reader.dtype.itemsize + index_bytes) + pieces * (
+        rows + 1
+    ) * index_bytes
 
-    That is the most rows in whole batches of ``batch_rows``, up to the whole
-    block, that ``fits`` admits when they span two batches or more, or
-    ``batch_rows``, which reads a batch at a time, when none do.
+
+def _csr_window_bytes(
+    reader: ChunkedArray, runs: list[ChunkedArray], values: int, piece_rows: int
+) -> tuple[int, int, int]:
+    """Return what a CSR window of a stored shard of a source holds, and the most that its refill and a piece taken from it hold beside it.
+
+    ``values`` bounds the nonzero values of a shard, and ``runs`` are the
+    source's chunk columns. The window holds the CSR rows of each chunk
+    column: the values, each with a spare one, their columns and the row
+    offsets, indexed as SciPy keeps them. A refill holds the read of a chunk
+    column beside them, and a piece of up to ``piece_rows`` rows its dense
+    rows.
     """
-    batches = -(-int(block_rows) // int(batch_rows))
-    if batches < 2:
-        return batch_rows
+    rows, columns = int(reader.chunksize[0]), int(reader.shape[1])
+    take = min(rows, int(piece_rows)) * columns * reader.dtype.itemsize
+    return (
+        _csr_rows_bytes(reader, runs, values, rows),
+        _held_read_bytes(runs[0], rows),
+        take,
+    )
 
-    def rows(extra: int) -> int:
-        """Return the rows of the first batch and ``extra`` more, at most the block."""
-        return min(int(block_rows), (extra + 1) * int(batch_rows))
 
-    return rows(affordable_width(lambda extra: fits(rows(extra)), batches - 1))
+def _held_windows(
+    shard_rows: int, part_rows: int, writes: Callable[[int, bool], int]
+) -> tuple[int, bool]:
+    """Return the rows of each source that a merge holds at once, or 0 to read batch by batch, and whether it holds them as CSR.
+
+    ``writes`` gives the bands that the write writes at once beside windows
+    of the rows given of every source, dense or as CSR, or 0 when they do
+    not fit. A merge holds dense windows of ``shard_rows``, a stored shard
+    of the sources, when they leave the write two bands at once, or as many
+    as CSR windows of a stored shard of each source would, and otherwise
+    the CSR windows, when they fit. A write of one band at a time runs in
+    the producer's thread (:func:`~cytearc.storage.parallel.stream_shards`),
+    so reading and writing take turns; from two bands on they overlap, and
+    more bands gain less than the CSR windows' conversion costs. When
+    neither fits, the merge holds the most dense rows that fit.
+    ``part_rows`` are the cells that a batch takes from the largest source;
+    dense windows of fewer rows than these, or than the shard when that is
+    less, would decode a shard more often than batches that read their own
+    rows, so the write then reads each batch's rows as the batch comes.
+    """
+    least = min(int(part_rows), int(shard_rows))
+    if least <= 0:
+        return 0, False
+    dense = writes(int(shard_rows), False)
+    csr = writes(int(shard_rows), True)
+    if dense and dense >= min(csr, 2):
+        return int(shard_rows), False
+    if csr:
+        return int(shard_rows), True
+    rows = affordable_width(lambda rows: writes(rows, False) > 0, int(shard_rows))
+    return (rows if rows >= least else 0), False
+
+
+class _HeldSourceRows:
+    """The rows of one merge source, held a window at a time as batches take them in order.
+
+    A window holds up to ``window_rows`` rows, read a chunk column at a time,
+    and never crosses the edge of a stored shard, so a window of a whole
+    shard or more decodes each chunk of its shards once. With ``sparse``, a
+    window holds each chunk column's rows as CSR, and gives the rows taken
+    from it as dense copies. The source gives its rows from ``first_row``
+    on, then from its first row up to that one
+    (:class:`~cytearc.merge.row_plan.RowPlan`). The rows before
+    ``first_row`` in its shard, the head, come last: with ``keep_head``, a
+    window of whole shards keeps them apart once it moves on, rather than
+    read their shard again. A window of part of a source of one shard that
+    reaches the source's last row goes on from its first row, in the same
+    read, so the windows decode each chunk as often as windows from row 0.
+    """
+
+    def __init__(
+        self,
+        reader: ChunkedArray,
+        runs: list[ChunkedArray],
+        window_rows: int,
+        workers: int,
+        *,
+        sparse: bool = False,
+        first_row: int = 0,
+        keep_head: bool = False,
+    ) -> None:
+        self._reader = reader
+        self._runs = runs
+        self._windowRows = max(1, int(window_rows))
+        self._shardRows = max(1, int(reader.chunksize[0]))
+        self._workers = workers
+        self._sparse = sparse
+        self._start = self._stop = 0
+        # The rows from the source's first that a window holds after its
+        # last row, when it wraps round.
+        self._wrapStop = 0
+        self._firstRow = int(first_row)
+        self._values: Any = None
+        self._headStart = int(first_row) - int(first_row) % self._shardRows
+        self._headStop = int(first_row) if keep_head else self._headStart
+        self._head: Any = None
+
+    def take(self, first: int, count: int) -> Iterator[tuple[int, np.ndarray]]:
+        """Yield the source rows ``first`` to ``first + count``, in views of the windows that hold them or dense copies of CSR ones, each with its offset among the rows."""
+        offset = 0
+        while offset < count:
+            row = first + offset
+            if self._head is not None and self._headStart <= row < self._headStop:
+                width = min(count - offset, self._headStop - row)
+                yield offset, self._rows(self._head, row - self._headStart, width)
+                offset += width
+                continue
+            if row < self._wrapStop and not self._start <= row < self._stop:
+                width = min(count - offset, self._wrapStop - row)
+                start = self._stop - self._start + row
+                yield offset, self._rows(self._values, start, width)
+                offset += width
+                continue
+            if not self._start <= row < self._stop:
+                self._refill(row)
+            width = min(count - offset, self._stop - row)
+            # No reference to the window outlives the yield, so a refill lets
+            # it go before it reads the next.
+            yield offset, self._rows(self._values, row - self._start, width)
+            offset += width
+
+    def _rows(self, values: Any, start: int, width: int) -> np.ndarray:
+        """Return ``width`` rows of held ``values`` from row ``start``: a view of dense rows, or a dense copy of CSR ones."""
+        if not self._sparse:
+            dense: np.ndarray = values[start : start + width]
+            return dense
+        rows = np.zeros((width, int(self._reader.shape[1])), self._reader.dtype)
+        column = 0
+        for piece in values:
+            fill_dense_from_csr(piece, start, rows, column)
+            column += int(piece.shape[1])
+        return rows
+
+    def _refill(self, row: int) -> None:
+        """Hold the window that holds source row ``row``.
+
+        A window of part of a shard starts at the row, and in a source of one
+        shard goes on from the source's first row once it reaches the last;
+        a window of whole shards starts at the shard that holds it, so the
+        window of the first row also holds the head. The head is kept apart
+        when that window moves on. Once the source has wrapped round, a
+        window of whole shards stops at the head's shard, or after it when
+        the head was not kept, so it reads no shard that it gave before.
+        """
+        if (
+            self._head is None
+            and self._values is not None
+            and self._start <= self._headStart < self._headStop <= self._stop
+            and not self._headStart <= row < self._headStop
+        ):
+            begin, end = self._headStart - self._start, self._headStop - self._start
+            self._head = (
+                [piece[begin:end] for piece in self._values]
+                if self._sparse
+                else self._values[begin:end].copy()
+            )
+        # The previous window goes before the next is read.
+        self._values = None
+        n_rows = int(self._reader.shape[0])
+        shard = self._shardRows
+        wrap = 0
+        if self._windowRows < shard:
+            begin = row
+            stop = min(n_rows, row + self._windowRows, (row // shard + 1) * shard)
+            if n_rows <= shard and stop == n_rows and row >= self._firstRow:
+                # Before the source wraps round, its first rows are in the same
+                # shard, so one read decodes them with the last.
+                wrap = min(self._firstRow, row + self._windowRows - n_rows)
+        else:
+            begin = row - row % shard
+            stop = min(n_rows, begin + self._windowRows // shard * shard)
+            if row < self._firstRow:
+                # The head's shard is read again only for a head not kept.
+                read_head = self._headStop == self._headStart < self._firstRow
+                stop = min(stop, self._headStart + (shard if read_head else 0))
+        # A window that missed its row would leave the take without rows.
+        assert begin <= row < stop
+        rows: Any = np.r_[begin:stop, 0:wrap] if wrap else slice(begin, stop)
+        if self._sparse:
+            values: Any = [
+                csr_from_dense(controlled_compute(run[rows, :], self._workers))
+                for run in self._runs
+            ]
+        else:
+            values = np.empty(
+                (stop - begin + wrap, int(self._reader.shape[1])),
+                dtype=self._reader.dtype,
+            )
+            column = 0
+            for run in self._runs:
+                end = column + int(run.shape[1])
+                values[:, column:end] = controlled_compute(run[rows, :], self._workers)
+                column = end
+        self._start, self._stop, self._values = begin, stop, values
+        self._wrapStop = wrap
 
 
 def _finish_assay_counts(

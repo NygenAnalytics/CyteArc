@@ -29,8 +29,7 @@ from .harness import Ladder
 pytestmark = pytest.mark.benchmark
 
 SOURCES = ("left", "right")
-# Row-plan blocks follow the row chunks of the source counts. The default
-# layout chunks uint16 counts of 25,000 features in 2,000 rows.
+# The merged cells whose IDs a resume verifies at a time.
 PLAN_BLOCK_ROWS = 2_048
 # A merge budgets the memory of its sources, which defaults to the machine's
 # memory and holds whole source chunks; 8 GiB does so at every size here.
@@ -118,25 +117,20 @@ def _identity_inputs(n_cells: int):
     row plan fixes, independently of the merge's own ID generation.
     """
     from cytearc.merge.metadata import metadata_chunk_rows
-    from cytearc.merge.row_plan import build_row_plan, iter_row_plan_segments
+    from cytearc.merge.row_plan import build_row_plan
     from cytearc.storage.arrays import create_metadata_column
 
     ids = _barcodes(n_cells)
     half = n_cells // 2
     sources = (ids[:half], ids[half:])
     tables = [_cell_table(values) for values in sources]
-    plan = build_row_plan(
-        [values.size for values in sources],
-        [PLAN_BLOCK_ROWS] * len(sources),
-        list(SOURCES),
-        seed=0,
-    )
+    plan = build_row_plan([values.size for values in sources], list(SOURCES), seed=0)
     merged = np.empty(n_cells, dtype=_merged_id_dtype(ids))
-    for segment in iter_row_plan_segments(plan):
-        name = SOURCES[segment.sourceIdx]
-        merged[segment.destStart : segment.destStart + segment.localRows.size] = (
-            np.char.add(f"{name}__", sources[segment.sourceIdx][segment.localRows])
-        )
+    # Each source's cells take, in their order from the source's first cell
+    # and then from its first stored cell, the rows the plan gives it.
+    for index, name in enumerate(SOURCES):
+        given = np.roll(sources[index], -plan.firstCells[index])
+        merged[plan.owners == index] = np.char.add(f"{name}__", given)
     group = zarr.open_group(store=MemoryStore(), mode="w")
     stored = create_metadata_column(
         group, "ids", data=merged, chunkSize=metadata_chunk_rows(plan)
@@ -149,7 +143,7 @@ def test_verify_merged_cell_ids(bench) -> None:
 
     def make(n_cells: int):
         plan, tables, stored = _identity_inputs(n_cells)
-        # A resume plan validates identity in segments of one row-plan block.
+        # A resume validates identity in windows of the metadata width.
         return lambda: verify_merged_cell_ids(
             stored, plan, tables, block_rows=PLAN_BLOCK_ROWS
         )
@@ -163,7 +157,9 @@ def test_verify_merged_cell_ids(bench) -> None:
         tampered = zarr.open_group(store=MemoryStore(), mode="w").create_array(
             "ids", data=swapped, chunks=stored.chunks
         )
-        with pytest.raises(ValueError, match="order of cells does not match"):
+        with pytest.raises(
+            ValueError, match="cell IDs or their order differ from this merge's"
+        ):
             verify_merged_cell_ids(tampered, plan, tables, block_rows=PLAN_BLOCK_ROWS)
 
     # Every resume of a merge plans this pass over all merged cells.
@@ -317,7 +313,7 @@ def test_h5ad_export_features(bench, stores, tmp_path) -> None:
 
 def test_merge_counts(bench, stores, tmp_path) -> None:
     from cytearc.merge.features import align_features
-    from cytearc.merge.row_plan import build_row_plan, iter_row_plan_segments
+    from cytearc.merge.row_plan import build_row_plan
     from cytearc.merge.writer import create_assay_counts, write_assay_counts
     from cytearc.storage.budget import ResourceBudget
     from cytearc.storage.count_matrix import DEFAULT_COUNT_MATRIX_POLICY
@@ -329,10 +325,7 @@ def test_merge_counts(bench, stores, tmp_path) -> None:
         assays = [stores(name, n_cells).RNA for name in SOURCES]
         alignment = align_features(assays, list(SOURCES))
         plan = build_row_plan(
-            [int(assay.rawData.shape[0]) for assay in assays],
-            [int(assay.rawData.chunksize[0]) for assay in assays],
-            list(SOURCES),
-            seed=0,
+            [int(assay.rawData.shape[0]) for assay in assays], list(SOURCES), seed=0
         )
         root = zarr.open_group(str(tmp_path / f"merged_{n_cells}.zarr"), mode="w")
         create_assay_counts(
@@ -360,11 +353,11 @@ def test_merge_counts(bench, stores, tmp_path) -> None:
         _assays, _alignment, plan, root = prepared(n_cells)
         sources = [_counts(name, n_cells) for name in SOURCES]
         expected = np.empty((n_cells, inputs.N_GENES), dtype=np.uint16)
-        for segment in iter_row_plan_segments(plan):
-            stop = segment.destStart + segment.localRows.size
-            expected[segment.destStart : stop] = sources[segment.sourceIdx][
-                segment.localRows
-            ]
+        # Each source's rows, from its first cell and then from its first
+        # stored cell, fill the merged rows that the plan gives it.
+        for index, values in enumerate(sources):
+            given = np.roll(values, -plan.firstCells[index], axis=0)
+            expected[plan.owners == index] = given
         assert rows == n_cells
         np.testing.assert_array_equal(root["RNA/counts"][:], expected)
 

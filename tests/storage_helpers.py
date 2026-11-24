@@ -517,3 +517,89 @@ def stored_bytes(store: Any) -> dict[str, bytes]:
         return values
 
     return sync(read())
+
+
+# The cells of each group in the files of import_grouped_cells: source a
+# lists group x, then group y; source b lists group z.
+GROUPED_CELLS = {"a": (("x", 150), ("y", 150)), "b": (("z", 200),)}
+
+
+def import_grouped_cells(
+    folder: Path,
+    *,
+    shuffled: Mapping[str, bool],
+    seeds: Mapping[str, int] | None = None,
+) -> dict[str, "DataStore"]:
+    """Import sources ``a`` and ``b`` of ``GROUPED_CELLS``, shuffled or in their file's order, and open them.
+
+    A cell's ID is its group and its row among the group's cells, such as
+    ``y12``, and its counts are its row in its file, plus one, and 1. Each
+    shuffle takes its seed from ``seeds``, or 1 for ``a`` and 2 for ``b``.
+    """
+    from scipy.sparse import csr_matrix
+
+    from cytearc import SparseToZarr
+
+    stores = {}
+    for seed, (name, groups) in enumerate(GROUPED_CELLS.items(), start=1):
+        ids = [f"{group}{row}" for group, size in groups for row in range(size)]
+        counts = np.ones((len(ids), 2), dtype=np.uint32)
+        counts[:, 0] = np.arange(1, len(ids) + 1)
+        location = folder / f"{name}.zarr"
+        SparseToZarr(
+            csr_matrix(counts),
+            str(location),
+            cell_ids=ids,
+            feature_ids=["f0", "f1"],
+            assay_name="RNA",
+            nthreads=1,
+            shuffle_cells=shuffled[name],
+            shuffle_seed=seed if seeds is None else seeds[name],
+        ).dump()
+        stores[name] = open_store(location)
+    return stores
+
+
+def grouped_file_rows(ids: Sequence[str]) -> np.ndarray:
+    """Return each merged cell's row in its source's file, from IDs of ``GROUPED_CELLS`` such as ``a__y12``."""
+    rows = []
+    for identity in ids:
+        name, cell = identity.split("__")
+        offset = 0
+        for group, size in GROUPED_CELLS[name]:
+            if cell[0] == group:
+                rows.append(offset + int(cell[1:]))
+            offset += size
+    return np.asarray(rows, dtype=np.int64)
+
+
+def assert_random_sample_order(ids: Sequence[str]) -> None:
+    """Check merged IDs of ``GROUPED_CELLS`` against the laws of a uniformly random order of the cells.
+
+    In a uniformly random order the sources follow each other in as many
+    runs as the Wald-Wolfowitz law expects, each source's cells lie in no
+    relation to their rows in its file (Spearman's rho near 0), and a
+    window of cells holds group x as a random sample does (hypergeometric).
+    The thresholds, 4.5 standard errors and 1e-6 quantiles, keep a correct
+    order passing; orders of runs of one source or of a file fail by far.
+    """
+    from scipy import stats
+
+    sources = np.asarray([identity.startswith("b__") for identity in ids], dtype=int)
+    n_cells = sources.size
+    n_b = int(sources.sum())
+    n_a = n_cells - n_b
+    runs = 1 + int(np.count_nonzero(np.diff(sources)))
+    mean = 1 + 2 * n_a * n_b / n_cells
+    variance = 2 * n_a * n_b * (2 * n_a * n_b - n_cells) / (n_cells**2 * (n_cells - 1))
+    assert abs(runs - mean) / np.sqrt(variance) < 4.5, f"{runs} runs of sources"
+    file_rows = grouped_file_rows(ids)
+    for source in (0, 1):
+        positions = np.flatnonzero(sources == source)
+        rho = stats.spearmanr(positions, file_rows[positions]).statistic
+        assert abs(rho) < 4.5 / np.sqrt(positions.size - 1), f"rho = {rho}"
+    in_x = np.asarray([identity.startswith("a__x") for identity in ids])
+    law = stats.hypergeom(n_cells, int(in_x.sum()), 50)
+    for window in (slice(0, 50), slice(n_cells - 50, n_cells)):
+        count = int(in_x[window].sum())
+        assert law.ppf(1e-6) <= count <= law.isf(1e-6), f"{count} cells of x"
