@@ -102,6 +102,40 @@ def recomputations() -> Iterator[list[str]]:
     messages[:] = [message for message in messages if message.startswith("Recomputing")]
 
 
+def drawn_shuffles(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Return the cells of each shuffle that imports draw from now on, as they draw them.
+
+    Imports take ``storage.cell_order.shuffled_order`` when they shuffle, so
+    each draws its order through the recorder, which draws the same order.
+    """
+    from cytearc.storage import cell_order
+
+    drawn: list[int] = []
+    draw = cell_order.shuffled_order
+
+    def recorded(n_rows: int, seed: int) -> np.ndarray:
+        drawn.append(int(n_rows))
+        return draw(n_rows, seed)
+
+    monkeypatch.setattr(cell_order, "shuffled_order", recorded)
+    return drawn
+
+
+def shuffle_refusal(n_cells: int, held: int, budget: int) -> str:
+    """The refusal of a shuffle of ``n_cells`` cells beside ``held`` bytes, at ``budget``.
+
+    Drawing the order and its inverse holds 24 bytes a cell at its peak, as
+    ``tests/test_cell_order.py`` traces it.
+    """
+    needed = held + 24 * n_cells
+    beside = f" beside the {held} bytes that the import holds" if held else ""
+    return (
+        f"Shuffling {n_cells} cells holds about {needed} bytes for their random "
+        f"order{beside}, more than the memory budget of {budget} bytes. Raise "
+        f"mem_budget to at least {needed} bytes."
+    )
+
+
 def recomputation(
     operation: str, ref: "ArtifactRef", revision: int, current: int, change: str
 ) -> str:

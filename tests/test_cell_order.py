@@ -16,8 +16,10 @@ from zarr.storage import MemoryStore
 from cytearc.storage.cell_order import (
     destination_rows,
     CELL_ORDER_ATTR,
+    SHUFFLE_BYTES_PER_CELL,
     SOURCE_ROW,
     SOURCE_ROW_ROLE,
+    check_shuffle_fits,
     recorded_shuffle_seed,
     shuffle_seed_argument,
     shuffled_order,
@@ -26,6 +28,7 @@ from cytearc.storage.cell_order import (
     source_order_rows,
     write_shuffled_cell_order,
 )
+from cytearc.utils.memory_budget import MemoryBudgetError
 from tests.storage_helpers import by_cell_id, open_store
 
 _MASK = (1 << 64) - 1
@@ -172,6 +175,72 @@ def test_destination_rows_send_each_source_row_to_its_row_of_the_order(n_rows) -
 def test_destination_rows_refuse_what_is_not_one_integer_row_per_cell(order) -> None:
     with pytest.raises(ValueError, match="one integer row per cell"):
         destination_rows(order)
+
+
+def _traced_peak(call) -> int:
+    """Return the most bytes that ``call`` holds at once, traced on its second run."""
+    import tracemalloc
+
+    call()
+    tracemalloc.start()
+    try:
+        call()
+        return tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+
+def test_drawing_a_shuffle_holds_no_more_than_its_charge() -> None:
+    # 30,000 cells of 8 bytes stay below the 256 KiB from which NumPy reuses
+    # the temporaries of an expression, which only some Python builds allow,
+    # so the trace counts what every build holds. Three arrays of 8 bytes a
+    # cell are held at the peak: the hashes as they are mixed and the two
+    # steps of the mixing, and later the order, its inverse and their
+    # positions. A charge without one of them is passed by more than a cell's
+    # byte, as is a charge of a fourth.
+    n_cells = 30_000
+    charge = SHUFFLE_BYTES_PER_CELL * n_cells
+    order_peak = _traced_peak(lambda: shuffled_order(n_cells, 5))
+    assert charge - n_cells < order_peak <= charge + 4_096
+    # An import draws the order and then its inverse, holding the order.
+    both_peak = _traced_peak(lambda: destination_rows(shuffled_order(n_cells, 5)))
+    assert charge - n_cells < both_peak <= charge + 4_096
+    order = shuffled_order(n_cells, 5)
+    inverse_peak = order.nbytes + _traced_peak(lambda: destination_rows(order))
+    assert charge - n_cells < inverse_peak <= charge + 4_096
+
+
+def test_a_shuffle_beyond_the_budget_is_refused_naming_the_budget_that_holds_it() -> (
+    None
+):
+    # 1,000 cells at 24 bytes each beside 5,000 held bytes.
+    check_shuffle_fits(1_000, 5_000, 29_000)
+    with pytest.raises(MemoryBudgetError) as caught:
+        check_shuffle_fits(1_000, 5_000, 28_999)
+    item = "their random order beside the 5000 bytes that the import holds"
+    assert (caught.value.needed_bytes, caught.value.budget_bytes) == (29_000, 28_999)
+    assert caught.value.item == item
+    assert str(caught.value) == (
+        f"Shuffling 1000 cells holds about 29000 bytes for {item}, more than the "
+        "memory budget of 28999 bytes. Raise mem_budget to at least 29000 bytes."
+    )
+    # An import that holds nothing else names the shuffle alone.
+    check_shuffle_fits(3, 0, 72)
+    with pytest.raises(MemoryBudgetError) as alone:
+        check_shuffle_fits(3, 0, 71)
+    assert (alone.value.needed_bytes, alone.value.item) == (72, "their random order")
+    assert str(alone.value).startswith(
+        "Shuffling 3 cells holds about 72 bytes for their random order, more than"
+    )
+
+
+def test_a_shuffle_of_no_cells_is_never_refused() -> None:
+    # Drawing the order of no cells holds nothing, so what an import holds
+    # beside it is refused by the import's own steps, not as a shuffle.
+    check_shuffle_fits(0, 5_000, 1)
+    check_shuffle_fits(0, 0, 0)
+    with pytest.raises(MemoryBudgetError):
+        check_shuffle_fits(1, 0, 23)
 
 
 def test_the_record_and_source_rows_round_trip() -> None:

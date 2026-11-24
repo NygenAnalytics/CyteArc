@@ -82,6 +82,11 @@ class CSVtoZarr:
             reader counted.
         OSError: If ``shuffle_cells`` is True and the temporary disk lacks
             room for the shuffled rows.
+        MemoryBudgetError: If ``shuffle_cells`` is True and ``mem_budget``
+            cannot hold the shuffle of the cells, before the shuffle runs, or
+            one chunk of rows and their spill beside the order of the cells
+            and its inverse, before the store is created. Each names the
+            budget that holds it.
 
     Attributes:
         csvr: A CSVReader object
@@ -112,7 +117,11 @@ class CSVtoZarr:
     ) -> None:
         overwrite = bool_argument(overwrite, "overwrite")
         self.shuffleCells = bool_argument(shuffle_cells, "shuffle_cells")
-        from ..storage.cell_order import shuffle_seed_argument, shuffled_order
+        from ..storage.cell_order import (
+            check_shuffle_fits,
+            shuffle_seed_argument,
+            shuffled_order,
+        )
 
         self.shuffleSeed = shuffle_seed_argument(shuffle_seed)
         from ..utils.matrix_values import import_values_argument
@@ -160,6 +169,9 @@ class CSVtoZarr:
         self._shuffledStore: "SparseRowStore | None" = None
         self._shuffledParts: dict[int, list[tuple[np.ndarray, np.ndarray]]] = {}
         if self.shuffleCells:
+            # Drawing the order and its inverse comes before every array that
+            # the import charges.
+            check_shuffle_fits(self.csvr.nCells, 0, self.resources.memoryBytes)
             self._cellOrder = shuffled_order(self.csvr.nCells, self.shuffleSeed)
             self._spill_rows()
             cell_ids = cell_ids[self._cellOrder]

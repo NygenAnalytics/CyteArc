@@ -20,6 +20,11 @@ readers and subsets leave gaps in the values, they are only sorted and ranked,
 never taken as positions. A merge or composite interleaves its sources' cells
 in a random order and keeps each source's order, so it records the shuffle,
 with the seed of its interleaving, when every source records one.
+
+Drawing the order and its inverse holds ``SHUFFLE_BYTES_PER_CELL`` bytes for
+each cell at its peak, which an import checks against its memory budget with
+:func:`check_shuffle_fits` before it draws them, and a merge charges to its
+row plan.
 """
 
 from typing import Any, Literal
@@ -29,6 +34,7 @@ import zarr
 
 from ..utils.arguments import integer_argument, quoted_value
 from ..utils.digest import mix64_array
+from ..utils.memory_budget import memory_refusal
 from .arrays import MetadataBlock, create_streamed_metadata_column
 from .layout import column_chunk_rows
 from .profiles import StorageProfile
@@ -37,10 +43,12 @@ from .types import as_zarr_array
 __all__ = [
     "CELL_ORDERS",
     "CELL_ORDER_ATTR",
+    "SHUFFLE_BYTES_PER_CELL",
     "SOURCE_ROW",
     "SOURCE_ROW_ROLE",
     "CellOrder",
     "cell_order_argument",
+    "check_shuffle_fits",
     "copy_cell_order",
     "destination_rows",
     "exported_cell_order",
@@ -68,6 +76,15 @@ SOURCE_ROW_ROLE = "source_row"
 
 CELL_ORDER_ATTR = "cellOrder"
 """Attribute of the cell table that records how an import shuffled its cells."""
+
+SHUFFLE_BYTES_PER_CELL = 24
+"""What drawing a shuffle holds for each cell at its peak.
+
+:func:`shuffled_order` mixes the hashes of the rows beside the two arrays of
+the mixing's steps (``utils.digest.mix64_array``), and then holds the hashes
+and the order that sorts them; :func:`destination_rows` holds the order, its
+inverse and their positions. Each array holds 8 bytes a cell.
+"""
 
 _MAX_SEED = 2**64 - 1
 # SplitMix64's increment, which spaces the row counters of the stream.
@@ -162,6 +179,34 @@ def destination_rows(order: np.ndarray) -> np.ndarray:
     destinations = np.empty(rows.size, dtype=np.int64)
     destinations[rows] = np.arange(rows.size, dtype=np.int64)
     return destinations
+
+
+def check_shuffle_fits(n_cells: int, held_bytes: int, budget_bytes: int) -> None:
+    """Refuse a shuffle of ``n_cells`` cells that the memory budget cannot hold beside ``held_bytes``.
+
+    Drawing the order with :func:`shuffled_order` and its inverse with
+    :func:`destination_rows` holds ``SHUFFLE_BYTES_PER_CELL`` bytes a cell
+    at its peak, beside the ``held_bytes`` that an import holds before it
+    shuffles, so the import checks them before it draws the order. A shuffle
+    of no cells holds nothing.
+
+    Raises:
+        MemoryBudgetError: If the shuffle and ``held_bytes`` need more than
+            ``budget_bytes``, naming the budget that holds them.
+    """
+    n_cells, held_bytes = int(n_cells), int(held_bytes)
+    needed = held_bytes + SHUFFLE_BYTES_PER_CELL * n_cells
+    if not n_cells or needed <= int(budget_bytes):
+        return
+    beside = (
+        f" beside the {held_bytes} bytes that the import holds" if held_bytes else ""
+    )
+    raise memory_refusal(
+        f"Shuffling {n_cells} cells",
+        f"their random order{beside}",
+        needed,
+        int(budget_bytes),
+    )
 
 
 def write_shuffled_cell_order(

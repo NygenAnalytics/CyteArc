@@ -47,6 +47,7 @@ from tests.row_store_helpers import (
     finalized_bytes,
     free_disk,
 )
+from tests.storage_helpers import drawn_shuffles, shuffle_refusal
 
 anndata = pytest.importorskip("anndata")
 
@@ -1428,6 +1429,46 @@ def test_what_a_shuffled_import_holds_beside_a_gathered_array_is_charged(
         + _N_CELLS
         + 8 * (_N_CELLS + 1)
     )
+
+
+@pytest.mark.parametrize("split", [False, True])
+def test_a_budget_without_room_for_the_shuffle_is_refused_before_it_runs(
+    tmp_path, monkeypatch, split
+) -> None:
+    source = tmp_path / "source.h5ad"
+    _write_source(source, "csr")
+    ids = [f"cell-{row}" for row in range(_N_CELLS)]
+    features = [f"feature-{f}" for f in range(_N_FEATURES)]
+    names = [f"gene-{f}" for f in range(_N_FEATURES)]
+    # The IDs and names that the reader keeps and the declared RNA
+    # membership, one boolean a cell, are held when the import shuffles. A
+    # split by feature type also holds each assay's six feature IDs and
+    # names as text of 4 bytes a character of the longest, and the int64
+    # index of each, and every feature's assay and column, two int64 arrays.
+    held = _id_bytes(ids) + _id_bytes(features) + _text_bytes(names) + _N_CELLS
+    if split:
+        held += 2 * (6 * 4 * 10 + 6 * 4 * 7) + _N_FEATURES * 8 + 2 * _N_FEATURES * 8
+    # Drawing the order and its inverse holds 24 bytes a cell beside them.
+    needed = held + 24 * _N_CELLS
+    drawn = drawn_shuffles(monkeypatch)
+    options = {"assay_split_key": "feature_types"} if split else {}
+    with pytest.raises(MemoryBudgetError) as caught:
+        _import(source, tmp_path / "refused.zarr", mem_budget=needed - 1, **options)
+    refusal = caught.value
+    assert (refusal.needed_bytes, refusal.budget_bytes) == (needed, needed - 1)
+    assert str(refusal) == shuffle_refusal(_N_CELLS, held, needed - 1)
+    # The import is refused before it draws the order or writes anything.
+    assert drawn == []
+    assert not (tmp_path / "refused.zarr").exists()
+    # With the budget it names, the import draws the order, and a later step
+    # of so small a budget, such as the check of its embeddings, refuses for
+    # itself, if at all.
+    try:
+        _import(source, tmp_path / "admitted.zarr", mem_budget=needed, **options)
+    except MemoryError as later:
+        assert "random order" not in str(later)
+    assert drawn == [_N_CELLS]
+    assert not _temporary_folders(tmp_path)
 
 
 @pytest.mark.parametrize("shuffle_cells", [False, True], ids=["file", "shuffled"])

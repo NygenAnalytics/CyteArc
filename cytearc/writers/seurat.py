@@ -304,9 +304,10 @@ class SeuratToZarr:
             is not an integer.
         OSError: If ``shuffle_cells`` is True and the temporary disk lacks
             room for the shuffled cells.
-        MemoryBudgetError: If ``shuffle_cells`` is True and a per-cell array
-            that the import holds whole does not fit in memory beside what
-            it holds throughout.
+        MemoryBudgetError: If ``shuffle_cells`` is True and the shuffle of
+            the cells does not fit in memory beside the count sources, before
+            the shuffle runs, or a per-cell array that the import holds whole
+            does not fit beside what it holds throughout.
 
     Attributes:
         policy: The count-matrix layout that each imported assay was written
@@ -343,6 +344,7 @@ class SeuratToZarr:
         self.shuffleCells = bool_argument(shuffle_cells, "shuffle_cells")
         from ..storage.cell_order import (
             SOURCE_ROW,
+            check_shuffle_fits,
             destination_rows,
             shuffle_seed_argument,
             shuffled_order,
@@ -525,6 +527,10 @@ class SeuratToZarr:
         # Whether a dump has begun, after which the shuffled cells are spent.
         self._shuffleSpent = False
         if self.shuffleCells:
+            # Drawing the order and its inverse runs beside the count sources.
+            check_shuffle_fits(
+                n_cells, self._source_resident_bytes(), self.resources.memoryBytes
+            )
             self._cellOrder = shuffled_order(n_cells, self.shuffleSeed)
             self._destinations = destination_rows(self._cellOrder)
         # The dtype of each cell metadata column, which a shuffled import

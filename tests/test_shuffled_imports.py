@@ -51,6 +51,7 @@ from cytearc.writers import (
     SparseToZarr,
     TapestriToZarr,
 )
+from tests.storage_helpers import drawn_shuffles, shuffle_refusal
 from tests.variant_truth import tapestri_truth, write_tapestri
 
 _N_CELLS = 157
@@ -914,14 +915,94 @@ def _spill_attempts(
     return at_budget
 
 
-@pytest.mark.parametrize("kind", ["10x-cutoff", "mtx-cellMajor-filtered", "tapestri"])
+def _held_before_the_shuffle(tmp_path: Path, kind: str) -> int:
+    """Return the bytes of the arrays that an import of ``kind`` holds when it shuffles.
+
+    A 10x HDF5 reader holds the indexes of the barcodes it keeps, the
+    file's int64 row pointers and the kept cells' cumulative values, and a
+    Matrix Market reader the indexes and cumulative values and, for an
+    unordered file, each kept cell's next slot, all of 8 bytes. A Tapestri
+    reader holds its cells' samples, barcodes and IDs as Python strings,
+    which it measures. The in-memory import holds its matrices, and a CSV
+    import nothing yet.
+    """
+    counts = _counts()
+    kept = _kept(counts, cutoff=kind.endswith("cutoff")).size
+    if kind.startswith("10x"):
+        return 8 * kept + 8 * (counts.shape[0] + 1) + 8 * (kept + 1)
+    if kind.startswith("mtx"):
+        slots = 8 * (kept + 1) if "unordered" in kind else 0
+        return 8 * kept + 8 * (kept + 1) + slots
+    if kind == "tapestri":
+        reader = TapestriReader(str(tmp_path / "run.dna+protein.h5"))
+        try:
+            return int(reader._sparse_import_resident_bytes())
+        finally:
+            reader.close()
+    if kind == "csv":
+        return 0
+    matrices = (
+        [csr_matrix(counts[:, :9])]
+        if kind == "sparse"
+        else [csr_matrix(counts[:, columns]) for columns in _ASSAY_COLUMNS.values()]
+    )
+    return sum(
+        matrix.data.nbytes + matrix.indices.nbytes + matrix.indptr.nbytes
+        for matrix in matrices
+    )
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "10x-filtered",
+        "10x-cutoff",
+        "mtx-cellMajor-filtered",
+        "mtx-unordered-cutoff",
+        "tapestri",
+        "csv",
+        "sparse",
+        "sparse-assays",
+    ],
+)
+def test_a_budget_without_room_for_the_shuffle_is_refused_before_it_runs(
+    tmp_path, monkeypatch, kind
+) -> None:
+    run, expected = _source(tmp_path, kind)
+    n_cells = next(iter(expected.values())).shape[0]
+    held = _held_before_the_shuffle(tmp_path, kind)
+    # Drawing the order and its inverse holds 24 bytes a cell beside them.
+    needed = held + 24 * n_cells
+    drawn = drawn_shuffles(monkeypatch)
+    refused = tmp_path / "refused.zarr"
+    with pytest.raises(MemoryBudgetError) as caught:
+        run(refused, {"shuffle_cells": True, "mem_budget": needed - 1})
+    refusal = caught.value
+    assert (refusal.needed_bytes, refusal.budget_bytes) == (needed, needed - 1)
+    assert str(refusal) == shuffle_refusal(n_cells, held, needed - 1)
+    # The import is refused before it draws the order or writes anything.
+    assert drawn == []
+    assert not refused.exists()
+    # With the budget it names, the import draws the order, and a later step
+    # of so small a budget refuses for itself, if at all.
+    try:
+        run(tmp_path / "admitted.zarr", {"shuffle_cells": True, "mem_budget": needed})
+    except MemoryError as later:
+        assert "random order" not in str(later)
+    assert drawn == [n_cells]
+    assert _no_temporary_files(tmp_path)
+
+
+@pytest.mark.parametrize("kind", ["10x-cutoff", "mtx-cellMajor-filtered"])
 def test_a_shuffled_import_of_a_reader_names_the_budget_that_passes_its_spill(
     tmp_path, kind
 ) -> None:
     run, expected = _source(tmp_path, kind)
     at_budget = _spill_attempts(tmp_path, run)
+    # The budget passes the shuffle, 24 bytes a cell beside the reader's
+    # arrays, and not the spill.
     with pytest.raises(MemoryBudgetError) as caught:
-        at_budget(4_000)
+        at_budget(8_000)
     # The spill runs beside the order of the cells and its inverse, 8 bytes a
     # cell each, and a Matrix Market reader's arrays, so the refusal names
     # the import's budget beside them.
@@ -930,9 +1011,9 @@ def test_a_shuffled_import_of_a_reader_names_the_budget_that_passes_its_spill(
         f"the row spill of a cell shuffle beside the {16 * cells} bytes of its "
         "cell order"
     )
-    assert caught.value.budget_bytes == 4_000
+    assert caught.value.budget_bytes == 8_000
     needed = caught.value.needed_bytes
-    assert needed > 4_000
+    assert needed > 8_000
     # With the budget it names, the spill fits; one byte less is refused,
     # naming the same budget.
     at_budget(needed)
