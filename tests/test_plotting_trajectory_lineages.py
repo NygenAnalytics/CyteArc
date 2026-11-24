@@ -39,6 +39,7 @@ from cytearc.storage.artifacts import artifact_group
 from cytearc.trajectory.curves import smooth_against_progress
 from cytearc.utils.memory_budget import MemoryBudgetError
 from tests.clone_helpers import write_selection_embedding
+from tests.color_helpers import COLORBLIND_TEXT_COLORS, wcag_contrast
 from tests.storage_helpers import by_cell_id
 
 # Lineages are drawn under the string form of their sink labels.
@@ -907,6 +908,36 @@ def test_lineage_heatmap_feature_labels_clear_the_colorbar(
     assert not any(label.overlaps(colorbar) for label in labels)
 
 
+@pytest.mark.parametrize("theme", ["notebook", "dark"])
+def test_lineage_heatmap_numbers_read_on_every_module_color(
+    closing, monkeypatch, datastore, lineage_aggregation, loaded_aggregation, theme
+):
+    n_modules = len(COLORBLIND_TEXT_COLORS)
+    n_features = loaded_aggregation.data.shape[0]
+    assert n_features >= n_modules
+    twelve = dataclasses.replace(
+        loaded_aggregation, feature_clusters=np.arange(n_features) % n_modules + 1
+    )
+    _load_lineage_heatmap_aggregation(monkeypatch, twelve)
+
+    result = closing(
+        splt.lineage_heatmap(
+            datastore, aggregation=lineage_aggregation, theme=theme, show=False
+        )
+    )
+
+    bars = result.axes["feature_clusters"]
+    assert [to_hex(color) for color in bars.images[0].get_cmap().colors] == [
+        color.lower() for color in COLORBLIND_TEXT_COLORS
+    ]
+    numbers = {int(text.get_text()): text.get_color() for text in bars.texts}
+    assert {module: to_hex(color) for module, color in numbers.items()} == dict(
+        enumerate(COLORBLIND_TEXT_COLORS.values(), start=1)
+    )
+    for module, bar in enumerate(COLORBLIND_TEXT_COLORS, start=1):
+        assert wcag_contrast(numbers[module], bar) >= 4.5
+
+
 def test_lineage_heatmap_without_colorbar_in_a_custom_style(
     closing, datastore, lineage_aggregation, loaded_aggregation
 ):
@@ -941,6 +972,8 @@ def test_lineage_heatmap_without_colorbar_in_a_custom_style(
     cluster_ax = result.axes["feature_clusters"]
     assert cluster_ax.yaxis.label.get_fontsize() == 9
     assert {text.get_fontsize() for text in cluster_ax.texts} == {6}
+    # The light Set2 bars take black numbers, not the dark theme's light text.
+    assert {to_hex(text.get_color()) for text in cluster_ax.texts} == {"#000000"}
     modules = sorted(set(np.asarray(loaded_aggregation.feature_clusters).tolist()))
     # Set2 at 0, 0.25, 0.5, 0.75 and 1, its first, third, fifth, seventh and
     # eighth of eight colors.

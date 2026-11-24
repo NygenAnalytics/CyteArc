@@ -43,6 +43,7 @@ from ._style import (
     resolve_category_scale,
     resolve_color_limits,
     scale_argument,
+    text_color_on,
     theme_context,
 )
 
@@ -1046,6 +1047,7 @@ def pseudotime_heatmap(
                 fontsize=axis_fontsize,
                 ha="center",
                 va="center",
+                color=text_color_on(cluster_palette[cluster]),
             )
 
         pseudotime_ax.imshow(

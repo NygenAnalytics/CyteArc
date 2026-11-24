@@ -32,6 +32,7 @@ from ._style import (
     finish_embedding_axes,
     padded_square_limits,
     positive_argument,
+    text_color_on,
     theme_context,
 )
 
@@ -280,7 +281,13 @@ def lineage_heatmap(
         for cluster in cluster_order:
             row = float(np.flatnonzero(clusters == cluster).mean())
             cluster_ax.text(
-                0, row, str(cluster), fontsize=tick_fontsize, ha="center", va="center"
+                0,
+                row,
+                str(cluster),
+                fontsize=tick_fontsize,
+                ha="center",
+                va="center",
+                color=text_color_on(palette[cluster]),
             )
         cluster_ax.set_ylabel(f"{data.shape[0]} features", fontsize=axis_fontsize)
         if show_legend:

@@ -15,6 +15,7 @@ from matplotlib.colors import ListedColormap
 import cytearc.plotting as splt
 from cytearc.storage.artifacts import ArtifactRef
 from cytearc.plotting.cluster_tree import _hierarchy_positions
+from tests.color_helpers import COLORBLIND_TEXT_COLORS, wcag_contrast
 from cytearc.plotting._heatmap_utils import (
     annotation_colors,
     normalize_annotations,
@@ -1980,6 +1981,12 @@ def test_pseudotime_heatmap_draws_saved_rows_clusters_and_bins():
         "#111111",
         "#eeeeee",
     ]
+    # Each module's number is white on the near-black bar, black on the light one.
+    numbers = result.axes["feature_clusters"].texts
+    assert [(text.get_text(), to_hex(text.get_color())) for text in numbers] == [
+        ("0", "#ffffff"),
+        ("1", "#000000"),
+    ]
     # Requested feature labels match case-insensitively at their rows.
     heatmap = result.axes["heatmap"]
     assert [text.get_text() for text in heatmap.get_yticklabels()] == ["G6"]
@@ -2010,10 +2017,48 @@ def test_pseudotime_heatmap_colors_modules(options, colors, palette_name):
         assert [to_hex(color) for color in cluster_image.cmap.colors] == [
             color.lower() for color in colors
         ]
+        # Each number is black or white, whichever contrasts more with its bar.
+        for text, color in zip(
+            result.axes["feature_clusters"].texts, colors, strict=True
+        ):
+            other = "#ffffff" if to_hex(text.get_color()) == "#000000" else "#000000"
+            assert wcag_contrast(text.get_color(), color) > wcag_contrast(other, color)
         scale = result.scales[1]
         assert scale.order == (0, 1)
         assert scale.palette == dict(zip((0, 1), colors, strict=True))
         assert scale.palette_name == palette_name
+    finally:
+        result.close()
+
+
+@pytest.mark.parametrize("theme", ["notebook", "dark"])
+def test_pseudotime_heatmap_numbers_read_on_every_module_color(theme):
+    from matplotlib.colors import to_hex
+
+    n_modules = len(COLORBLIND_TEXT_COLORS)
+    store = _pseudotime_store(
+        data=np.arange(2 * n_modules, dtype=np.float64).reshape(n_modules, 2),
+        feature_indices=np.arange(n_modules),
+        feature_clusters=np.arange(1, n_modules + 1),
+        feature_names=np.array([f"g{index}" for index in range(n_modules)]),
+        feature_ids=np.array([f"id{index}" for index in range(n_modules)]),
+    )
+
+    result = splt.pseudotime_heatmap(
+        store, aggregation=_AGGREGATION, theme=theme, show=False
+    )
+    try:
+        bars = result.axes["feature_clusters"]
+        assert [to_hex(color) for color in bars.images[0].cmap.colors] == [
+            color.lower() for color in COLORBLIND_TEXT_COLORS
+        ]
+        numbers = {int(text.get_text()): text.get_color() for text in bars.texts}
+        assert {module: to_hex(color) for module, color in numbers.items()} == dict(
+            enumerate(COLORBLIND_TEXT_COLORS.values(), start=1)
+        )
+        # Every number reaches WCAG's 4.5:1 for text on its bar.
+        for module, bar in enumerate(COLORBLIND_TEXT_COLORS, start=1):
+            assert wcag_contrast(numbers[module], bar) >= 4.5
     finally:
         result.close()
 

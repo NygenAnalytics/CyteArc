@@ -152,6 +152,26 @@ _NORMALIZER_CODE_AFTER_MARKER_TABLES = OperationRevision(
     change=_NORMALIZER_CODE.change,
     applies=_NORMALIZER_CODE.applies,
 )
+_EXACT_FEATURE_NEIGHBORS = OperationRevision(
+    revision=2,
+    release="1.5.0",
+    change=(
+        "Each feature's neighbors in the graph that forms the modules are its "
+        "exact nearest features, the earlier of two equally near ones first, "
+        "instead of the approximate neighbors of an HNSW search, whose modules "
+        "differed between platforms; ann_params records only the distance, and "
+        "modules whose median peaks tie are numbered in the order of the cut"
+    ),
+    applies=None,
+)
+# run_pseudotime_aggregation records the same change as its revision 3, after
+# the normalizer revision of 1.3.0.
+_EXACT_FEATURE_NEIGHBORS_AFTER_NORMALIZER_CODE = OperationRevision(
+    revision=3,
+    release=_EXACT_FEATURE_NEIGHBORS.release,
+    change=_EXACT_FEATURE_NEIGHBORS.change,
+    applies=_EXACT_FEATURE_NEIGHBORS.applies,
+)
 
 
 def _scores_the_default_potential(
@@ -302,6 +322,7 @@ _OPERATION_REVISIONS: dict[str, tuple[OperationRevision, ...]] = {
         ),
     ),
     "run_harmony": (_HARMONY2,),
+    "run_lineage_aggregation": (_EXACT_FEATURE_NEIGHBORS,),
     "run_marker_search": (
         OperationRevision(
             revision=2,
@@ -317,7 +338,10 @@ _OPERATION_REVISIONS: dict[str, tuple[OperationRevision, ...]] = {
         _NORMALIZER_CODE_AFTER_MARKER_TABLES,
     ),
     "run_normalization": (_NORMALIZER_CODE,),
-    "run_pseudotime_aggregation": (_NORMALIZER_CODE,),
+    "run_pseudotime_aggregation": (
+        _NORMALIZER_CODE,
+        _EXACT_FEATURE_NEIGHBORS_AFTER_NORMALIZER_CODE,
+    ),
     "run_pseudotime_marker_search": (_NORMALIZER_CODE,),
     "run_pseudotime_scoring": (
         OperationRevision(
