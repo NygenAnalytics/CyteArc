@@ -5775,9 +5775,9 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
         ``n_clusters`` modules: each retained feature's ``n_neighbors``
         nearest features, found exactly from every distance between their
         profiles, form a graph whose Paris hierarchy is cut into the modules.
-        Of two equally near features the earlier is the neighbor, so the
-        modules are the same on every platform. The modules are numbered from
-        1 by the median bin of their features' peaks.
+        Of two equally near features the earlier ranks first, so the modules
+        are the same on every platform. The modules are numbered from 1 by the
+        median bin of their features' peaks.
 
         Args:
             pseudotime: Explicit pseudotime artifact defining cells and ordering.
