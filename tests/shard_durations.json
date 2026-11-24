@@ -254,7 +254,7 @@
   "tests/test_normalization_flags.py": 4.9,
   "tests/test_normalized_coordinates.py": 2.2,
   "tests/test_normalized_values.py": 54.4,
-  "tests/test_numba_dispatcher_cache.py": 49.5,
+  "tests/test_numba_dispatcher_cache.py": 55.4,
   "tests/test_numba_kernel_parity.py": 5.1,
   "tests/test_numba_thread_counts.py": 6.3,
   "tests/test_numba_workqueue.py": 2.2,

@@ -462,8 +462,13 @@ print(json.dumps({
 """
 
 
+@pytest.mark.parametrize(
+    "has_flock",
+    [True, pytest.param(False, marks=pytest.mark.slow)],
+    ids=["flock", "msvcrt"],
+)
 def test_processes_that_import_at_once_compile_each_kernel_once(
-    tmp_path: Path, probe_package: Path
+    tmp_path: Path, probe_package: Path, has_flock: bool
 ) -> None:
     env = {
         **os.environ,
@@ -472,10 +477,13 @@ def test_processes_that_import_at_once_compile_each_kernel_once(
             [str(probe_package), os.environ.get("PYTHONPATH", "")]
         ),
     }
+    code = _IMPORTING_PROCESS
+    if not has_flock:
+        code = _as_on_windows(tmp_path / "regions") + code
     start = time.time() + 3.0
     processes = [
         subprocess.Popen(
-            [sys.executable, "-c", _IMPORTING_PROCESS, _PROBE_PACKAGE, str(start)],
+            [sys.executable, "-c", code, _PROBE_PACKAGE, str(start)],
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -548,8 +556,9 @@ def test_a_cache_directory_that_cannot_be_locked_runs_unlocked(
         with debug_messages() as refused:
             with cache_directory_lock(str(tmp_path)):
                 ran.append("refused")
-    # A system without flock, such as Windows.
+    # A system with neither flock nor msvcrt.
     monkeypatch.setitem(sys.modules, "fcntl", None)
+    monkeypatch.setitem(sys.modules, "msvcrt", None)
     with debug_messages() as unsupported:
         with cache_directory_lock(str(tmp_path)):
             ran.append("unsupported")
@@ -564,6 +573,280 @@ def test_a_cache_directory_that_cannot_be_locked_runs_unlocked(
         "[Errno 37] No locks available"
     ]
     assert unsupported == []
+
+
+# A stand-in for Windows' msvcrt on macOS and Linux, for processes that hide
+# fcntl as Windows lacks it. Each region that locking locks is a flock on a
+# file of its own, named after the locked file and the region, so that another
+# handle, also one of the same process, cannot lock the region, and the system
+# releases it when the process ends, as Windows releases the locks of a process
+# that ends. Only LK_UNLCK unlocks a region: Windows also unlocks it when its
+# file closes, but at a time that depends on the system's resources.
+_STAND_IN_MSVCRT = """
+import fcntl as _fcntl
+import os as _os
+import sys as _sys
+import types as _types
+
+# subprocess tells Windows by importing msvcrt, so it is imported first.
+import subprocess as _subprocess
+
+
+def _stand_in_msvcrt(regions):
+    msvcrt = _types.ModuleType("msvcrt")
+    msvcrt.LK_UNLCK, msvcrt.LK_LOCK, msvcrt.LK_NBLCK = 0, 1, 2
+    msvcrt.locked = {}
+
+    def locking(fd, mode, nbytes):
+        status = _os.fstat(fd)
+        start = _os.lseek(fd, 0, _os.SEEK_CUR)
+        key = (fd, start, nbytes)
+        if mode == msvcrt.LK_UNLCK:
+            if key not in msvcrt.locked:
+                raise PermissionError(13, "Permission denied")
+            region = msvcrt.locked.pop(key)
+            _fcntl.flock(region, _fcntl.LOCK_UN)
+            _os.close(region)
+            return
+        if mode != msvcrt.LK_NBLCK:
+            raise ValueError(f"the stand-in locks without waiting only, not {mode}")
+        name = f"{status.st_dev}-{status.st_ino}-{start}-{nbytes}"
+        region = _os.open(_os.path.join(regions, name), _os.O_RDWR | _os.O_CREAT)
+        try:
+            _fcntl.flock(region, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+        except BlockingIOError:
+            _os.close(region)
+            raise PermissionError(13, "Permission denied") from None
+        msvcrt.locked[key] = region
+
+    msvcrt.locking = locking
+    return msvcrt
+"""
+
+
+def _as_on_windows(directory: Path) -> str:
+    """Return code that makes a process lock cache directories as on Windows:
+    without fcntl, and with the stand-in for msvcrt, whose regions are kept in
+    ``directory``."""
+    directory.mkdir(exist_ok=True)
+    return (
+        _STAND_IN_MSVCRT
+        + f"_sys.modules['msvcrt'] = _stand_in_msvcrt({str(directory)!r})\n"
+        + "_sys.modules['fcntl'] = None\n"
+    )
+
+
+@pytest.fixture
+def as_on_windows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Make this process lock cache directories as on Windows, and return the
+    stand-in for msvcrt that it uses."""
+    regions = tmp_path / "regions"
+    regions.mkdir(exist_ok=True)
+    namespace: dict[str, Any] = {}
+    exec(_STAND_IN_MSVCRT, namespace)
+    msvcrt = namespace["_stand_in_msvcrt"](str(regions))
+    monkeypatch.setitem(sys.modules, "msvcrt", msvcrt)
+    monkeypatch.setitem(sys.modules, "fcntl", None)
+    return msvcrt
+
+
+def _first_byte_lockable(directory: Path) -> bool:
+    """Whether another process without flock could lock the first byte of the
+    directory's lock file without waiting, as CyteArc does on Windows."""
+    code = _as_on_windows(directory / "regions") + (
+        "fd = _os.open(_sys.argv[1], _os.O_RDWR | _os.O_CREAT)\n"
+        "_sys.modules['msvcrt'].locking(fd, 2, 1)\n"
+    )
+    lock_file = directory / ".cytearc-numba.lock"
+    process = subprocess.run(
+        [sys.executable, "-c", code, str(lock_file)], capture_output=True
+    )
+    return process.returncode == 0
+
+
+def _within(seconds: float, check: Callable[[], None]) -> None:
+    """Run ``check`` in a thread, and fail if it is still waiting after
+    ``seconds``, as a lock that is never free would leave it."""
+    errors: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            check()
+        except BaseException as error:
+            errors.append(error)
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(seconds)
+    assert not thread.is_alive(), f"still waiting after {seconds} s"
+    if errors:
+        raise errors[0]
+
+
+def test_without_flock_each_block_locks_the_first_byte_of_the_lock_file_alone(
+    tmp_path: Path, as_on_windows: Any
+) -> None:
+    directory = str(tmp_path)
+
+    def check() -> None:
+        with cache_directory_lock(directory):
+            assert not _first_byte_lockable(tmp_path)
+            # The thread that holds the lock enters again without waiting.
+            with cache_directory_lock(directory, shared=True):
+                with cache_directory_lock(directory):
+                    pass
+            assert not _first_byte_lockable(tmp_path)
+        assert _first_byte_lockable(tmp_path)
+        # msvcrt has no shared locks, so loads hold the lock alone too.
+        with cache_directory_lock(directory, shared=True):
+            assert not _first_byte_lockable(tmp_path)
+        assert _first_byte_lockable(tmp_path)
+
+    _within(60, check)
+    # Each block unlocked what it locked before its file closed.
+    assert as_on_windows.locked == {}
+
+
+def _enter_lock(directory: str, entered: list[float]) -> None:
+    with cache_directory_lock(directory):
+        entered.append(time.monotonic())
+
+
+def test_without_flock_threads_of_one_process_wait_for_each_other(
+    tmp_path: Path, as_on_windows: Any
+) -> None:
+    entered: list[float] = []
+    with cache_directory_lock(str(tmp_path)):
+        thread = threading.Thread(target=_enter_lock, args=(str(tmp_path), entered))
+        thread.start()
+        time.sleep(0.2)
+        assert entered == []
+        left = time.monotonic()
+    thread.join(timeout=30)
+
+    assert entered and entered[0] >= left
+
+
+def test_without_flock_a_lock_that_cannot_be_taken_runs_the_block_unlocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, as_on_windows: Any
+) -> None:
+    ran = []
+    # A directory that holds no lock file.
+    missing = tmp_path / "missing"
+    with debug_messages() as opened:
+        with cache_directory_lock(str(missing)):
+            ran.append("missing")
+
+    # A refusal other than a byte that another handle holds.
+    def refuse(fd: int, mode: int, nbytes: int) -> None:
+        raise OSError(22, "Invalid argument")
+
+    monkeypatch.setattr(as_on_windows, "locking", refuse)
+    with debug_messages() as refused:
+        with cache_directory_lock(str(tmp_path)):
+            ran.append("refused")
+
+    assert ran == ["missing", "refused"]
+    (message,) = opened
+    assert message.startswith(
+        f"Numba cache lock {missing / '.cytearc-numba.lock'} cannot be opened: "
+    )
+    assert [message.rstrip() for message in refused] == [
+        f"Numba cache lock {tmp_path / '.cytearc-numba.lock'} cannot be taken: "
+        "[Errno 22] Invalid argument"
+    ]
+
+
+_COUNTING_PROCESS = """
+import os
+import sys
+import time
+
+from cytearc.utils.numba import cache_directory_lock
+
+directory, start, increments = sys.argv[1], float(sys.argv[2]), int(sys.argv[3])
+counter = os.path.join(directory, "counter")
+written = f"{counter}.{os.getpid()}"
+time.sleep(max(0.0, start - time.time()))
+for increment in range(increments):
+    with cache_directory_lock(directory, shared=increment % 2 == 0):
+        with open(counter) as file:
+            value = int(file.read())
+        time.sleep(0.002)
+        with open(written, "w") as file:
+            file.write(str(value + 1))
+        os.replace(written, counter)
+"""
+
+
+def test_processes_without_flock_hold_a_directorys_lock_one_at_a_time(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "counter").write_text("0")
+    code = _as_on_windows(tmp_path / "regions") + _COUNTING_PROCESS
+    start = time.time() + 1.0
+    processes = [
+        subprocess.Popen(
+            [sys.executable, "-c", code, str(tmp_path), str(start), "25"],
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for _ in range(4)
+    ]
+    for process in processes:
+        _, stderr = process.communicate(timeout=120)
+        assert process.returncode == 0, stderr
+
+    # Each addition read the counter and wrote it back while no other process
+    # was inside the lock, so none was lost.
+    assert (tmp_path / "counter").read_text() == "100"
+
+
+_HOLDING_PROCESS = """
+import time
+
+from cytearc.utils.numba import cache_directory_lock
+
+with cache_directory_lock(_sys.argv[1]):
+    open(_sys.argv[2], "w").close()
+    time.sleep(600)
+"""
+
+
+def test_without_flock_the_lock_of_a_killed_process_is_released(
+    tmp_path: Path, as_on_windows: Any
+) -> None:
+    ready = tmp_path / "ready"
+    code = _as_on_windows(tmp_path / "regions") + _HOLDING_PROCESS
+    holder = subprocess.Popen(
+        [sys.executable, "-c", code, str(tmp_path), str(ready)],
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 60
+        while not ready.exists():
+            assert holder.poll() is None, holder.communicate()
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        entered: list[float] = []
+        thread = threading.Thread(
+            target=_enter_lock, args=(str(tmp_path), entered), daemon=True
+        )
+        thread.start()
+        time.sleep(0.3)
+        # The block waits while the holder lives.
+        assert entered == []
+        holder.kill()
+        holder.wait()
+        killed = time.monotonic()
+        thread.join(timeout=30)
+    finally:
+        holder.kill()
+        holder.communicate()
+
+    # The system released the killed holder's lock, which nothing else holds.
+    assert entered and entered[0] - killed < 5.0
 
 
 def _knn(n_cells: int = 60, k: int = 6) -> tuple[np.ndarray, np.ndarray]:
