@@ -203,7 +203,7 @@ def check_shuffle_fits(n_cells: int, held_bytes: int, budget_bytes: int) -> None
     )
     raise memory_refusal(
         f"Shuffling {n_cells} cells",
-        f"their random order{beside}",
+        f"the cells' random order{beside}",
         needed,
         int(budget_bytes),
     )

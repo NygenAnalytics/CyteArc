@@ -130,7 +130,7 @@ def shuffle_refusal(n_cells: int, held: int, budget: int) -> str:
     needed = held + 24 * n_cells
     beside = f" beside the {held} bytes that the import holds" if held else ""
     return (
-        f"Shuffling {n_cells} cells holds about {needed} bytes for their random "
+        f"Shuffling {n_cells} cells holds about {needed} bytes for the cells' random "
         f"order{beside}, more than the memory budget of {budget} bytes. Raise "
         f"mem_budget to at least {needed} bytes."
     )

@@ -777,14 +777,17 @@ def test_a_budget_without_room_for_the_shuffle_is_refused_before_it_runs(
     tmp_path, monkeypatch
 ) -> None:
     source = _write_object(tmp_path / "object.rds")
-    with SeuratReader(source, temp_dir=tmp_path) as reader:
-        # The count sources that the import holds when it shuffles, as the
-        # reader reports them: RNA's dgCMatrix stays in the file, and ADT's
-        # matrix is held.
-        held = sum(
-            int(reader.get_assay(name).counts.resident_bytes) for name in ("RNA", "ADT")
-        )
-    assert held > 0
+    # The count sources that the import holds when it shuffles. RNA's
+    # dgCMatrix stays in the file. ADT's counts stitch its layer into the
+    # object's cells: the source keeps each protein and cell name, counted as
+    # its UTF-8 bytes and 8 more, and the layer maps each protein and each of
+    # its cells by an int64 index.
+    names = [*_PROTEINS, *_cells(_N_CELLS)]
+    held = (
+        sum(len(name.encode()) + 8 for name in names)
+        + 8 * len(_PROTEINS)
+        + 8 * len(_members(_N_CELLS))
+    )
     # Drawing the order and its inverse holds 24 bytes a cell beside them.
     needed = held + 24 * _N_CELLS
     drawn = drawn_shuffles(monkeypatch)

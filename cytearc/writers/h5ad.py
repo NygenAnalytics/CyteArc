@@ -1069,9 +1069,10 @@ class H5adToZarr:
         self._clusterDtypes: dict[str, tuple[np.dtype[Any], bool]] = {}
         if self.shuffleCells:
             # Drawing the order and its inverse runs beside the IDs, names and
-            # other arrays that the import holds throughout.
+            # other arrays that the import holds throughout, and the reader's
+            # row counts or converted rows, which a reused reader holds.
             check_shuffle_fits(
-                self.h5ad.nCells, self._held_bytes(), self.resources.memoryBytes
+                self.h5ad.nCells, self._resident_bytes(), self.resources.memoryBytes
             )
             self._cellOrder = shuffled_order(self.h5ad.nCells, self.shuffleSeed)
             # Embeddings and cluster labels that do not fit in memory are

@@ -177,20 +177,9 @@ def test_destination_rows_refuse_what_is_not_one_integer_row_per_cell(order) -> 
         destination_rows(order)
 
 
-def _traced_peak(call) -> int:
-    """Return the most bytes that ``call`` holds at once, traced on its second run."""
-    import tracemalloc
-
-    call()
-    tracemalloc.start()
-    try:
-        call()
-        return tracemalloc.get_traced_memory()[1]
-    finally:
-        tracemalloc.stop()
-
-
 def test_drawing_a_shuffle_holds_no_more_than_its_charge() -> None:
+    from tests.memory_helpers import traced_charge
+
     # 30,000 cells of 8 bytes stay below the 256 KiB from which NumPy reuses
     # the temporaries of an expression, which only some Python builds allow,
     # so the trace counts what every build holds. Three arrays of 8 bytes a
@@ -200,13 +189,17 @@ def test_drawing_a_shuffle_holds_no_more_than_its_charge() -> None:
     # byte, as is a charge of a fourth.
     n_cells = 30_000
     charge = SHUFFLE_BYTES_PER_CELL * n_cells
-    order_peak = _traced_peak(lambda: shuffled_order(n_cells, 5))
+    order_peak = traced_charge(lambda _ledger: shuffled_order(n_cells, 5), 3).held
     assert charge - n_cells < order_peak <= charge + 4_096
     # An import draws the order and then its inverse, holding the order.
-    both_peak = _traced_peak(lambda: destination_rows(shuffled_order(n_cells, 5)))
+    both_peak = traced_charge(
+        lambda _ledger: destination_rows(shuffled_order(n_cells, 5)), 3
+    ).held
     assert charge - n_cells < both_peak <= charge + 4_096
     order = shuffled_order(n_cells, 5)
-    inverse_peak = order.nbytes + _traced_peak(lambda: destination_rows(order))
+    inverse_peak = (
+        order.nbytes + traced_charge(lambda _ledger: destination_rows(order), 3).held
+    )
     assert charge - n_cells < inverse_peak <= charge + 4_096
 
 
@@ -217,7 +210,7 @@ def test_a_shuffle_beyond_the_budget_is_refused_naming_the_budget_that_holds_it(
     check_shuffle_fits(1_000, 5_000, 29_000)
     with pytest.raises(MemoryBudgetError) as caught:
         check_shuffle_fits(1_000, 5_000, 28_999)
-    item = "their random order beside the 5000 bytes that the import holds"
+    item = "the cells' random order beside the 5000 bytes that the import holds"
     assert (caught.value.needed_bytes, caught.value.budget_bytes) == (29_000, 28_999)
     assert caught.value.item == item
     assert str(caught.value) == (
@@ -228,9 +221,10 @@ def test_a_shuffle_beyond_the_budget_is_refused_naming_the_budget_that_holds_it(
     check_shuffle_fits(3, 0, 72)
     with pytest.raises(MemoryBudgetError) as alone:
         check_shuffle_fits(3, 0, 71)
-    assert (alone.value.needed_bytes, alone.value.item) == (72, "their random order")
-    assert str(alone.value).startswith(
-        "Shuffling 3 cells holds about 72 bytes for their random order, more than"
+    refusal = alone.value
+    assert (refusal.needed_bytes, refusal.item) == (72, "the cells' random order")
+    assert str(refusal).startswith(
+        "Shuffling 3 cells holds about 72 bytes for the cells' random order, more than"
     )
 
 

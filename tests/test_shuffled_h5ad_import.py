@@ -1431,9 +1431,9 @@ def test_what_a_shuffled_import_holds_beside_a_gathered_array_is_charged(
     )
 
 
-@pytest.mark.parametrize("split", [False, True])
+@pytest.mark.parametrize("case", ["plain", "split", "reused reader"])
 def test_a_budget_without_room_for_the_shuffle_is_refused_before_it_runs(
-    tmp_path, monkeypatch, split
+    tmp_path, monkeypatch, case
 ) -> None:
     source = tmp_path / "source.h5ad"
     _write_source(source, "csr")
@@ -1446,28 +1446,50 @@ def test_a_budget_without_room_for_the_shuffle_is_refused_before_it_runs(
     # names as text of 4 bytes a character of the longest, and the int64
     # index of each, and every feature's assay and column, two int64 arrays.
     held = _id_bytes(ids) + _id_bytes(features) + _text_bytes(names) + _N_CELLS
-    if split:
+    options: dict[str, Any] = {}
+    if case == "split":
+        options = {"assay_split_key": "feature_types", "analysis_assay": "RNA"}
         held += 2 * (6 * 4 * 10 + 6 * 4 * 7) + _N_FEATURES * 8 + 2 * _N_FEATURES * 8
-    # Drawing the order and its inverse holds 24 bytes a cell beside them.
-    needed = held + 24 * _N_CELLS
-    drawn = drawn_shuffles(monkeypatch)
-    options = {"assay_split_key": "feature_types"} if split else {}
-    with pytest.raises(MemoryBudgetError) as caught:
-        _import(source, tmp_path / "refused.zarr", mem_budget=needed - 1, **options)
-    refusal = caught.value
-    assert (refusal.needed_bytes, refusal.budget_bytes) == (needed, needed - 1)
-    assert str(refusal) == shuffle_refusal(_N_CELLS, held, needed - 1)
-    # The import is refused before it draws the order or writes anything.
-    assert drawn == []
-    assert not (tmp_path / "refused.zarr").exists()
-    # With the budget it names, the import draws the order, and a later step
-    # of so small a budget, such as the check of its embeddings, refuses for
-    # itself, if at all.
+    reader = _reader(source, temp_dir=str(tmp_path))
     try:
-        _import(source, tmp_path / "admitted.zarr", mem_budget=needed, **options)
-    except MemoryError as later:
-        assert "random order" not in str(later)
-    assert drawn == [_N_CELLS]
+        if case == "reused reader":
+            # An import in the file's order leaves the reader holding the
+            # file's row pointers, which the next import plans its reads by.
+            H5adToZarr(reader, MemoryStore(), nthreads=1, shuffle_cells=False).dump()
+            with h5py.File(source) as handle:
+                held += (_N_CELLS + 1) * handle["X/indptr"].dtype.itemsize
+        # Drawing the order and its inverse holds 24 bytes a cell beside them.
+        needed = held + 24 * _N_CELLS
+        drawn = drawn_shuffles(monkeypatch)
+
+        def attempt(destination: Path, budget: int) -> None:
+            H5adToZarr(
+                reader,
+                str(destination),
+                mem_budget=budget,
+                nthreads=1,
+                shuffle_cells=True,
+                **options,
+            ).dump()
+
+        with pytest.raises(MemoryBudgetError) as caught:
+            attempt(tmp_path / "refused.zarr", needed - 1)
+        refusal = caught.value
+        assert (refusal.needed_bytes, refusal.budget_bytes) == (needed, needed - 1)
+        assert str(refusal) == shuffle_refusal(_N_CELLS, held, needed - 1)
+        # The import is refused before it draws the order or writes anything.
+        assert drawn == []
+        assert not (tmp_path / "refused.zarr").exists()
+        # With the budget it names, the import draws the order, and a later
+        # step of so small a budget, such as the check of its embeddings,
+        # refuses for itself, if at all.
+        try:
+            attempt(tmp_path / "admitted.zarr", needed)
+        except MemoryError as later:
+            assert "random order" not in str(later)
+        assert drawn == [_N_CELLS]
+    finally:
+        reader.close()
     assert not _temporary_folders(tmp_path)
 
 

@@ -855,7 +855,7 @@ def test_a_sparse_matrix_import_refuses_a_budget_of_one_byte_at_its_first_step(
     held = matrix.data.nbytes + matrix.indices.nbytes + matrix.indptr.nbytes
     assert (refusal.item, refusal.needed_bytes) == (
         (
-            f"their random order beside the {held} bytes that the import holds",
+            f"the cells' random order beside the {held} bytes that the import holds",
             held + 720,
         )
         if shuffle_cells
