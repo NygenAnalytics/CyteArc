@@ -1,5 +1,5 @@
 import threading
-from collections.abc import Generator, Iterator, Sequence
+from collections.abc import Callable, Generator, Iterator, Sequence
 from typing import Any, cast
 
 import numpy as np
@@ -27,6 +27,7 @@ from .normalization import (
     PearsonResidualNormalizer,
     require_counts_for,
     NormMethod,
+    applicable_normalization_flags,
     check_normalization_flags,
     iter_feature_group_means,
     norm_clr,
@@ -86,9 +87,12 @@ def _score_index_sets(
     n_bins: int,
     rand_seed: int,
     log_transform: bool,
+    measured: np.ndarray | None = None,
+    totals: Callable[[], np.ndarray] | None = None,
 ) -> list[np.ndarray]:
     """Score feature index sets of ``assay``, as ``_score_feature_sets`` says."""
     from ..features.scoring import binned_sampling
+    from .hvg_statistics import cell_totals
     from .rna import RNAassay
 
     log_transform, _ = check_normalization_flags(
@@ -100,6 +104,13 @@ def _score_index_sets(
         raise ValueError(
             f"feature_avg must have shape ({assay.feats.N},), got {feature_avg.shape}"
         )
+    # Controls are drawn among the measured features alone, binned by their
+    # means as a store of them alone bins them.
+    binned = (
+        pd.Series(feature_avg)
+        if measured is None
+        else pd.Series(feature_avg[measured], index=np.flatnonzero(measured))
+    )
     groups: list[tuple[np.ndarray, np.ndarray]] = []
     for feature_idx in feature_sets:
         requested = np.asarray(feature_idx, dtype=np.int64)
@@ -109,7 +120,7 @@ def _score_index_sets(
         target = requested[np.sort(first)]
         control = np.asarray(
             binned_sampling(
-                pd.Series(feature_avg),
+                binned,
                 target.tolist(),
                 ctrl_size,
                 n_bins,
@@ -131,6 +142,13 @@ def _score_index_sets(
                 for role, indices in zip(("target", "control"), pair, strict=True)
             },
             log_transform=log_transform,
+            totals=(
+                None
+                if measured is None
+                else cell_totals(assay, cell_idx, measured)
+                if totals is None
+                else totals()
+            ),
         )
         return [
             np.asarray(means[f"target{index}"] - means[f"control{index}"])
@@ -140,13 +158,33 @@ def _score_index_sets(
         # An empty selection has no scores and is not normalized, because
         # CLR would divide by its zero cell count.
         return [np.zeros(0, dtype=np.float64) for _ in groups]
+    # The measured features and their values, when a normalizer that reads
+    # each cell's total takes it over them; each set then reads them in part.
+    measured_values: tuple[np.ndarray, ChunkedArray] | None = None
+    if measured is not None and "renormalize_subset" in applicable_normalization_flags(
+        assay
+    ):
+        measured_index = np.flatnonzero(measured)
+        measured_values = (
+            measured_index,
+            assay.normed(
+                cell_idx=cell_idx,
+                feat_idx=measured_index,
+                log_transform=log_transform,
+                renormalize_subset=True,
+            ),
+        )
 
     def calc_mean(index: np.ndarray) -> np.ndarray:
-        values = assay.normed(
-            cell_idx=cell_idx,
-            feat_idx=np.sort(index),
-            log_transform=log_transform,
-        )
+        if measured_values is None:
+            values = assay.normed(
+                cell_idx=cell_idx,
+                feat_idx=np.sort(index),
+                log_transform=log_transform,
+            )
+        else:
+            columns, normed = measured_values
+            values = normed[:, np.searchsorted(columns, np.sort(index))]
         return np.asarray(values.mean(axis=1).compute())
 
     return [
@@ -731,18 +769,26 @@ class Assay:
         :class:`~cytearc.storage.finite_values.NonFiniteArtifactError` naming
         ``run_normalization`` before the artifact is complete.
         """
+        cell_idx, feat_idx = self._payload_indices(cell_idx, feat_idx)
+        self._write_normalized_values(
+            self.normed(
+                cell_idx,
+                feat_idx,
+                log_transform=log_transform,
+                renormalize_subset=renormalize_subset,
+            ),
+            location,
+            mirror=mirror,
+        )
 
+    def _write_normalized_values(
+        self, values: ChunkedArray, location: str, *, mirror: zarr.Array | None
+    ) -> None:
+        """Write normalized values into a started artifact group with the checked writer."""
         from ..storage.materialize import chunked_to_zarr
 
-        cell_idx, feat_idx = self._payload_indices(cell_idx, feat_idx)
-        vals = self.normed(
-            cell_idx,
-            feat_idx,
-            log_transform=log_transform,
-            renormalize_subset=renormalize_subset,
-        )
         chunked_to_zarr(
-            vals,
+            values,
             self.z,
             location + "/data",
             self.nthreads,
@@ -1122,6 +1168,8 @@ class Assay:
         n_bins: int,
         rand_seed: int,
         log_transform: bool = False,
+        measured: np.ndarray | None = None,
+        totals: Callable[[], np.ndarray] | None = None,
     ) -> list[np.ndarray]:
         """Score each set of feature indexes against its own controls.
 
@@ -1131,6 +1179,14 @@ class Assay:
         its own ``RandomState(rand_seed)``, as separate calls do. Library-size
         normalized RNA reads the features of every set and its controls in one
         pass over their union; other normalizations read each set apart.
+
+        ``measured``, the mask of the features that every source of a merged
+        store's cells measured, which holds every feature of the sets, scores
+        as a store of those features alone scores: controls are binned and
+        drawn among them, and each cell's total, which library-size values
+        divide by, is its total over them, which ``totals`` gives when the
+        caller holds them, or one more pass over the counts
+        (``hvg_statistics.cell_totals``).
 
         Returns:
             The scores of each set, in the order of ``feature_sets``.
@@ -1144,6 +1200,8 @@ class Assay:
             n_bins=n_bins,
             rand_seed=rand_seed,
             log_transform=log_transform,
+            measured=measured,
+            totals=totals,
         )
 
     def __repr__(self) -> str:

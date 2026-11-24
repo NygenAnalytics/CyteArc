@@ -26,6 +26,7 @@ from ..storage.artifacts import (
     fingerprint_array,
     fingerprint_stored_arrays,
     inspect_artifact,
+    is_fingerprint,
 )
 from ..storage.diagnostics import declare_diagnostics
 from ..storage.errors import ArtifactResolutionError
@@ -311,12 +312,16 @@ def plan_projection(
     reference: MappingReference,
     reference_cell_count: int,
     feature_key: str = "ids",
+    measured_features_fingerprint: str | None = None,
     invalidate_cache: bool = False,
 ) -> ProjectionPlan:
     """Plan one immutable query-owned projection.
 
     The parameters record ``feature_key`` only when features match by name,
-    so projections that match by ID keep their identities.
+    and ``measured_features_fingerprint``, the fingerprint of the reference
+    features that each source of a merged query's cells measured, only when
+    some source did not measure one, so other projections keep their
+    identities.
     """
     assay = _nonempty_string(query_assay, "query_assay")
     resolved_n_cells = integer_argument(n_cells, "n_cells", minimum=1)
@@ -398,6 +403,11 @@ def plan_projection(
             "correction_method": correction,
             **({"query_batch_model": "additive"} if correction == "symphony" else {}),
             **({"feature_key": feature_key} if feature_key == "names" else {}),
+            **(
+                {}
+                if measured_features_fingerprint is None
+                else {"measured_features_fingerprint": measured_features_fingerprint}
+            ),
         },
         inputs={
             "cell_selection": cell_selection,
@@ -496,6 +506,12 @@ def _load_projection(
         if feature_key != "names":
             raise ValueError("Projection feature_key is unsupported")
         parameter_names = parameter_names | {"feature_key"}
+    # Only a merged query whose sources did not measure some reference
+    # feature records what each measured.
+    if "measured_features_fingerprint" in parameters:
+        if not is_fingerprint(parameters["measured_features_fingerprint"]):
+            raise ValueError("Projection measured_features_fingerprint is malformed")
+        parameter_names = parameter_names | {"measured_features_fingerprint"}
     if set(parameters) != parameter_names:
         raise ValueError("Projection parameters do not match the map_query contract")
     save_k = integer_argument(parameters["save_k"], "save_k", minimum=1)

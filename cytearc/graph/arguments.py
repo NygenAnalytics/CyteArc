@@ -203,6 +203,10 @@ class NormalizationArguments(OperationArguments):
     log_transform: bool = parameter()
     renormalize_subset: bool = parameter()
     invalidate_cache: bool = execution(False)
+    # The fingerprint of the peaks that every source of the selected cells
+    # measured, over which an ATAC assay's term frequencies take each cell's
+    # total, recorded only when some source did not measure some peak.
+    measured_features_fingerprint: str | None = parameter(None, omit_if_none=True)
 
 
 @dataclass(frozen=True, slots=True)

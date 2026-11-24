@@ -1,4 +1,4 @@
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -15,6 +15,7 @@ from ..storage.artifacts import (
     ArtifactRef,
     artifact_path,
     callable_identity,
+    fingerprint_array,
     fingerprint_stored_arrays,
     fingerprint_stored_strings,
     inspect_artifact,
@@ -22,6 +23,7 @@ from ..storage.artifacts import (
 from ..storage.selections import validate_stored_selection_integrity
 from ..storage.identity import read_dataset_fingerprint
 from ..storage.types import as_zarr_array, as_zarr_group
+from .normalization import applicable_normalization_flags
 
 if TYPE_CHECKING:
     from .atac import ATACassay
@@ -96,6 +98,8 @@ def ensure_feature_summary(
     cell_selection: ArtifactRef,
     *,
     log_transform: bool = False,
+    measured: np.ndarray | None = None,
+    totals: Callable[[], np.ndarray] | None = None,
     invalidate_cache: bool = False,
 ) -> ArtifactRef:
     """Plan or compute the sufficient-statistics artifact for an assay.
@@ -105,6 +109,15 @@ def ensure_feature_summary(
     complete physical feature axis and never mount arrays on feature metadata.
     A read-only ``root`` reuses a saved summary; one that must be computed
     raises ``PermissionError`` before the counts are read.
+
+    ``measured``, the mask of the features that every source of a merged
+    store's selected cells measured, summarizes those features as a store of
+    them alone summarizes them: each cell's total, which library-size values
+    and term frequencies divide by, is its total over them, and every other
+    feature holds zeros. The summary then records the mask as
+    ``measured_features_fingerprint``. ``totals``, when the caller holds
+    them, gives those totals of an RNA summary, which is otherwise one more
+    pass over the counts.
     """
     operation = getattr(assay, "_feature_summary_operation", None)
     if log_transform and operation != "summarize_rna_features":
@@ -137,6 +150,9 @@ def ensure_feature_summary(
             "Feature summaries are supported only for RNAassay and ATACassay; "
             f"received {type(assay).__name__}"
         )
+    if measured is not None:
+        parameters["measured_features_fingerprint"] = fingerprint_array(measured)
+        feature_idx = np.flatnonzero(measured)
 
     arrays, attributes, reuse_validator = _summary_contract(
         names,
@@ -169,24 +185,39 @@ def ensure_feature_summary(
             f"{operation} requires a DataStore opened with zarr_mode='r+'"
         )
 
-    if log_transform:
+    # A normalizer that reads each cell's total takes it over the measured
+    # features.
+    renormalize = (
+        measured is not None
+        and "renormalize_subset" in applicable_normalization_flags(assay)
+    )
+    if operation == "summarize_rna_features":
         raw_payload = cast("RNAassay", assay)._compute_feature_summary(
-            cell_idx, feature_idx, log_transform=True
+            cell_idx,
+            feature_idx,
+            log_transform=log_transform,
+            renormalize_subset=renormalize,
+            totals=totals,
         )
     else:
-        raw_payload = cast("RNAassay | ATACassay", assay)._compute_feature_summary(
-            cell_idx, feature_idx
+        raw_payload = cast("ATACassay", assay)._compute_feature_summary(
+            cell_idx, feature_idx, measured_peaks=measured if renormalize else None
         )
-    payload = {name: np.asarray(raw_payload[name], dtype=np.float64) for name in names}
+    payload = {}
+    for name in names:
+        values = np.asarray(raw_payload[name], dtype=np.float64)
+        if values.shape != feature_idx.shape:
+            raise ValueError(
+                f"Feature summary array {name!r} has shape {values.shape}; "
+                f"expected {feature_idx.shape}"
+            )
+        # A feature that the measured features leave out holds zeros.
+        payload[name] = np.zeros(n_features, dtype=np.float64)
+        payload[name][feature_idx] = values
     with artifact_transaction(root, planned) as group:
         chunks = (min(max(n_features, 1), 100_000),)
         for name in names:
             values = payload[name]
-            if values.shape != (n_features,):
-                raise ValueError(
-                    f"Feature summary array {name!r} has shape {values.shape}; "
-                    f"expected ({n_features},)"
-                )
             output = create_zarr_dataset(
                 group,
                 name,

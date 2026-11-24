@@ -8,6 +8,7 @@ from ..matrix import ChunkedArray
 from ..metadata import MetaData
 from ..utils.compute import compute_with_progress
 from .base import Assay
+from .hvg_statistics import cell_totals
 from .normalization import (
     NormMethod,
     PearsonResidualNormalizer,
@@ -107,6 +108,29 @@ class ATACassay(Assay):
 
         Returns: A chunked array (delayed matrix) containing normalized data.
         """
+        return self._normalized(
+            cell_idx,
+            feat_idx,
+            renormalize_subset=renormalize_subset,
+            log_transform=log_transform,
+        )
+
+    def _normalized(
+        self,
+        cell_idx: np.ndarray | None,
+        feat_idx: np.ndarray | None,
+        *,
+        renormalize_subset: bool,
+        log_transform: bool,
+        measured_peaks: np.ndarray | None = None,
+    ) -> ChunkedArray:
+        """Return the values that ``normed`` returns.
+
+        ``measured_peaks``, the mask of the peaks that every source of a
+        merged store's sorted cells ``cell_idx`` measured, takes each cell's
+        term-frequency denominator over those peaks, as a store of them alone
+        does (``hvg_statistics.cell_totals``).
+        """
         renormalize_subset = bool_argument(renormalize_subset, "renormalize_subset")
         log_transform = bool_argument(log_transform, "log_transform")
         counts, state = self._fit_tf_idf(
@@ -114,6 +138,7 @@ class ATACassay(Assay):
             feat_idx,
             renormalize_subset=renormalize_subset,
             log_transform=log_transform,
+            measured_peaks=measured_peaks,
         )
         # The method reads the fitted state from these attributes while it
         # builds the lazy result, so concurrent calls must not interleave here.
@@ -149,10 +174,11 @@ class ATACassay(Assay):
         *,
         renormalize_subset: bool = False,
         log_transform: bool = False,
+        measured_peaks: np.ndarray | None = None,
     ) -> tuple[ChunkedArray, tuple[np.ndarray, int, np.ndarray]]:
         """Return the selected counts and the TF-IDF state fitted on them.
 
-        Arguments are those of ``normed``. The state holds each cell's
+        Arguments are those of ``_normalized``. The state holds each cell's
         term-frequency denominator, the number of cells, and each feature's
         document frequency, which ``normed`` hands to the normalization method
         as ``n_term_per_doc``, ``n_docs``, and ``n_docs_per_term``.
@@ -176,6 +202,7 @@ class ATACassay(Assay):
             cell_idx,
             counts=counts,
             renormalize_subset=bool(renormalize_subset),
+            measured_peaks=measured_peaks,
         )
         n_docs = len(cell_idx)
         if self.normMethod is not norm_tf_idf:
@@ -198,8 +225,14 @@ class ATACassay(Assay):
         *,
         counts: ChunkedArray | None = None,
         renormalize_subset: bool = False,
+        measured_peaks: np.ndarray | None = None,
     ) -> np.ndarray:
-        """Return the float64 total ATAC counts used as each cell's TF denominator."""
+        """Return the float64 total ATAC counts used as each cell's TF denominator.
+
+        The totals are over every peak, as preparation recorded them, over the
+        peaks of ``counts`` with ``renormalize_subset``, or over the peaks of
+        the mask ``measured_peaks``; a cell without counts takes 1.
+        """
         if renormalize_subset:
             if counts is None:
                 raise ValueError(
@@ -213,6 +246,8 @@ class ATACassay(Assay):
                     f"({self.name}) Recomputing counts across selected peaks",
                     self.nthreads,
                 )
+        elif measured_peaks is not None:
+            terms = cell_totals(self, cell_idx, measured_peaks)
         else:
             terms = self._cell_count_totals(cell_idx)
         terms[terms == 0] = 1
@@ -222,8 +257,14 @@ class ATACassay(Assay):
         self,
         cell_idx: np.ndarray,
         feat_idx: np.ndarray,
+        *,
+        measured_peaks: np.ndarray | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Compute document frequency and TF-IDF prevalence in one raw-data pass."""
+        """Compute document frequency and TF-IDF prevalence in one raw-data pass.
+
+        ``measured_peaks`` takes each cell's term-frequency denominator over
+        the peaks of that mask, as ``_terms_per_document`` does.
+        """
         n_docs = len(cell_idx)
         document_frequency, term_frequency_sum = stream_document_frequency(
             self.rawData[:, feat_idx][cell_idx, :],
@@ -231,7 +272,9 @@ class ATACassay(Assay):
             nthreads=self.nthreads,
             msg=f"({self.name}) Calculating peak prevalence across cells",
             operation="ATAC peak prevalence",
-            term_totals=self._terms_per_document(cell_idx),
+            term_totals=self._terms_per_document(
+                cell_idx, measured_peaks=measured_peaks
+            ),
         )
         assert term_frequency_sum is not None
         idf = inverse_document_frequency(n_docs, document_frequency)
@@ -241,8 +284,14 @@ class ATACassay(Assay):
         self,
         cell_idx: np.ndarray,
         feat_idx: np.ndarray,
+        *,
+        measured_peaks: np.ndarray | None = None,
     ) -> dict[str, np.ndarray]:
-        """Compute peak sufficient statistics without persisting metadata."""
+        """Compute peak sufficient statistics without persisting metadata.
+
+        ``measured_peaks`` summarizes the values that take each cell's
+        term-frequency denominator over the peaks of that mask.
+        """
         cell_idx = np.asarray(cell_idx, dtype=np.int64)
         feat_idx = np.asarray(feat_idx, dtype=np.int64)
         if len(cell_idx) == 0 or len(feat_idx) == 0:
@@ -252,9 +301,16 @@ class ATACassay(Assay):
             document_frequency, prevalence = self._streaming_tfidf_feature_stats(
                 cell_idx,
                 feat_idx,
+                measured_peaks=measured_peaks,
             )
         else:
-            normed = self.normed(cell_idx, feat_idx)
+            normed = self._normalized(
+                cell_idx,
+                feat_idx,
+                renormalize_subset=False,
+                log_transform=False,
+                measured_peaks=measured_peaks,
+            )
             document_frequency = compute_with_progress(
                 (normed > 0).sum(axis=0),
                 f"({self.name}) Computing document frequency",

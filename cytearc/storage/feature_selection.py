@@ -22,6 +22,7 @@ from .artifacts import (
     fingerprint_stored_arrays,
     fingerprint_stored_strings,
     inspect_artifact,
+    is_fingerprint,
     open_artifact,
 )
 from .diagnostics import DIAGNOSTICS_ATTRIBUTE
@@ -319,6 +320,9 @@ def _validate_feature_summary_parent(
             context=context,
         )
     parameter_names, payload_names = expected
+    # A summary of the features that every source of the cells measured
+    # records them.
+    parameter_names |= _measured_features_parameters(status.parameters or {}, context)
     if set(status.parameters or {}) != parameter_names or set(status.inputs or {}) != {
         "cell_selection",
         "dataset_fingerprint",
@@ -413,15 +417,6 @@ def _validate_feature_summary_parent(
         )
 
 
-def _is_fingerprint(value: Any) -> bool:
-    """Return whether ``value`` is a SHA-256 fingerprint in lowercase hex."""
-    return (
-        isinstance(value, str)
-        and len(value) == 64
-        and all(character in "0123456789abcdef" for character in value)
-    )
-
-
 def _measured_features_parameters(
     parameters: Mapping[str, Any], context: dict[str, str | None]
 ) -> frozenset[str]:
@@ -432,7 +427,7 @@ def _measured_features_parameters(
     """
     if "measured_features_fingerprint" not in parameters:
         return frozenset()
-    if not _is_fingerprint(parameters["measured_features_fingerprint"]):
+    if not is_fingerprint(parameters["measured_features_fingerprint"]):
         raise ArtifactResolutionError(
             "Fingerprint of the measured features is incompatible",
             code="corrupt_payload",
@@ -447,7 +442,7 @@ def _hvg_optional_parameters(
     """Return the HVG parameters its blacklist, binning strategy and measured features require."""
     names: set[str] = set(_measured_features_parameters(parameters, context))
     if parameters.get("blacklist") or "blacklist_fingerprint" in parameters:
-        if not parameters.get("blacklist") or not _is_fingerprint(
+        if not parameters.get("blacklist") or not is_fingerprint(
             parameters.get("blacklist_fingerprint")
         ):
             raise ArtifactResolutionError(
@@ -651,7 +646,7 @@ def _validate_feature_selection_provenance(
         and parameters.get("feature_key") == "names"
     ):
         parameter_names = frozenset({"feature_key"})
-    if status.operation == "select_prevalent_peaks":
+    if status.operation in {"select_detected_features", "select_prevalent_peaks"}:
         parameter_names |= _measured_features_parameters(parameters, context)
     received_inputs = set(inputs)
     if received_inputs != input_names or set(parameters) != parameter_names:

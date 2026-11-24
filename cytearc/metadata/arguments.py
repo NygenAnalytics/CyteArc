@@ -503,6 +503,10 @@ class WaggrArguments(OperationArguments):
     normalization_method: dict[str, str] = parameter()
     size_factor: float = parameter()
     invalidate_cache: bool = execution()
+    # The fingerprint of the features that every source of the selected cells
+    # measured, over which each cell's library size is taken, recorded only
+    # when some source did not measure some feature.
+    measured_features_fingerprint: str | None = parameter(None, omit_if_none=True)
 
 
 @dataclass(frozen=True, slots=True)

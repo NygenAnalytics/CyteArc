@@ -57,7 +57,11 @@ from ...graph.feature_projection import (
 )
 from ...graph.kinds import require_graph_kind
 from ...matrix import ChunkedArray
-from ...metadata.membership import require_features_measured_by_cells
+from ...metadata.membership import (
+    cells_measured_features,
+    measured_mask,
+    require_measured,
+)
 from ...metadata.rows import apply_missing_mask
 from ...neighbors.graph import (
     GraphLoadMemory,
@@ -108,6 +112,7 @@ from ...storage.artifacts import (
     ArtifactStatus,
     artifact_group,
     artifact_path,
+    fingerprint_array,
     group_at,
     inspect_artifact,
     require_complete_artifact,
@@ -138,7 +143,11 @@ from ...storage.selections import (
     snapshot_run_metadata,
     validate_run_metadata_snapshot,
 )
-from ...assay.normalization import feature_scaling_statistics
+from ...assay import ATACassay
+from ...assay.normalization import (
+    applicable_normalization_flags,
+    feature_scaling_statistics,
+)
 from ...utils.arguments import (
     bool_argument,
     integer_argument,
@@ -1079,6 +1088,14 @@ class _GraphOperationsMixin(_GraphOperationsBase):
     ) -> ArtifactRef:
         """Normalize explicit immutable cell and feature selections.
 
+        On a store merged from sources that called different peaks, as its
+        feature columns ``measured_in_<source>`` record, an ATAC assay's term
+        frequencies divide each cell's counts by its total over the peaks
+        that every source of the selected cells measured, as a store of those
+        peaks alone does, unless ``renormalize_subset`` takes it over the
+        selected peaks. The artifact then records those peaks as
+        ``measured_features_fingerprint``.
+
         Raises:
             UnmeasuredCellsError: If the assay did not measure a selected cell.
             ValueError: If the assay records that the source of a selected
@@ -1135,12 +1152,25 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         selections = load_normalization_selections(
             self.zw, assay_name, cell_selection, features
         )
-        # Only a store whose record leaves out a selected feature reads the
-        # selected cells here.
-        require_features_measured_by_cells(
+        # An ATAC term frequency that divides by each cell's total takes it
+        # over the peaks that every source of the selected cells measured, so
+        # the cells' sources are read for every peak, once. Otherwise only a
+        # store whose record leaves out a selected feature reads them here.
+        term_totals = (
+            isinstance(assay, ATACassay)
+            and not renormalize_subset
+            and "renormalize_subset" in applicable_normalization_flags(assay)
+        )
+        reading = cells_measured_features(
             assay.cells,
             assay.feats,
             lambda: np.flatnonzero(np.asarray(selections.cells.values[:], dtype=bool)),
+            assay=assay_name,
+            selected=None if term_totals else selections.featureMask,
+        )
+        require_measured(
+            reading,
+            assay.feats,
             selections.featureMask,
             assay=assay_name,
             of_cells="the selected cells",
@@ -1151,6 +1181,7 @@ class _GraphOperationsMixin(_GraphOperationsBase):
                 "selected cells measured."
             ),
         )
+        measured_peaks = measured_mask(reading) if term_totals else None
         n_cells = selections.cells.selected_count
         n_features = int(selections.featureMask.sum())
         arguments = NormalizationArguments(
@@ -1162,6 +1193,9 @@ class _GraphOperationsMixin(_GraphOperationsBase):
             log_transform=log_transform,
             renormalize_subset=renormalize_subset,
             invalidate_cache=invalidate_cache,
+            measured_features_fingerprint=(
+                None if measured_peaks is None else fingerprint_array(measured_peaks)
+            ),
         )
 
         def valid_shape(_ref: ArtifactRef, group: zarr.Group) -> bool:
@@ -1202,13 +1236,29 @@ class _GraphOperationsMixin(_GraphOperationsBase):
                 relative_path = artifact_path(planned.ref).removeprefix(
                     f"{assay_name}/"
                 )
-                assay._write_normalized_payload(
-                    np.flatnonzero(cell_values),
-                    np.flatnonzero(selections.featureMask),
-                    relative_path,
-                    log_transform=log_transform,
-                    renormalize_subset=renormalize_subset,
-                )
+                cell_rows = np.flatnonzero(cell_values)
+                feature_rows = np.flatnonzero(selections.featureMask)
+                if measured_peaks is None:
+                    assay._write_normalized_payload(
+                        cell_rows,
+                        feature_rows,
+                        relative_path,
+                        log_transform=log_transform,
+                        renormalize_subset=renormalize_subset,
+                    )
+                else:
+                    assert isinstance(assay, ATACassay)
+                    assay._write_normalized_values(
+                        assay._normalized(
+                            cell_rows,
+                            feature_rows,
+                            renormalize_subset=False,
+                            log_transform=log_transform,
+                            measured_peaks=measured_peaks,
+                        ),
+                        relative_path,
+                        mirror=None,
+                    )
         action = "Reused" if planned.reused else "Stored"
         logger.info(
             f"{action} normalized data for {n_cells} cells and {n_features} features"
