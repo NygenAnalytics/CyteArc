@@ -2225,16 +2225,17 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             feature_selection,
         )
         # Each sample's index follows the settings of the graph's ANN index,
-        # which records every one of them. An ATAC assay's doublets are
-        # scored by Euclidean distances in the LSI, whatever the graph's
-        # metric, which ranked planted doublets better than cosine distances.
+        # which records every one of them, and is always built on one thread
+        # for each part, so ann_parallel does not apply. An ATAC assay's
+        # doublets are scored by Euclidean distances in the LSI, whatever the
+        # graph's metric, which ranked planted doublets better than cosine
+        # distances.
         ann = self._artifacts_inspect(lineage.ann_index).parameters or {}
         index = DoubletIndexSettings(
             metric="l2" if atac else ann["ann_metric"],
             m=ann["ann_m"],
             ef_construction=ann["ann_efc"],
             ef=ann["ann_ef"],
-            parallel=ann["ann_parallel"],
         )
         projection: DoubletProjection
         if atac:
@@ -2402,18 +2403,26 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         fraction of simulated doublets among those neighbors and
         ``expected_doublet_rate``, Scrublet's doublet score (Wolock, Lopez
         and Klein, 2019). A cell is a predicted doublet when its score is
-        above its sample's threshold: ``threshold``, or the minimum between
-        the two modes of the sample's simulated-doublet scores (Otsu's
-        threshold when they are not bimodal).
+        above its sample's threshold: ``threshold``, or one chosen from the
+        sample's simulated-doublet scores, the minimum between their two
+        modes when it leaves at least 5% of them on each side, and Otsu's
+        threshold otherwise. A minimum that leaves fewer is kept when Otsu's
+        threshold would estimate a doublet rate above 50%, as when a sample's
+        simulated doublets look like its cells, and it then calls almost no
+        cell.
 
         Each sample's index takes the settings of the graph's ANN index and
         its metric, except that an ATAC assay's cells are always scored by
         Euclidean distances in the LSI, whatever the metric of its graph.
         Samples are scored at once on the store's workers, as many as the
-        memory budget holds, and each sample's index is built on one thread
-        unless the graph's ANN index was built in parallel. A sample's scores
-        depend only on its cells and ``random_seed``, so they are the same
-        for any ``nthreads``.
+        memory budget holds. A sample of 50,000 cells and simulated doublets
+        or more is indexed in 4 parts that each hold every fourth point,
+        built at once, each searched to the graph's ``ann_ef`` divided among
+        the parts, and at least as deep as the neighbors it returns; a
+        point's neighbors are its nearest points across the parts. Every
+        index is built on one thread, whatever the graph's ``ann_parallel``,
+        so a sample's scores depend only on its cells and ``random_seed``,
+        and are the same for any ``nthreads``.
 
         The ``doublet_score`` artifact holds, for each cell of the graph's
         selection, the score in ``values``, the fraction of simulated
