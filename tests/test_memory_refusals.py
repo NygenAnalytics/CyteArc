@@ -876,14 +876,19 @@ def test_a_sparse_matrix_import_names_the_budget_of_its_scan_beside_the_matrix(
     )
     # The matrix holds 600 uint32 values and their int32 columns, and 31
     # int32 row pointers; a shuffle also holds the order of the 30 cells, 8
-    # bytes each.
+    # bytes each; and the import holds its copy of the IDs, NumPy text of 4
+    # bytes a character of the longest, c29.
     assert (matrix.nnz, matrix.indices.dtype, matrix.indptr.dtype) == (
         600,
         np.int32,
         np.int32,
     )
-    held = 600 * 4 + 600 * 4 + 31 * 4 + (8 * 30 if shuffle_cells else 0)
-    what = "the matrix and the cell order" if shuffle_cells else "the matrix"
+    held = 600 * 4 + 600 * 4 + 31 * 4 + (8 * 30 if shuffle_cells else 0) + 30 * 12
+    what = (
+        "the matrix, the cell order and the cell IDs"
+        if shuffle_cells
+        else "the matrix and the cell IDs"
+    )
     destination = tmp_path / "sparse.zarr"
 
     def construct(budget: int) -> None:
@@ -924,6 +929,77 @@ def test_a_sparse_matrix_import_names_the_budget_of_its_scan_beside_the_matrix(
     beyond = refused(lambda: construct(refusal.needed_bytes))
     assert beyond.item == "the default count-matrix policy"
     assert not destination.exists()
+
+
+def _notes_csv(path: Path, n_cells: int) -> Path:
+    """Write a CSV of three genes and a cell column of notes 300 characters long."""
+    rng = np.random.default_rng(8)
+    lines = ["cell,g0,g1,g2,note"]
+    for row in range(n_cells):
+        counts = ",".join(str(value) for value in rng.integers(0, 5, 3))
+        lines.append(f"cell-{row},{counts},{'n' * 299}{row % 10}")
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+@pytest.mark.parametrize("shuffle_cells", [False, True], ids=["file", "shuffled"])
+def test_a_csv_import_refuses_a_budget_without_room_for_its_cell_column_writes(
+    tmp_path: Path, shuffle_cells: bool
+) -> None:
+    from cytearc.readers import CSVReader
+    from cytearc.writers import CSVtoZarr
+
+    n_cells = 40
+    path = _notes_csv(tmp_path / "counts.csv", n_cells)
+
+    def construct(budget: int) -> None:
+        CSVtoZarr(
+            CSVReader(
+                str(path), id_column=0, cell_data_cols=["note"], temp_dir=str(tmp_path)
+            ),
+            str(tmp_path / f"store-{budget}.zarr"),
+            "RNA",
+            mem_budget=budget,
+            nthreads=1,
+            shuffle_cells=shuffle_cells,
+        )
+
+    # After the counts write, the notes are joined from their parts and, for
+    # a shuffle, gathered in the order: twice the column beside itself. The
+    # import then holds the reader's IDs, NumPy text of 4 bytes a character of
+    # cell-39; the notes, text of 4 bytes a character of 300 and a missing
+    # mark a cell; the count summary, 40 bytes a cell and 16 a gene; and a
+    # shuffle's order, 8 bytes a cell.
+    ids = n_cells * 4 * len(f"cell-{n_cells - 1}")
+    column = n_cells * (4 * 300 + 1)
+    order = 8 * n_cells if shuffle_cells else 0
+    held = ids + column + 40 * n_cells + 16 * 3 + order
+    needed = held + (2 if shuffle_cells else 1) * column
+    refusal = refused(lambda: construct(needed - 1))
+    assert refusal.item == (
+        f"the largest cell column's write beside the {held} bytes that the import holds"
+    )
+    assert (refusal.needed_bytes, refusal.budget_bytes) == (needed, needed - 1)
+    assert not (tmp_path / f"store-{needed - 1}.zarr").exists()
+    construct(needed)
+
+
+def test_a_csv_import_charges_its_counts_write_beside_its_ids_and_cell_columns(
+    tmp_path: Path,
+) -> None:
+    from cytearc.readers import CSVReader
+    from cytearc.writers import CSVtoZarr
+
+    n_cells = 40
+    path = _notes_csv(tmp_path / "counts.csv", n_cells)
+    reader = CSVReader(str(path), id_column=0, cell_data_cols=["note"])
+    writer = CSVtoZarr(reader, MemoryStore(), "RNA", nthreads=1, shuffle_cells=False)
+    resident, _batches = writer._count_import_requirements()
+    # The count summary, 40 bytes a cell and 16 a gene, beside the reader's
+    # IDs and the notes, which the write gathers as it reads each chunk.
+    ids = n_cells * 4 * len(f"cell-{n_cells - 1}")
+    column = n_cells * (4 * 300 + 1)
+    assert resident == 40 * n_cells + 16 * 3 + ids + column
 
 
 def test_a_dense_batch_beyond_its_reservation_names_the_write_it_would_reserve() -> (
@@ -1272,14 +1348,22 @@ def test_a_10x_scan_names_the_longest_barcode_of_every_run(tmp_path: Path) -> No
         features.create_dataset("name", data=names)
         features.create_dataset("feature_type", data=np.array([b"Gene Expression"] * 8))
     reader = CrH5Reader(str(path), is_filtered=False, filtering_cutoff=5)
+    # The scan runs beside the reader's arrays: the indexes of its 6 kept
+    # barcodes, the file's 8 row pointers and the kept barcodes' 7 cumulative
+    # values, 8 bytes each.
+    arrays = 8 * 6 + 8 * 8 + 8 * 7
+    item = (
+        "the 6 values of the longest compressed vector beside the "
+        f"{arrays} bytes of the reader's arrays"
+    )
     try:
         assert reader.validBarcodeIdx.tolist() == [0, 2, 3, 4, 5, 6]
         # The first run's barcode of 3 values does not fit; the budget named
         # holds the 6 values of the second run's barcode 4, and scans both.
         refusal = named_budget_runs(
             lambda memory: reader.count_value_ranges(memory),
-            3 * 72 - 1,
-            item="the 6 values of the longest compressed vector",
+            arrays + 3 * 72 - 1,
+            item=item,
         )
         # An import in the file's order scans within its whole budget, so its
         # refusal is the scan's.
@@ -1287,18 +1371,18 @@ def test_a_10x_scan_names_the_longest_barcode_of_every_run(tmp_path: Path) -> No
             lambda: CrToZarr(
                 reader,
                 str(tmp_path / "refused.zarr"),
-                mem_budget=3 * 72 - 1,
+                mem_budget=arrays + 3 * 72 - 1,
                 nthreads=1,
                 shuffle_cells=False,
             )
         )
     finally:
         reader.close()
-    assert refusal.needed_bytes == 6 * 72
+    assert refusal.needed_bytes == arrays + 6 * 72
     assert (imported.needed_bytes, imported.budget_bytes, imported.item) == (
-        6 * 72,
-        3 * 72 - 1,
-        "the 6 values of the longest compressed vector",
+        arrays + 6 * 72,
+        arrays + 3 * 72 - 1,
+        item,
     )
     assert not (tmp_path / "refused.zarr").exists()
 

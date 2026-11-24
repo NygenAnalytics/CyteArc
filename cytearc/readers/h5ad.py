@@ -1,4 +1,3 @@
-import sys
 from collections.abc import Generator, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,7 +25,7 @@ from ..utils.count_values import (
 from ..utils.arguments import integer_argument, quoted_value
 from ..utils.logging import logger
 from ..utils.matrix_values import DETECTION_CELLS
-from ..utils.memory_budget import MemoryBudgetError, refusal_words
+from ..utils.memory_budget import MemoryBudgetError, held_array_bytes, refusal_words
 from ..utils.progress import iter_progress
 from ._assay_names import auto_name_feat_table, make_feat_table_from_types
 from ._h5ad_columns import (
@@ -154,14 +153,6 @@ _FEATURE_TYPES = "H5AD feature types"
 _MEMBERSHIP_COLUMNS = "H5AD membership column names"
 _RECORD_SOURCES = "H5AD source names of measured features"
 _CELL_SOURCES = "The H5AD obs column of cell sources"
-
-
-def _array_bytes(values: np.ndarray) -> int:
-    """Return the bytes of an array, with those of the objects an object array holds."""
-    held = int(values.nbytes)
-    if values.dtype.kind == "O":
-        held += sum(map(sys.getsizeof, values))
-    return held
 
 
 # What H5adReader reads a matrix from, as its refusals of a matrix say.
@@ -909,8 +900,8 @@ class H5adReader:
         held = 0
         for source, resolved in (self._cell_identifiers(), self._feature_identifiers()):
             for values in (source,) if resolved is source else (source, resolved):
-                held += _array_bytes(values)
-        return held + _array_bytes(self._feature_names())
+                held += held_array_bytes(values)
+        return held + held_array_bytes(self._feature_names())
 
     def _feature_identifiers(self) -> tuple[np.ndarray, np.ndarray]:
         """Return the feature IDs as the file holds them and with any repeated ID renamed.

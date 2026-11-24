@@ -82,11 +82,13 @@ class CSVtoZarr:
             reader counted.
         OSError: If ``shuffle_cells`` is True and the temporary disk lacks
             room for the shuffled rows.
-        MemoryBudgetError: If ``shuffle_cells`` is True and ``mem_budget``
-            cannot hold the shuffle of the cells beside their IDs, before the
-            shuffle runs, or one chunk of rows and their spill beside the
-            order of the cells and its inverse, before the store is created.
-            Each names the budget that holds it.
+        MemoryBudgetError: If ``mem_budget`` cannot hold a step beside the
+            cell IDs and the ``cell_data_cols`` columns that the import holds:
+            for a shuffle, drawing the order, gathering the IDs in it, and one
+            chunk of rows and their spill beside the order and its inverse;
+            the counts write; and the writes of the cell columns. Each is
+            refused before the store is created, naming the budget that
+            holds it.
 
     Attributes:
         csvr: A CSVReader object
@@ -176,17 +178,23 @@ class CSVtoZarr:
         if self.shuffleCells:
             # Drawing the order and its inverse runs beside the cell IDs: the
             # reader's and this import's copy of them.
-            held_ids = int(cell_ids.nbytes) + (
-                0 if self.csvr.cellIds is None else int(self.csvr.cellIds.nbytes)
-            )
+            held_ids = int(cell_ids.nbytes) + self._id_bytes()
             check_shuffle_fits(self.csvr.nCells, held_ids, self.resources.memoryBytes)
             self._cellOrder = shuffled_order(self.csvr.nCells, self.shuffleSeed)
-            self._spill_rows()
+            # The copy is gathered in the order beside itself, which it then
+            # replaces through the spill.
+            self._refuse_beyond(
+                held_ids + int(self._cellOrder.nbytes),
+                int(cell_ids.nbytes),
+                "the cell IDs in shuffled order",
+            )
             cell_ids = cell_ids[self._cellOrder]
+            self._spill_rows(held_ids)
         try:
             # A layout that does not fit fails here, before the destination
-            # exists.
+            # exists, and so do the writes of the cell columns.
             self.policy = self._fit_count_layout(storage_dtype, layout_request)
+            self._check_cell_column_writes()
             # The destination must be empty, or with overwrite an unprepared
             # store.
             self.z = create_destination(
@@ -243,6 +251,77 @@ class CSVtoZarr:
         cells = np.vstack(blocks) if blocks else np.zeros((0, self.csvr.nFeatures))
         return {self.assayName: csr_matrix(cells[:DETECTION_CELLS])}
 
+    def _id_bytes(self) -> int:
+        """Return the bytes of the cell IDs that the reader keeps for the whole import.
+
+        They are NumPy text of 4 bytes a character of the longest ID, or
+        none without an ID column, whose names the import makes.
+        """
+        return 0 if self.csvr.cellIds is None else int(self.csvr.cellIds.nbytes)
+
+    def _cell_column_bytes(self) -> tuple[int, int]:
+        """Return the bytes of every cell data column as the import holds it, and of the largest.
+
+        A column holds each cell's value, numbers in their dtype and text of
+        4 bytes a character of the column's widest value, and its missing
+        mark. A shuffled import holds every column from its spill to the end
+        of its counts write, and one in the file's order gathers them during
+        the counts write.
+        """
+        widths = self.csvr._cellDataWidths or []
+        sizes = [
+            self.csvr.nCells
+            * (
+                (4 * max(1, widths[position]) if dtype.kind == "O" else dtype.itemsize)
+                + 1
+            )
+            for _name, (position, dtype) in self._cellDataColumns
+        ]
+        return sum(sizes), max(sizes, default=0)
+
+    def _refuse_beyond(self, held: int, step: int, item: str) -> None:
+        """Refuse a step that holds ``step`` bytes beside ``held`` that the budget cannot hold both of.
+
+        Raises:
+            MemoryBudgetError: Naming the budget that holds both.
+        """
+        from ..utils.memory_budget import memory_refusal
+
+        budget = int(self.resources.memoryBytes)
+        if held + step > budget:
+            raise memory_refusal(
+                f"Importing the counts of {self.csvr.nCells} cells",
+                f"{item} beside the {held} bytes that the import holds",
+                held + step,
+                budget,
+            )
+
+    def _check_cell_column_writes(self) -> None:
+        """Refuse a budget that cannot hold the writes of the cell columns, after the counts write.
+
+        Each column is joined from its parts and, when the import shuffles,
+        gathered in the order, beside every column's parts, the reader's cell
+        IDs, the order and the count summary.
+
+        Raises:
+            MemoryBudgetError: Naming the budget that holds the largest
+                column's write.
+        """
+        from ..storage.identity import CountSummary
+
+        columns, largest = self._cell_column_bytes()
+        if not largest:
+            return
+        order = 0 if self._cellOrder is None else int(self._cellOrder.nbytes)
+        held = (
+            self._id_bytes()
+            + columns
+            + order
+            + CountSummary.nbytes_for(self.csvr.nCells, self.csvr.nFeatures)
+        )
+        copies = 1 if self._cellOrder is None else 2
+        self._refuse_beyond(held, copies * largest, "the largest cell column's write")
+
     def _chunk_rows(self) -> int:
         """Return the rows of one reader chunk, which is also a batch of shuffled rows."""
         return min(int(self.csvr.pandas_kwargs["chunksize"]), self.csvr.nCells)
@@ -253,15 +332,20 @@ class CSVtoZarr:
         A batch is one reader chunk of every count column, held with its
         DataFrame. A batch of shuffled rows is as wide, read as sparse rows
         from a bucket with the next one loading ahead, beside the order of
-        the cells and the rows' pointers. The layout fit and the write plan
-        the same import from these.
+        the cells and the rows' pointers. The write runs beside the reader's
+        cell IDs and the cell columns. The layout fit and the write plan the
+        same import from these.
         """
         from ..storage.identity import CountSummary
 
         rows = self._chunk_rows()
         itemsize = self.csvr.countDtype.itemsize
         batch_bytes = rows * self.csvr.nFeatures * itemsize
-        resident = CountSummary.nbytes_for(self.csvr.nCells, self.csvr.nFeatures)
+        resident = (
+            CountSummary.nbytes_for(self.csvr.nCells, self.csvr.nFeatures)
+            + self._id_bytes()
+            + self._cell_column_bytes()[0]
+        )
         store = self._shuffledStore
         if self._cellOrder is None or store is None:
             return resident, 2 * batch_bytes
@@ -271,17 +355,19 @@ class CSVtoZarr:
             2 * batch_bytes + sparse_batch + store.read_bytes(read_ahead=True),
         )
 
-    def _spill_rows(self) -> None:
+    def _spill_rows(self, held_ids: int) -> None:
         """Read the file once, sending each row to its destination and keeping the cell columns.
 
-        The pass holds the order and its inverse, one reader chunk twice as
-        the counts write does, and what sending the chunk's rows to their
-        buckets holds, beside up to 1 GiB of rows waiting for their files.
+        The pass holds the order and its inverse, the ``held_ids`` bytes of
+        the cell IDs, the cell columns as it gathers them, one reader chunk
+        twice as the counts write does, and what sending the chunk's rows to
+        their buckets holds, beside up to 1 GiB of rows waiting for their
+        files.
 
         Raises:
             MemoryBudgetError: If the budget cannot hold one chunk and its
                 spill, naming the least budget that holds them beside the
-                order and its inverse.
+                order, its inverse, the cell IDs and the cell columns.
             ValueError: If the file no longer holds the rows that the reader
                 counted.
             OSError: If the temporary disk lacks room for the rows.
@@ -300,7 +386,7 @@ class CSVtoZarr:
         assert self._cellOrder is not None
         n_cells, n_features = self.csvr.nCells, self.csvr.nFeatures
         destinations = destination_rows(self._cellOrder)
-        held = 2 * int(destinations.nbytes)
+        held = 2 * int(destinations.nbytes) + held_ids + self._cell_column_bytes()[0]
         available = int(self.resources.memoryBytes) - held
         chunk_values = self._chunk_rows() * n_features
         chunk_bytes = 2 * chunk_values * self.csvr.countDtype.itemsize
@@ -319,12 +405,17 @@ class CSVtoZarr:
         try:
             plan = planned(available)
         except MemoryBudgetError as error:
-            # The spill runs beside the order and its inverse, so the budget
-            # that passes it holds those too, beside the least budget at
-            # which the spill's plan admits it.
+            # The spill runs beside the order and its inverse, the cell IDs
+            # and the cell columns, so the budget that passes it holds those
+            # too, beside the least budget at which the spill's plan admits it.
+            beside = (
+                "cell order, cell IDs and cell columns"
+                if self._cellDataColumns
+                else "cell order and cell IDs"
+            )
             raise memory_refusal(
                 f"Importing the counts of {n_cells} cells",
-                f"{error.item} beside the {held} bytes of its cell order",
+                f"{error.item} beside the {held} bytes of its {beside}",
                 held + least_admitted_budget(planned, error),
                 int(self.resources.memoryBytes),
             ) from error

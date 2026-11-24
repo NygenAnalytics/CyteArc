@@ -1485,10 +1485,26 @@ class SeuratToZarr:
                     scan = rows * n_features * (itemsize + 2)
                 return held + scan
 
-            # A shuffled import also sends each block to its rows' buckets.
+            def shuffling_refusal(needed: int) -> MemoryBudgetError:
+                return MemoryBudgetError(
+                    f"Assay {assay.name!r} counts cannot be read and sent to their "
+                    "shuffled rows one cell at a time within mem_budget. It needs "
+                    f"at least {needed} bytes.",
+                    needed_bytes=needed,
+                    budget_bytes=int(self.resources.memoryBytes),
+                    item=f"shuffling one cell of assay {assay.name!r}",
+                )
+
+            # A shuffled import also sends each block to its rows' buckets,
+            # whose reads must hold the longest cell beside the sources.
             plan = None
             if self._destinations is not None:
-                plan = self._row_spill_plan(source, available)
+                try:
+                    plan = self._row_spill_plan(source, available)
+                except MemoryBudgetError as error:
+                    raise shuffling_refusal(
+                        self._source_resident_bytes() + error.needed_bytes
+                    ) from error
 
             def held_bytes(rows: int) -> int:
                 held = read_bytes(rows)
@@ -1511,14 +1527,7 @@ class SeuratToZarr:
                         budget_bytes=int(self.resources.memoryBytes),
                         item=f"reading one cell of assay {assay.name!r}",
                     )
-                raise MemoryBudgetError(
-                    f"Assay {assay.name!r} counts cannot be read and sent to their "
-                    "shuffled rows one cell at a time within mem_budget. It needs "
-                    f"at least {needed} bytes.",
-                    needed_bytes=needed,
-                    budget_bytes=int(self.resources.memoryBytes),
-                    item=f"shuffling one cell of assay {assay.name!r}",
-                )
+                raise shuffling_refusal(needed)
 
             def scan(start: int, stop: int, raw: Any) -> None:
                 nonlocal canonical
@@ -1578,8 +1587,9 @@ class SeuratToZarr:
         """Plan the row bucket store of an assay's shuffled cells within ``available``.
 
         Buckets are sized from the values that the source estimates it
-        stores, or for dense cells; whether one cell fits beside its read
-        is the scan's check.
+        stores, or for dense cells. The plan refuses only a budget whose
+        buckets cannot read the longest cell; whether one cell fits beside
+        its read is the scan's check.
         """
         assert self._destinations is not None
         n_features, n_cells = (int(value) for value in source.shape)

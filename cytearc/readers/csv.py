@@ -101,6 +101,14 @@ def _metadata_dtype(series: pd.Series) -> np.dtype[Any]:
     return resolved
 
 
+def _text_width(series: pd.Series) -> int:
+    """Return the characters of the widest value of a chunk's column as text, missing values left out."""
+    present = series[series.notna()]
+    if present.empty:
+        return 0
+    return int(present.astype(str).str.len().max())
+
+
 def _merged_dtype(current: np.dtype[Any] | None, dtype: np.dtype[Any]) -> np.dtype[Any]:
     if current is None:
         return dtype
@@ -478,6 +486,7 @@ class CSVReader:
             self.cellDataIdx,
             self.countDtype,
             self.countRange,
+            self._cellDataWidths,
         ) = self._read_text(lambda: self._consistency_check(converter_keys, id_names))
 
     def _compression(self) -> str | None:
@@ -661,11 +670,14 @@ class CSVReader:
         list[int] | None,
         np.dtype,
         CountValueRange,
+        list[int] | None,
     ]:
         """Stream every row once to fix the shape, names, dtypes, and count range.
 
         ``converter_keys`` are the keys of the caller's converters, and
-        ``id_names`` the names that the caller gives the ID column.
+        ``id_names`` the names that the caller gives the ID column. The pass
+        also finds the characters of the widest value of each cell data
+        column as text, which an import of a text column holds.
         """
         stream = self._get_streamer()
         n_cells = 0
@@ -673,6 +685,7 @@ class CSVReader:
         feature_ids: np.ndarray | None = None
         keep_cols: list[int] | None = None
         cell_data_dtypes: list[np.dtype] | None = None
+        cell_data_widths: list[int] | None = None
         cell_data_idx: list[int] | None = None
         count_dtype: np.dtype | None = None
         count_range = CountValueRange()
@@ -717,6 +730,19 @@ class CSVReader:
                         )
                     ]
                 )
+                chunk_widths = [
+                    _text_width(df.iloc[:, index]) for index in cell_data_idx
+                ]
+                cell_data_widths = (
+                    chunk_widths
+                    if cell_data_widths is None
+                    else [
+                        max(current, width)
+                        for current, width in zip(
+                            cell_data_widths, chunk_widths, strict=True
+                        )
+                    ]
+                )
         if count_dtype is None:
             raise ValueError("CSV file contains no data rows")
         cell_ids: np.ndarray | None = None
@@ -736,6 +762,7 @@ class CSVReader:
             cell_data_idx,
             count_dtype,
             count_range,
+            cell_data_widths,
         )
 
     def _pop_id_column(self, frame: pd.DataFrame) -> pd.Series | None:

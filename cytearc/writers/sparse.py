@@ -374,6 +374,14 @@ class SparseToZarr:
             )
         value_ranges = {}
         dtypes = {}
+        # The scans and the cell table's IDs run beside the import's copy of
+        # the cell IDs too.
+        id_bytes = int(cell_ids.nbytes)
+        held_items = ["the matrix" if single else "the matrices"]
+        if self._cellOrder is not None:
+            held_items.append("the cell order")
+        held_items.append("the cell IDs")
+        what = f"{', '.join(held_items[:-1])} and {held_items[-1]}"
         for assay in assays:
             try:
                 (value_range,) = compressed_count_ranges(
@@ -381,17 +389,14 @@ class SparseToZarr:
                     assay.matrix.indices,
                     assay.matrix.data,
                     minorSize=assay.matrix.shape[1],
-                    maxBytes=self.resources.memoryBytes - held,
+                    maxBytes=self.resources.memoryBytes - held - id_bytes,
                 )
             except MemoryBudgetError as error:
                 # The scan runs beside the matrices, so the budget it needs holds both.
-                what = "the matrix" if single else "the matrices"
-                if self._cellOrder is not None:
-                    what += " and the cell order"
                 raise memory_refusal(
                     f"Importing the sparse {'matrix' if single else 'matrices'}",
-                    f"{error.item} beside the {held} bytes of {what}",
-                    held + error.needed_bytes,
+                    f"{error.item} beside the {held + id_bytes} bytes of {what}",
+                    held + id_bytes + error.needed_bytes,
                     int(self.resources.memoryBytes),
                 ) from error
             value_ranges[assay.name] = value_range
@@ -415,6 +420,19 @@ class SparseToZarr:
         self.policy: CountMatrixPolicy | dict[str, CountMatrixPolicy] = (
             layouts[assays[0].name] if single else layouts
         )
+        # A shuffled import gathers its copy of the IDs in the order for the
+        # cell table, beside the copy; a budget that cannot hold both fails
+        # here, before the destination exists.
+        if self._cellOrder is not None and held + 2 * id_bytes > int(
+            self.resources.memoryBytes
+        ):
+            raise memory_refusal(
+                f"Importing the sparse {'matrix' if single else 'matrices'}",
+                f"the cell IDs in shuffled order beside the {held + id_bytes} "
+                f"bytes of {what}",
+                held + 2 * id_bytes,
+                int(self.resources.memoryBytes),
+            )
         # The destination must be empty, or with overwrite an unprepared store.
         self.z = create_destination(
             zarr_loc, overwrite=overwrite, storage_options=storage_options

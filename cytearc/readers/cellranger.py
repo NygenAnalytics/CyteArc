@@ -42,9 +42,16 @@ from ..utils.count_values import (
     longest_vector_refusal,
     new_count_ranges,
 )
-from ..utils.memory_budget import MemoryBudgetError
+from ..utils.memory_budget import MemoryBudgetError, memory_refusal
 from ..utils.arguments import bool_argument
-from ._row_spill import checked_destinations, row_spill_plan, sample_rows, spill_rows
+from ._row_spill import (
+    RowSpillPlan,
+    checked_destinations,
+    plan_beside_arrays,
+    row_spill_plan,
+    sample_rows,
+    spill_rows,
+)
 from ._sparse import SparseRowStore, encoded_entry_bytes
 
 # What refusals call the values of each dataset of a 10x HDF5 file, by its
@@ -170,6 +177,24 @@ class CrReader(ABC):
             return csr_matrix((0, self.nFeatures), dtype=self.matrix_dtype)
         return csr_matrix(batch.tocsr()[: int(count)])
 
+    def _scan_beside_arrays[T](self, maxBytes: int, scan: Callable[[int], T]) -> T:
+        """Run ``scan(scanBytes)`` within what ``maxBytes`` leaves beside the reader's arrays.
+
+        Raises:
+            MemoryBudgetError: If the scan does not fit, naming the budget that
+                holds it beside the arrays.
+        """
+        resident = self._sparse_import_resident_bytes()
+        try:
+            return scan(max(0, int(maxBytes) - resident))
+        except MemoryBudgetError as error:
+            raise memory_refusal(
+                f"Scanning the counts of {self.nCells} cells",
+                f"{error.item} beside the {resident} bytes of the reader's arrays",
+                resident + error.needed_bytes,
+                max(0, int(maxBytes)),
+            ) from error
+
     def _spill_rows(
         self,
         destinationRows: np.ndarray,
@@ -200,18 +225,26 @@ class CrReader(ABC):
         Raises:
             ValueError: If ``destinationRows`` is not a permutation of the cells.
             MemoryBudgetError: If ``maxBytes`` cannot hold the spill of the
-                longest cell.
+                longest cell beside the reader's arrays, naming the budget
+                that holds both.
             OSError: If the temporary disk lacks room for the rows.
         """
         self._release_shuffled_rows()
         destinations = checked_destinations(destinationRows, self.nCells)
-        plan = row_spill_plan(
-            destinations,
-            (self.nCells, self.nFeatures),
-            self.matrix_dtype,
-            entries=entries,
-            longest=longest,
-            maxBytes=int(maxBytes),
+
+        def planned(budget: int) -> RowSpillPlan:
+            return row_spill_plan(
+                destinations,
+                (self.nCells, self.nFeatures),
+                self.matrix_dtype,
+                entries=entries,
+                longest=longest,
+                maxBytes=budget,
+            )
+
+        # The scan and the spill run beside the reader's arrays.
+        plan = plan_beside_arrays(
+            planned, self._sparse_import_resident_bytes(), maxBytes
         )
         share = plan.maxBytes - plan.ownerBytes
         store, result = spill_rows(
@@ -613,16 +646,26 @@ class CrH5Reader(CrReader):
         to its destination row as it reads it, so an import that shuffles
         cells reads the file once.
 
+        The scan and the spill run within what ``maxBytes`` leaves beside
+        the reader's arrays, which :meth:`_sparse_import_resident_bytes`
+        counts.
+
         Raises:
             MemoryError: If one barcode holds more values than fit in
-                ``maxBytes``, or with ``destinationRows`` its spill does not.
+                ``maxBytes`` beside the reader's arrays, or with
+                ``destinationRows`` its spill does not.
             OSError: If the temporary disk lacks room for the shuffled cells.
             ValueError: If a value is NaN or infinite, or ``destinationRows``
                 is not a permutation of the selected barcodes.
         """
         value_ranges = new_count_ranges(featureGroups)
         if destinationRows is None:
-            self._scan_runs(maxBytes, featureGroups, value_ranges, None)
+            self._scan_beside_arrays(
+                maxBytes,
+                lambda scan_bytes: self._scan_runs(
+                    scan_bytes, featureGroups, value_ranges, None
+                ),
+            )
             return value_ranges
         cumulative = self._selected_cumulative_nnz()
         rows = sample_rows(cumulative)
