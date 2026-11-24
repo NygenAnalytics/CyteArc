@@ -87,11 +87,11 @@ class CSVtoZarr:
             room for the shuffled rows.
         MemoryBudgetError: If ``mem_budget`` cannot hold a step beside the
             cell IDs and the ``cell_data_cols`` columns that the import holds:
-            for a shuffle, drawing the order, gathering the IDs in it, and one
-            chunk of rows and their spill beside the order and its inverse;
-            the counts write and its ``countsT`` transpose; and the writes of
-            the cell columns. Each is refused before the store is created,
-            naming the budget that holds it.
+            for a shuffle, drawing the order, and one chunk of rows and their
+            spill beside the order and its inverse; the counts write and its
+            ``countsT`` transpose; and the writes of the cell table's IDs and
+            names, a block at a time, and of the cell columns. Each is refused
+            before the store is created, naming the budget that holds it.
 
     Attributes:
         csvr: A CSVReader object
@@ -162,7 +162,13 @@ class CSVtoZarr:
         check_destination(
             zarr_loc, overwrite=overwrite, storage_options=storage_options
         )
-        cell_ids = self.csvr.cell_ids()
+        # The reader's IDs, which the cell table reads a block at a time, or
+        # the names that the import makes without an ID column.
+        cell_ids = (
+            self.csvr.cell_ids() if self.csvr.cellIds is None else self.csvr.cellIds
+        )
+        # The names that the import makes, which it holds as long as the IDs.
+        self._madeNameBytes = 0 if self.csvr.cellIds is not None else cell_ids.nbytes
         storage_dtype = count_storage_dtype(self.csvr.countDtype, self.csvr.countRange)
         self.values = resolve_import_values(
             values,
@@ -179,25 +185,16 @@ class CSVtoZarr:
         self._shuffledStore: "SparseRowStore | None" = None
         self._shuffledParts: dict[int, list[tuple[np.ndarray, np.ndarray]]] = {}
         if self.shuffleCells:
-            # Drawing the order and its inverse runs beside the cell IDs: the
-            # reader's and this import's copy of them.
-            held_ids = int(cell_ids.nbytes) + self._id_bytes()
+            # Drawing the order and its inverse runs beside the cell IDs.
+            held_ids = self._id_bytes() + self._madeNameBytes
             check_shuffle_fits(self.csvr.nCells, held_ids, self.resources.memoryBytes)
             self._cellOrder = shuffled_order(self.csvr.nCells, self.shuffleSeed)
-            # The copy is gathered in the order beside itself, which it then
-            # replaces through the spill.
-            held = held_ids + int(self._cellOrder.nbytes)
-            self._import_ledger().refuse_beyond(
-                f"the cell IDs in shuffled order beside the {held} bytes that the "
-                "import holds",
-                held + int(cell_ids.nbytes),
-            )
-            cell_ids = cell_ids[self._cellOrder]
             self._spill_rows(held_ids)
         try:
             # A layout that does not fit fails here, before the destination
-            # exists, and so do the writes of the cell columns.
+            # exists, and so do the writes of the cell table and columns.
             self.policy = self._fit_count_layout(storage_dtype, layout_request)
+            self._check_cell_table_write(cell_ids)
             self._check_cell_column_writes()
             # The destination must be empty, or with overwrite an unprepared
             # store.
@@ -215,7 +212,9 @@ class CSVtoZarr:
             ids=cell_ids,
             names=cell_ids,
             profile=self.profile,
+            order=self._cellOrder,
         )
+        del cell_ids
         if self._cellOrder is not None:
             from ..storage.cell_order import write_shuffled_cell_order
 
@@ -295,15 +294,45 @@ class CSVtoZarr:
             f"Importing the counts of {self.csvr.nCells} cells",
         )
 
+    def _check_cell_table_write(self, cell_ids: np.ndarray) -> None:
+        """Refuse a budget that cannot write the cell table's IDs and names.
+
+        The table reads ``cell_ids`` a block at a time, in a shuffled
+        import's order, beside the reader's cell IDs or the names that the
+        import makes, a shuffled import's order, its shuffled rows' pointers
+        and the cell columns that its spill keeps.
+
+        Raises:
+            MemoryBudgetError: Naming the budget that holds the write.
+        """
+        from ..storage.schema import cell_table_write_bytes
+
+        held = self._id_bytes() + self._madeNameBytes
+        if self._cellOrder is not None:
+            store = self._shuffledStore
+            held += (
+                int(self._cellOrder.nbytes)
+                + (0 if store is None else store.resident_bytes)
+                + self._cell_column_bytes()
+            )
+        self._import_ledger().refuse_beyond(
+            "the cell table's IDs and names beside the "
+            f"{held} bytes that the import holds",
+            held
+            + cell_table_write_bytes(
+                cell_ids, cell_ids, self.resources.workers, order=self._cellOrder
+            ),
+        )
+
     def _check_cell_column_writes(self) -> None:
         """Refuse a budget that cannot hold the writes of the cell columns, after the counts write.
 
         Each column is joined from its parts, with its missing marks, and
         written, beside every column's parts, the reader's cell IDs, a
         shuffled import's order and the count summary. A shuffled import
-        gathers the column in the order first, which holds less than its
-        write's copies. A text column may hold blank values, which the
-        write copies around.
+        first gathers the column and its marks in the order, a copy of both
+        beside them. A text column may hold blank values, which the write
+        copies around.
 
         Raises:
             MemoryBudgetError: Naming the budget that holds the write of the
@@ -320,9 +349,18 @@ class CSVtoZarr:
             + order
             + CountSummary.nbytes_for(n_cells, self.csvr.nFeatures)
         )
+        gathered = self._cellOrder is not None
         writes = [
             n_cells * (itemsize + 1)
-            + metadata_column_write_bytes(n_cells, itemsize, missing=dtype.kind == "O")
+            + max(
+                gathered * n_cells * (itemsize + 1),
+                metadata_column_write_bytes(
+                    n_cells,
+                    itemsize,
+                    missing=dtype.kind == "O",
+                    threads=self.resources.workers,
+                ),
+            )
             for itemsize, (_name, (_position, dtype)) in zip(
                 self._cell_column_itemsizes(), self._cellDataColumns, strict=True
             )

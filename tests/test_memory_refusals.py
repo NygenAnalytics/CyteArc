@@ -921,18 +921,17 @@ def test_a_sparse_matrix_import_refuses_a_budget_of_one_byte_at_its_first_step(
             shuffle_cells=shuffle_cells,
         ).dump()
     )
-    # The matrix that the writer holds refuses first, and a shuffle of the 30
-    # cells, 24 bytes each, beside it and the import's copy of the IDs, NumPy
-    # text of 4 bytes a character of the longest, c29, before it runs.
+    # The check of the cell IDs refuses first, in either order, beside the
+    # matrix and the import's copy of the IDs, NumPy text of 4 bytes a
+    # character of the longest, c29. It holds a reference to each ID and an
+    # ASCII Python string of it, 41 bytes and one a character, and the IDs
+    # twice as NumPy text beside a mark each.
     matrix_bytes = matrix.data.nbytes + matrix.indices.nbytes + matrix.indptr.nbytes
     held = matrix_bytes + 30 * 4 * 3
+    check = 8 * 30 + sum(41 + len(f"c{i}") for i in range(30)) + 2 * 30 * 12 + 30
     assert (refusal.item, refusal.needed_bytes) == (
-        (
-            f"the cells' random order beside the {held} bytes that the import holds",
-            held + 720,
-        )
-        if shuffle_cells
-        else ("the sparse matrix", matrix_bytes + 1)
+        f"checking the cell IDs beside the {held} bytes of the matrix and the cell IDs",
+        held + check,
     )
 
 
@@ -943,18 +942,19 @@ def test_a_sparse_matrix_import_names_the_budget_of_its_scan_beside_the_matrix(
     from cytearc.writers import SparseToZarr
 
     matrix = csr_matrix(
-        np.random.default_rng(5).poisson(2.0, size=(30, 20)).astype(np.uint32) + 1
+        np.random.default_rng(5).poisson(2.0, size=(30, 50)).astype(np.uint32) + 1
     )
-    # The matrix holds 600 uint32 values and their int32 columns, and 31
+    # The matrix holds 1,500 uint32 values and their int32 columns, and 31
     # int32 row pointers; a shuffle also holds the order of the 30 cells, 8
     # bytes each; and the import holds its copy of the IDs, NumPy text of 4
     # bytes a character of the longest, c29.
     assert (matrix.nnz, matrix.indices.dtype, matrix.indptr.dtype) == (
-        600,
+        1_500,
         np.int32,
         np.int32,
     )
-    held = 600 * 4 + 600 * 4 + 31 * 4 + (8 * 30 if shuffle_cells else 0) + 30 * 12
+    matrix_bytes = 1_500 * 4 + 1_500 * 4 + 31 * 4
+    held = matrix_bytes + (8 * 30 if shuffle_cells else 0) + 30 * 12
     what = (
         "the matrix, the cell order and the cell IDs"
         if shuffle_cells
@@ -967,31 +967,39 @@ def test_a_sparse_matrix_import_names_the_budget_of_its_scan_beside_the_matrix(
             matrix,
             zarr_loc=str(destination),
             cell_ids=[f"c{i}" for i in range(30)],
-            feature_ids=[f"f{i}" for i in range(20)],
+            feature_ids=[f"f{i}" for i in range(50)],
             mem_budget=budget,
             nthreads=1,
             shuffle_cells=shuffle_cells,
         )
 
-    # A budget one byte above what the import holds, or for a shuffle the
-    # budget of drawing the order beside the matrix and the import's copy of
-    # the IDs, 24 bytes a cell and 12 an ID, leaves no room to scan the
-    # matrix. Every row holds 20 values, which the scan reads at 72 bytes each.
+    # The budget that passes the check of the cell IDs, which the check of
+    # the feature IDs and a shuffle of 24 bytes a cell pass too, leaves no
+    # room to scan the matrix: the check holds a reference to each ID and an
+    # ASCII Python string of it, 41 bytes and one a character, and the IDs
+    # twice as NumPy text beside a mark each, beside the matrix and the IDs.
+    # The feature IDs are Python strings already, which their check refers
+    # to. The scan reads every row's 50 values at 72 bytes each.
     budget = (
-        600 * 4 + 600 * 4 + 31 * 4 + 30 * 12 + 24 * 30 if shuffle_cells else held + 1
+        matrix_bytes
+        + 30 * 12
+        + 8 * 30
+        + sum(41 + len(f"c{i}") for i in range(30))
+        + 2 * 30 * 12
+        + 30
     )
     refusal = refused(lambda: construct(budget))
     item = (
-        f"the 20 values of the longest compressed vector beside the {held} bytes "
+        f"the 50 values of the longest compressed vector beside the {held} bytes "
         f"of {what}"
     )
     assert refusal.item == item
-    assert refusal.needed_bytes == held + 20 * 72
+    assert refusal.needed_bytes == held + 50 * 72
     assert refusal.budget_bytes == budget
     assert str(refusal) == (
-        f"Importing the sparse matrix holds about {held + 20 * 72} bytes for "
+        f"Importing the sparse matrix holds about {held + 50 * 72} bytes for "
         f"{item}, more than the memory budget of {budget} bytes. Raise "
-        f"mem_budget to at least {held + 20 * 72} bytes."
+        f"mem_budget to at least {held + 50 * 72} bytes."
     )
     assert not destination.exists()
     below = refused(lambda: construct(refusal.needed_bytes - 1))
@@ -1000,6 +1008,105 @@ def test_a_sparse_matrix_import_names_the_budget_of_its_scan_beside_the_matrix(
     beyond = refused(lambda: construct(refusal.needed_bytes))
     assert beyond.item == "the default count-matrix policy"
     assert not destination.exists()
+
+
+def _forty_character_ids(n_ids: int) -> list[str]:
+    return [f"{row:08d}" + "x" * 32 for row in range(n_ids)]
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected"),
+    [
+        # 20,000 IDs of 40 ASCII characters: a reference to each and a Python
+        # string of it, 41 bytes and one a character, and the IDs twice as
+        # NumPy text of 160 bytes each beside a mark each.
+        ("unicode", 8 * 20_000 + 81 * 20_000 + 2 * 160 * 20_000 + 20_000),
+        # Python strings already, in an array of them, which the check refers
+        # to; a list of them first becomes such an array.
+        ("objects", 2 * 160 * 20_000 + 20_000),
+        ("list", 8 * 20_000 + 2 * 160 * 20_000 + 20_000),
+    ],
+)
+def test_checking_in_memory_ids_holds_what_its_size_helper_charges(
+    kind: str, expected: int
+) -> None:
+    from cytearc.writers.sparse import _identifier_check_bytes, _identifiers
+    from tests.memory_helpers import traced_charge
+
+    texts = _forty_character_ids(20_000)
+    values: Any = {
+        "unicode": np.array(texts),
+        "objects": np.array(texts, dtype=object),
+        "list": texts,
+    }[kind]
+    assert _identifier_check_bytes(values) == expected
+    held = traced_charge(lambda _ledger: _identifiers(values, "Cell IDs")).held
+    # Beside the IDs, the check holds the charge, within the few kilobytes of
+    # NumPy's and Python's objects of the calls.
+    assert expected - 8 * 1024 <= held <= expected + 8 * 1024
+
+
+@pytest.mark.parametrize("kind", ["bytes", "integers", "numpy-strings"])
+def test_checking_in_memory_ids_of_other_values_holds_less_than_its_charge(
+    kind: str,
+) -> None:
+    from cytearc.writers.sparse import _identifier_check_bytes, _identifiers
+    from tests.memory_helpers import traced_charge
+
+    # Text made from bytes, numbers or NumPy's strings is new Python
+    # strings, which the charge counts at the widest kind of character.
+    texts = _forty_character_ids(5_000)
+    if kind == "bytes":
+        values: Any = np.array([text.encode() for text in texts])
+    elif kind == "integers":
+        values = np.arange(10**12, 10**12 + 5_000)
+    else:
+        values = np.array([np.str_(text) for text in texts], dtype=object)
+    held = traced_charge(lambda _ledger: _identifiers(values, "Cell IDs")).held
+    assert held <= _identifier_check_bytes(values)
+
+
+@pytest.mark.parametrize("shuffle_cells", [False, True], ids=["file", "shuffled"])
+def test_an_in_memory_import_names_the_budget_that_checks_its_ids(
+    tmp_path: Path, shuffle_cells: bool
+) -> None:
+    from cytearc.writers import SparseToZarr
+
+    matrix = csr_matrix(
+        np.random.default_rng(5).poisson(2.0, size=(400, 3)).astype(np.uint32) + 1
+    )
+    ids = _forty_character_ids(400)
+    attempts = iter(range(20))
+
+    def at_budget(budget: int) -> None:
+        destination = tmp_path / f"store-{next(attempts)}.zarr"
+        try:
+            SparseToZarr(
+                matrix,
+                zarr_loc=str(destination),
+                cell_ids=ids,
+                feature_ids=["f0", "f1", "f2"],
+                mem_budget=budget,
+                nthreads=1,
+                shuffle_cells=shuffle_cells,
+            )
+        except MemoryBudgetError as error:
+            if error.item.startswith("checking"):
+                assert not destination.exists()
+                raise
+
+    # The matrix holds 1,200 uint32 values, their int32 columns and 401
+    # int32 row pointers, and the import its copy of the IDs, NumPy text of
+    # 160 bytes each. Checking them holds a reference to each and a Python
+    # string of it, 41 bytes and 40 more, and the IDs twice as NumPy text
+    # beside a mark each, more than the check of the three feature IDs.
+    held = 1_200 * 4 + 1_200 * 4 + 401 * 4 + 400 * 160
+    check = 400 * 8 + 400 * 81 + 2 * 400 * 160 + 400
+    item = (
+        f"checking the cell IDs beside the {held} bytes of the matrix and the cell IDs"
+    )
+    refusal = named_budget_runs(at_budget, held + check - 1, item=item)
+    assert refusal.needed_bytes == held + check
 
 
 def _notes_reader(path: Path, n_cells: int, **options: Any) -> Any:
@@ -1067,17 +1174,23 @@ def test_a_csv_import_refuses_a_budget_without_room_for_its_cell_column_writes(
 
     # After the counts write, each column is joined from its parts and, for
     # a shuffle, gathered in the order, then written. The write of the
-    # largest, the notes, holds them beside Zarr's copy of their values and,
-    # as text that may hold blanks, the copy with a placeholder in each
-    # blank row: twice 4 bytes a character of 400. The import then holds
-    # the reader's IDs, NumPy text of 4 bytes a character of cell-39; every
-    # cell column; the count summary, 40 bytes a cell and 16 a gene; and a
-    # shuffle's order, 8 bytes a cell.
+    # largest, the notes, holds them beside, as text that may hold blanks,
+    # the copy with a placeholder in each blank row, 4 bytes a character of
+    # 400, and then beside the copy Zarr's buffer of their one chunk, at
+    # most a 128th more than the notes and 1,024 bytes: more than the copy
+    # of the present notes, as large as all of them, and a mark a row that
+    # the copy is made beside. The import then holds the reader's IDs, NumPy
+    # text of 4 bytes a character of cell-39; every cell column; the count
+    # summary, 40 bytes a cell and 16 a gene; and a shuffle's order, 8 bytes
+    # a cell.
     ids = n_cells * 4 * len(f"cell-{n_cells - 1}")
     columns, notes = _notes_column_bytes(n_cells)
     order = 8 * n_cells if shuffle_cells else 0
     held = ids + columns + 40 * n_cells + 16 * 3 + order
-    needed = held + notes + n_cells * 2 * 4 * 400
+    text = n_cells * 4 * 400
+    buffer = text + text // 128 + 1_024
+    assert buffer > text + n_cells
+    needed = held + notes + text + buffer
     refusal = refused(lambda: construct(needed - 1))
     assert refusal.item == (
         f"the largest cell column's write beside the {held} bytes that the import holds"
@@ -1119,9 +1232,11 @@ def test_a_csv_import_charges_the_write_of_a_number_column_as_one_copy(
         shuffle_cells=False,
     )
     # The scores' write holds them, float64 with a missing mark each, beside
-    # Zarr's copy of their values: a number column has no missing rows. The
+    # Zarr's buffer of their one chunk, at most a 128th more than their
+    # values and 1,024 bytes: a number column has no missing rows. The
     # tags' write, of text a character wide that may hold blanks, holds them
-    # beside two copies of 4 bytes a value, less. The import holds the
+    # beside the copy with a placeholder in each blank row, 4 bytes a value,
+    # and the buffer of that copy's chunk, less. The import holds the
     # reader's IDs, NumPy text of 4 bytes a character of cell-39, both
     # columns, and the count summary, 40 bytes a cell and 16 a gene.
     ids = n_cells * 4 * len(f"cell-{n_cells - 1}")
@@ -1129,7 +1244,12 @@ def test_a_csv_import_charges_the_write_of_a_number_column_as_one_copy(
     item = (
         f"the largest cell column's write beside the {held} bytes that the import holds"
     )
-    assert (item, held + n_cells * (8 + 1) + n_cells * 8) in checks
+    scores = n_cells * 8
+    tags = n_cells * 4
+    assert n_cells * (4 + 1) + tags + (tags + tags // 128 + 1_024) < (
+        n_cells * (8 + 1) + scores + scores // 128 + 1_024
+    )
+    assert (item, held + n_cells * (8 + 1) + scores + scores // 128 + 1_024) in checks
 
 
 def test_a_csv_import_charges_its_counts_write_beside_its_ids_and_cell_columns(

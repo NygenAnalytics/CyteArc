@@ -19,7 +19,11 @@ from .errors import MatrixSourceError, ResourceLimitError
 from .values import decode_text_values, read_window
 from .._sparse import ROW_BYTES, SparseRowStore
 from ...utils.arrays import cumulative_nnz, has_duplicates
-from ...utils.memory_budget import MemoryBudgetError, refusal_words
+from ...utils.memory_budget import (
+    MemoryBudgetError,
+    least_admitted_budget,
+    refusal_words,
+)
 
 
 type MatrixBlock = NDArray[Any] | coo_matrix | csr_matrix
@@ -161,11 +165,29 @@ def release_temporary_storage(source: MatrixSource) -> None:
             current._transposeDirectory = None
 
 
-def prepare_matrix_sources(source: MatrixSource, max_bytes: int | None = None) -> None:
+def prepare_matrix_sources(
+    source: MatrixSource,
+    max_bytes: int | None = None,
+    *,
+    subject: str = "a Seurat source",
+) -> None:
     """Prepare every source of ``source`` to be read within ``max_bytes``.
 
     ``max_bytes`` caps the block limit of each source at what the sources'
-    resident data leave of it.
+    resident data leave of it. The read of one cell of every source is
+    checked before any is prepared, and again before each is prepared, as a
+    source that converts its cells keeps their row pointers beside the
+    resident data. A refusal of one cell names the least budget at which
+    every source still to be prepared reads one cell, since the block limit
+    that the budget sets grows with it, and with it the read of one cell
+    that a source converting its cells estimates.
+
+    Args:
+        source: The matrix, whose sources are prepared in turn.
+        max_bytes: The memory available beside nothing else, or None to
+            prepare within each source's own limits.
+        subject: What a refusal of one cell's read names, such as
+            ``"assay 'ADT'"``.
 
     Raises:
         MemoryBudgetError: If the sources' resident data, preparing one cell,
@@ -174,9 +196,13 @@ def prepare_matrix_sources(source: MatrixSource, max_bytes: int | None = None) -
         ResourceLimitError: If a block passes a limit that the source's
             ``SourceLimits`` set.
     """
-    for current in _matrix_sources(source):
-        if not isinstance(current, BaseMatrixSource):
-            continue
+    sources = [
+        current
+        for current in _matrix_sources(source)
+        if isinstance(current, BaseMatrixSource)
+    ]
+    item = f"preparing one cell of {subject}"
+    for index, current in enumerate(sources):
         limits = current._limits
         try:
             if max_bytes is None:
@@ -192,20 +218,13 @@ def prepare_matrix_sources(source: MatrixSource, max_bytes: int | None = None) -
                     budget_bytes=int(max_bytes),
                     item="the resident data of the Seurat sources",
                 )
+            _admit_one_cell_of_each(
+                sources[index:], source.resident_bytes, int(max_bytes), item
+            )
             current._limits = replace(
                 limits, maxBlockBytes=min(limits.maxBlockBytes, available)
             )
             try:
-                estimate = current.estimate_read_memory(0, min(1, current.n_cells))
-                if estimate.blockBytes > available:
-                    needed = source.resident_bytes + estimate.blockBytes
-                    raise MemoryBudgetError(
-                        "Seurat source preparation exceeds mem_budget. It needs "
-                        f"at least {needed} bytes.",
-                        needed_bytes=needed,
-                        budget_bytes=int(max_bytes),
-                        item="preparing one cell of a Seurat source",
-                    )
                 current._prepare_for_read()
             except ResourceLimitError as error:
                 refusal = _budget_block_refusal(
@@ -216,6 +235,65 @@ def prepare_matrix_sources(source: MatrixSource, max_bytes: int | None = None) -
                 raise refusal from error
         finally:
             current._limits = limits
+
+
+def _admit_one_cell_of_each(
+    sources: Sequence["BaseMatrixSource"], resident: int, max_bytes: int, item: str
+) -> None:
+    """Check that ``max_bytes`` reads one cell of each of ``sources``, naming the least budget that does.
+
+    Raises:
+        MemoryBudgetError: Naming the least budget at which every source
+            reads one cell beside the ``resident`` bytes, found from the
+            need of the first that refuses at ``max_bytes``.
+    """
+
+    def admit(budget: int) -> None:
+        for current in sources:
+            _admit_one_cell(current, resident, budget)
+
+    try:
+        admit(max_bytes)
+    except MemoryBudgetError as error:
+        needed = least_admitted_budget(admit, error)
+        raise MemoryBudgetError(
+            f"Seurat source preparation exceeds mem_budget. It needs at least {needed} bytes.",
+            needed_bytes=needed,
+            budget_bytes=max_bytes,
+            item=item,
+        ) from error
+
+
+def _admit_one_cell(source: "BaseMatrixSource", resident: int, max_bytes: int) -> None:
+    """Check that ``max_bytes`` reads one cell of ``source`` beside the ``resident`` bytes of the sources.
+
+    The budget caps the source's block limit at what the resident data
+    leave of it, and the read of one cell, which a source that converts its
+    cells first estimates from that limit, must fit there. The check
+    estimates and reads nothing, and leaves the source's limits as they
+    were.
+
+    Raises:
+        MemoryBudgetError: Naming what the resident data and the read of one
+            cell hold at ``max_bytes``.
+    """
+    limits = source._limits
+    available = int(max_bytes) - int(resident)
+    source._limits = replace(
+        limits, maxBlockBytes=min(limits.maxBlockBytes, max(0, available))
+    )
+    try:
+        estimate = source.estimate_read_memory(0, min(1, source.n_cells))
+    finally:
+        source._limits = limits
+    if estimate.blockBytes > available:
+        needed = int(resident) + estimate.blockBytes
+        raise MemoryBudgetError(
+            f"Seurat source preparation exceeds mem_budget. It needs at least {needed} bytes.",
+            needed_bytes=needed,
+            budget_bytes=int(max_bytes),
+            item="preparing one cell",
+        )
 
 
 def _budget_block_refusal(

@@ -54,6 +54,62 @@ def _identifiers(values: Any, label: str) -> np.ndarray:
     return texts
 
 
+def _identifier_check_bytes(values: Any) -> int:
+    """Return the most that :func:`_identifiers` holds beside ``values`` as it checks them.
+
+    It makes an object array of the values, with a Python object of each
+    value that an array of another dtype holds, and a list of their text,
+    which it copies into NumPy text as wide as the longest value, four
+    bytes a character; it then holds a stripped or sorted copy of that text
+    and a mark for each value. Unicode text gives its strings exactly, and
+    Python strings are referred to as they are; text made from bytes or
+    other values is counted at four bytes a character of its widest, its
+    strings at the widest kind of character.
+    """
+    from ..storage.arrays import _text_width
+    from ..utils.memory_budget import (
+        fixed_text_bytes,
+        object_array_bytes,
+        python_text_bytes,
+    )
+
+    array = values if isinstance(values, np.ndarray) else None
+    n_values = len(values)
+    if array is not None and array.dtype.kind == "U":
+        width = array.dtype.itemsize // 4
+        characters = int(np.strings.str_len(array).sum()) if n_values else 0
+        widest = int(np.ascontiguousarray(array).view(np.uint32).max(initial=0))
+        # The object array's strings, which the list refers to again.
+        made = python_text_bytes(n_values, characters, widest=widest)
+        converted = 0
+    else:
+        kind = "O" if array is None else array.dtype.kind
+        objects = np.asarray(values, dtype=object) if kind == "O" else None
+        width = (
+            array.dtype.itemsize
+            if objects is None and array is not None and kind == "S"
+            else _text_width(np.asarray(values, dtype=object))
+        )
+        # Bytes become a Python bytes object each, and numbers a Python
+        # number of up to 32 bytes; text made from them is a new string,
+        # where Python strings are their own text.
+        made = (
+            n_values * (33 + width)
+            if kind == "S"
+            else (32 * n_values if kind in "iufc" else 0)
+        )
+        converted = (
+            0
+            if objects is not None and set(map(type, objects.flat)) <= {str}
+            else python_text_bytes(n_values, n_values * width, widest=0x10FFFF)
+        )
+    references = 0 if array is not None and array.dtype.kind == "O" else n_values
+    text = fixed_text_bytes(n_values, max(1, width))
+    building = converted + object_array_bytes(n_values) + text
+    checking = 2 * text + n_values
+    return object_array_bytes(references) + made + max(building, checking)
+
+
 @dataclass(frozen=True, slots=True)
 class _AssayMatrix:
     """One assay that an import writes: its matrix and its features."""
@@ -232,10 +288,13 @@ class SparseToZarr:
             ``shuffle_cells`` is not a boolean, or ``shuffle_seed`` is not an
             integer.
         FileExistsError: If ``zarr_loc`` is not empty and may not be replaced.
-        MemoryBudgetError: If ``shuffle_cells`` is True and ``mem_budget``
-            cannot hold the shuffle of the cells beside the matrices and the
-            cell IDs, before the shuffle runs and before the destination
-            exists, naming the budget that holds them.
+        MemoryBudgetError: If ``mem_budget`` cannot hold the check of the
+            cell or feature IDs, which holds their text as Python strings and
+            twice as NumPy text, the shuffle of the cells when
+            ``shuffle_cells`` is True, or the write of the cell table's IDs
+            and names, a block at a time, each beside the matrices and the
+            cell IDs. Each is refused before it runs and before the
+            destination exists, naming the budget that holds it.
 
     Attributes:
         assayNames: The names of the output assays, in the order written.
@@ -287,6 +346,7 @@ class SparseToZarr:
         import_values_argument(values)
         from ..storage.budget import resolve_budget
         from ..storage.schema import (
+            cell_table_write_bytes,
             create_cell_data,
             create_zarr_count_assay,
             normalized_values_record,
@@ -336,12 +396,32 @@ class SparseToZarr:
                     "ERROR: Number of feature ids are not same as number of "
                     f"features in the matrix{where}"
                 )
-        _identifiers(cell_ids, "Cell IDs")
-        for assay in assays:
-            _identifiers(
-                assay.feature_ids,
+        # Checking the IDs holds their text as Python strings and twice as
+        # NumPy text, beside the matrices and the import's copy of the cell
+        # IDs; a budget that cannot hold that fails before the check runs.
+        doing = f"Importing the sparse {'matrix' if single else 'matrices'}"
+        matrices = sum(sparse_matrix_bytes(assay.matrix) for assay in assays)
+        held_ids = matrices + int(cell_ids.nbytes)
+        beside = (
+            f"beside the {held_ids} bytes of the "
+            f"{'matrix' if single else 'matrices'} and the cell IDs"
+        )
+        checks = [("Cell IDs", "the cell IDs", cell_ids)] + [
+            (
                 "Feature IDs" if single else f"Feature IDs of assay {assay.name!r}",
+                "the feature IDs"
+                if single
+                else f"the feature IDs of assay {assay.name!r}",
+                assay.feature_ids,
             )
+            for assay in assays
+        ]
+        for label, item, identifiers in checks:
+            MemoryLedger(int(self.resources.memoryBytes), doing).refuse_beyond(
+                f"checking {item} {beside}",
+                held_ids + _identifier_check_bytes(identifiers),
+            )
+            _identifiers(identifiers, label)
         # A destination that would be refused fails before the passes over
         # the matrices below; create_destination checks it again.
         check_destination(
@@ -350,7 +430,7 @@ class SparseToZarr:
         # The scans read windows beside the matrices, which stay held, as
         # does a shuffled import's order of the cells, drawn beside them and
         # the import's copy of the cell IDs.
-        held = sum(sparse_matrix_bytes(assay.matrix) for assay in assays)
+        held = matrices
         if self.shuffleCells:
             check_shuffle_fits(
                 self.nCells, held + int(cell_ids.nbytes), self.resources.memoryBytes
@@ -420,31 +500,32 @@ class SparseToZarr:
         self.policy: CountMatrixPolicy | dict[str, CountMatrixPolicy] = (
             layouts[assays[0].name] if single else layouts
         )
-        # A shuffled import gathers its copy of the IDs in the order for the
-        # cell table, beside the copy; a budget that cannot hold both fails
-        # here, before the destination exists.
-        if self._cellOrder is not None:
-            MemoryLedger(
-                int(self.resources.memoryBytes),
-                f"Importing the sparse {'matrix' if single else 'matrices'}",
-            ).refuse_beyond(
-                f"the cell IDs in shuffled order beside the {held + id_bytes} "
-                f"bytes of {what}",
-                held + 2 * id_bytes,
-            )
+        # The cell table reads the import's copy of the IDs a block at a time,
+        # in a shuffled import's order, beside the matrices and the order; a
+        # budget that cannot hold that fails here, before the destination
+        # exists.
+        MemoryLedger(int(self.resources.memoryBytes), doing).refuse_beyond(
+            f"the cell table's IDs and names beside the {held + id_bytes} bytes "
+            f"of {what}",
+            held
+            + id_bytes
+            + cell_table_write_bytes(
+                cell_ids, cell_ids, self.resources.workers, order=self._cellOrder
+            ),
+        )
         # The destination must be empty, or with overwrite an unprepared store.
         self.z = create_destination(
             zarr_loc, overwrite=overwrite, storage_options=storage_options
         )
         # The import writes the new store on its threads.
         register_store_threads(self.z.store, self.resources.workers)
-        stored_ids = cell_ids if self._cellOrder is None else cell_ids[self._cellOrder]
         cell_group = create_cell_data(
             root=self.z,
             workspace=self.workspace,
-            ids=stored_ids,
-            names=stored_ids,
+            ids=cell_ids,
+            names=cell_ids,
             profile=self.profile,
+            order=self._cellOrder,
         )
         if self._cellOrder is not None:
             from ..storage.cell_order import write_shuffled_cell_order

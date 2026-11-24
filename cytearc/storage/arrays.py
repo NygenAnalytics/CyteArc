@@ -7,7 +7,9 @@ import zarr
 
 from .layout import (
     ZarrArraySpec,
+    _encoded_chunk_bound,
     _group_zarr_format,
+    column_chunk_rows,
     get_compressors,
     normalize_chunks,
 )
@@ -207,6 +209,28 @@ def text_array(values: np.ndarray) -> np.ndarray:
     )
 
 
+def text_needs_python(values: np.ndarray) -> bool:
+    """Return whether :func:`text_array` makes ``values`` text through a Python string of each.
+
+    Unicode text, ASCII byte strings, and objects that are all Python
+    strings or all ASCII byte strings convert in whole-array NumPy
+    operations; byte strings that are not ASCII and objects of other kinds
+    are made Python strings first.
+    """
+    kind = values.dtype.kind
+    if kind == "U":
+        return False
+    if kind == "S":
+        return not _is_ascii(values)
+    if kind == "O":
+        kinds = set(map(type, values.flat))
+        if kinds <= {str}:
+            return False
+        if kinds <= {bytes, np.bytes_}:
+            return not _is_ascii(values.astype(np.bytes_))
+    return True
+
+
 def _holds_bytes_or_none(values: np.ndarray) -> bool:
     """Return whether an array of Python objects holds None or a byte string."""
     # Each distinct type is checked once rather than each value.
@@ -353,6 +377,52 @@ def create_metadata_column(
         compressors=compressors,
         attributes=attrs,
     )
+
+
+def column_write_rows(chunk_rows: int, threads: int) -> int:
+    """Return the rows of a block that a column's write hands Zarr at once: one chunk for each write thread.
+
+    Zarr encodes every chunk of one write at once, as many as its async
+    concurrency lets it, so a column written whole holds the buffers of
+    that many encodes; a block of one chunk for each of the store's write
+    threads holds those of the encodes that the threads run.
+    """
+    return max(1, int(chunk_rows)) * max(1, int(threads))
+
+
+def column_write_bytes(
+    n_rows: int, itemsize: int, threads: int, *, block_row_bytes: int = 0
+) -> int:
+    """Return the most that writing a column holds beside its values, a block of :func:`column_write_rows` rows at a time.
+
+    The column holds ``n_rows`` values of ``itemsize`` bytes each, in the
+    chunks of :func:`~cytearc.storage.layout.column_chunk_rows`, and its
+    store encodes on ``threads`` threads. Zarr encodes each chunk of a block
+    into a buffer of up to the chunk's encoded bound, which it keeps until
+    the store has the chunk; a chunk that the column ends inside is first
+    copied whole, its rows past the column's end filled, so the block that
+    writes it holds that copy too. A writer that holds ``block_row_bytes``
+    for each row of the block it writes, such as the block gathered in an
+    order, holds them beside. Zarr's objects of the array and of its
+    writes, tens of kilobytes, are left out, as the charges of the runtime's
+    own objects are.
+    """
+    n_rows, itemsize = int(n_rows), max(1, int(itemsize))
+    if n_rows <= 0:
+        return 0
+    rows = column_chunk_rows(n_rows, itemsize)
+    chunk = rows * itemsize
+    encoded = _encoded_chunk_bound(chunk)
+    chunks = -(-n_rows // rows)
+    per_block = min(max(1, int(threads)), chunks)
+    blocks = -(-chunks // per_block)
+    block_rows = per_block * rows
+    last_rows = n_rows - (blocks - 1) * block_rows
+    last_chunks = chunks - (blocks - 1) * per_block
+    filled = chunk if n_rows % rows else 0
+    row_bytes = max(0, int(block_row_bytes))
+    whole = per_block * encoded + block_rows * row_bytes if blocks > 1 else 0
+    return max(whole, last_chunks * encoded + filled + last_rows * row_bytes)
 
 
 def create_streamed_metadata_column(

@@ -2264,6 +2264,7 @@ class MtxReader(CrReader):
                 dense=False,
                 temp_dir=engine.tempDir,
             )
+            self._shuffledPlanned = planned
         finally:
             batches.close()
 
@@ -2317,6 +2318,11 @@ class MtxReader(CrReader):
         if self._shuffledRows is not None:
             return self._shuffled_staging_bytes(batch_size)
         return self._engine.producer_staging_bytes(batch_size, lines_in_mem)
+
+    def _cell_names_source(self) -> np.ndarray:
+        """Return the kept cells' barcodes, the array of Python strings that the reader keeps."""
+        names: np.ndarray = self._engine._cellNames
+        return names
 
     def get_cell_columns(self) -> Iterator[tuple[str, np.ndarray]]:
         yield from self._engine.cell_columns()

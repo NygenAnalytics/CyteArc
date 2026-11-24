@@ -1344,3 +1344,59 @@ def test_repeated_coordinates_sum_as_the_objects_order_sums_them(
         shuffled_order(_N_CELLS, 2),
         "RNA/counts",
     )
+
+
+def test_an_import_names_the_least_budget_that_prepares_one_cell_of_each_assay(
+    tmp_path,
+) -> None:
+    from tests.test_memory_refusals import named_budget_runs
+
+    source = _write_object(tmp_path / "object.rds", n_cells=40)
+    attempts = iter(range(100))
+
+    def attempt(budget: int) -> None:
+        with SeuratReader(source, temp_dir=tmp_path) as reader:
+            SeuratToZarr(
+                reader,
+                str(tmp_path / f"store-{next(attempts)}.zarr"),
+                mem_budget=budget,
+                nthreads=1,
+                shuffle_cells=False,
+            ).dump()
+
+    def preparing(assay: str):
+        def at_budget(budget: int) -> None:
+            try:
+                attempt(budget)
+            except MemoryBudgetError as error:
+                if error.item == f"preparing one cell of assay {assay!r}":
+                    raise
+
+        return at_budget
+
+    # The resident data of the sources refuse first, naming the budget at
+    # which RNA's preparation is checked.
+    with pytest.raises(MemoryBudgetError) as resident:
+        attempt(1)
+    assert resident.value.item == "the resident data of the Seurat sources"
+    # Each assay's sources size their block from the budget, so reading one
+    # of their cells needs more at a larger budget; ADT's two sources, a
+    # dense layer and the stitch of its layers, are both checked. Each
+    # refusal names the least budget at which every source of its assay
+    # reads one cell: there the assay passes, and one byte less is refused,
+    # naming the same budget.
+    rna = named_budget_runs(
+        preparing("RNA"),
+        resident.value.needed_bytes,
+        item="preparing one cell of assay 'RNA'",
+    )
+    adt = named_budget_runs(
+        preparing("ADT"), rna.needed_bytes, item="preparing one cell of assay 'ADT'"
+    )
+    assert adt.needed_bytes > rna.needed_bytes
+    # At ADT's budget the count layout refuses next, and its budget passes.
+    with pytest.raises(MemoryBudgetError) as layout:
+        attempt(adt.needed_bytes)
+    assert layout.value.item == "the default count-matrix policy"
+    attempt(layout.value.needed_bytes)
+    assert not list(tmp_path.glob("cytearc-sparse-*"))

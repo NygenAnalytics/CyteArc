@@ -1,4 +1,4 @@
-"""Read the budget that a memory refusal names, follow refusals to a budget that runs, give a domain function a ledger of a budget, trace a call after an untraced call, trace what a call holds against what its ledger charges, trace a read of selected cells, wait until the arrays handed to writes are freed, hold a read's decodes together while it is traced, record and trace what an import's process sends through its pipe, and skip tests that need the resident memory of the test process."""
+"""Read the budget that a memory refusal names, follow refusals to a budget that runs, give a domain function a ledger of a budget, trace a call after an untraced call, trace what a call holds against what its ledger charges, trace a read of selected cells, wait until the arrays handed to writes are freed, hold a read's decodes or a write's encodes together while it is traced, keep no chunks of a traced write, record and trace what an import's process sends through its pipe, and skip tests that need the resident memory of the test process."""
 
 import asyncio
 import re
@@ -322,6 +322,62 @@ def decodes_on_threads_held_together(
         yield
     finally:
         codec._decode_sync = decode
+
+
+@contextmanager
+def encodes_held_together(
+    codec: type, parties: int, timeout: float = 10.0
+) -> Iterator[None]:
+    """Make each encode of Zarr's ``codec`` hold its encoded chunk until ``parties`` encodes hold theirs.
+
+    How many of a write's encodes overlap depends on the threads that run
+    them and on how the machine schedules them, so a traced write of
+    ``parties`` chunks at once holds that many encoded chunks together only
+    where they wait for each other. Each encode that ends waits on the event
+    loop that runs its write, so the write then holds ``parties`` encoded
+    chunks at once on any machine. A write that never has that many encodes
+    in flight raises ``TimeoutError`` after ``timeout`` seconds instead of
+    being traced at less.
+    """
+    encode = codec._encode_single
+    barriers: weakref.WeakKeyDictionary[Any, asyncio.Barrier] = (
+        weakref.WeakKeyDictionary()
+    )
+
+    async def held(self: Any, chunk: Any, chunk_spec: Any) -> Any:
+        encoded = await encode(self, chunk, chunk_spec)
+        # Each event loop that runs a write has a barrier of its own.
+        loop = asyncio.get_running_loop()
+        barrier = barriers.get(loop)
+        if barrier is None:
+            barrier = barriers[loop] = asyncio.Barrier(parties)
+        async with asyncio.timeout(timeout):
+            await barrier.wait()
+        return encoded
+
+    codec._encode_single = held
+    try:
+        yield
+    finally:
+        codec._encode_single = encode
+
+
+def chunkless_store() -> Any:
+    """Return a memory store that keeps its arrays' metadata and lets go of every chunk that it is given.
+
+    A traced write to it holds what writing holds, and not the stored
+    chunks, which a store on disk or in the cloud holds elsewhere.
+    """
+    from zarr.storage import MemoryStore
+
+    class ChunklessStore(MemoryStore):
+        async def set(
+            self, key: str, value: Any, byte_range: tuple[int, int] | None = None
+        ) -> None:
+            if key.endswith("zarr.json"):
+                await super().set(key, value, byte_range)
+
+    return ChunklessStore()
 
 
 def received_messages(sent: Sequence[tuple[str, Any]]) -> list[tuple[str, Any]]:

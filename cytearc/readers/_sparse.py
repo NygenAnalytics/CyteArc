@@ -1855,6 +1855,61 @@ class SparseRowStore:
         return _bucket_bytes(int(entries), 1, 1, int(itemsize), False)
 
     @staticmethod
+    def planned_read_bytes(
+        indptr: np.ndarray,
+        *,
+        bucket_rows: int,
+        split_bytes: int,
+        dtype: Any,
+        read_ahead: bool = False,
+    ) -> int:
+        """Return what :meth:`read_bytes` gives for a finalized store of whole rows planned with these buckets.
+
+        ``indptr`` are the row pointers of the rows, in destination order, of
+        ``dtype`` values whose duplicates are not summed. The buckets start
+        every ``bucket_rows`` rows, and :meth:`finalize` splits one that
+        needs more than ``split_bytes`` to read into bands of the most rows
+        that read within it, as it splits a store's own buckets. The store
+        need not exist: the bands follow from the row pointers alone.
+        """
+        pointers = np.asarray(indptr, dtype=np.int64)
+        n_rows = int(pointers.size) - 1
+        itemsize = np.dtype(dtype).itemsize
+        per_entry = _entry_bytes(itemsize, False)
+
+        def cost(entries: int, rows: int) -> int:
+            return _bucket_bytes(entries, rows, rows, itemsize, False)
+
+        starts: list[int] = []
+        for first in range(0, n_rows, max(1, int(bucket_rows))):
+            last = min(n_rows, first + max(1, int(bucket_rows)))
+            if cost(int(pointers[last] - pointers[first]), last - first) <= split_bytes:
+                starts.append(first)
+                continue
+            start = first
+            while start < last:
+                stop, low, high = start + 1, start + 1, last
+                while low <= high:
+                    middle = (low + high) // 2
+                    entries = int(pointers[middle] - pointers[start])
+                    if cost(entries, middle - start) <= split_bytes:
+                        stop, low = middle, middle + 1
+                    else:
+                        high = middle - 1
+                starts.append(start)
+                start = stop
+        bounds = np.append(np.asarray(starts, dtype=np.int64), n_rows)
+        rows = np.diff(bounds)
+        entries = np.diff(pointers[bounds])
+        peak = int(
+            (entries * per_entry + rows * _piece_bytes(False) + (rows + 1) * 32).max(
+                initial=0
+            )
+        )
+        held = int((entries * (itemsize + 8) + (rows + 1) * 8).max(initial=0))
+        return int(bounds.nbytes) + peak + (held if read_ahead else 0)
+
+    @staticmethod
     def whole_row_bucket_rows(
         n_rows: int, entries: int, read_bytes: int, itemsize: int
     ) -> int:
