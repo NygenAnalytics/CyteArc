@@ -272,7 +272,7 @@ fate_ref = ds.trajectory.fate(sink_labels=states_ref, graph=graph, direction=pot
                               sinks=found.terminal)  # or the states the markers support
 ```
 
-(The `bastidas-ponce_4K_pancreas-d15_rnaseq` fixture, analyzed with the docs dataset's recipe) With `n_states=10`, the terminal states were four Leiden clusters whose 30 cells each were Alpha, Epsilon, Beta and Delta cells by the published types, and a search took about 3 s on 3,696 cells. At 9 and 11 states the terminal states also included a Pre-endocrine state, and at 9 a Ductal and at 11 an Ngn3 high EP state, so only the Beta, Delta and Alpha states persisted across the three.
+Before trusting a terminal state, read how the search errs in [Methods and limitations](https://docs.nygen.io/CyteArc/reference/methods#trajectory-states-method), which gives the terminal states that 3 to 12 states call on the fate mapping tutorial's pancreas walk.
 
 ### Compare with existing labels (final post-hoc evaluation only)
 
