@@ -450,7 +450,6 @@ class DataStoreMerge:
                         alignment,
                         self.names,
                         combination="merge",
-                        assay_type=self._assayTypes[assay_name],
                         nested=self._nestedSources,
                     )
                     if self.features == "union"

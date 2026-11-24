@@ -413,7 +413,6 @@ def unshared_features_warning(
     names: list[str],
     *,
     combination: Literal["merge", "composite"],
-    assay_type: str,
     nested: Sequence[NestedSources | None] | None = None,
 ) -> str | None:
     """Return the warning about the merged features that a source lacks.
@@ -423,8 +422,8 @@ def unshared_features_warning(
     each source measured in a feature column of its own
     (:func:`~cytearc.storage.metadata_keys.measured_features_column`), from
     which analyses leave the zeros out or refuse them, and the warning ends
-    with those that do and those that still read them as counts, the ADT
-    recipe for an assay of type ``"ADT"`` among them. The warning counts
+    with those that do and the perturbation analyses that still read them as
+    counts. The warning counts
     the merged features of ``assay_name`` that not every source holding the
     assay measured, then gives each such source's number of missing features
     and names the first ``UNSHARED_FEATURE_EXAMPLES`` of them in merged
@@ -445,8 +444,6 @@ def unshared_features_warning(
         names: The source names, in the order of ``alignment.featOrderMap``.
         combination: ``"merge"`` for a merge, which writes the zeros, or
             ``"composite"`` for a union composite, which reads them.
-        assay_type: The assay's type; the warning of an ``"ADT"`` assay says
-            what the ADT recipe does with the antibodies.
         nested: The sources of each merged source, which the record holds in
             its place, and None for every other source.
 
@@ -499,16 +496,10 @@ def unshared_features_warning(
         f"{adjective} features {'was' if unshared == 1 else 'were'} not measured "
         "by every source that holds the assay. "
         + " ".join(lacking)
-        + f"{zeros}; {record}, so "
-        + (
-            "analyses leave those zeros out or refuse them, except the pseudotime "
-            "and lineage analyses of features, which still read them as counts."
-            if assay_type == "ADT"
-            else "analyses leave those zeros out or refuse them, except prepared "
-            "percentage columns, potency scores, add_melded_assay and the "
-            "pseudotime and lineage analyses of features, which still read them "
-            "as counts."
-        )
+        + f"{zeros}; {record}, so analyses leave those zeros out or refuse them, "
+        "except perturbation.efficiency, perturbation.signature, "
+        "perturbation.associations and perturbation.profiles, which still read "
+        "them as counts."
     )
     if combination == "merge":
         return warning

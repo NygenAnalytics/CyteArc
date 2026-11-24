@@ -74,14 +74,20 @@ def default_filter_columns(
     """Return the QC columns of ``assay`` that preparation wrote, in order.
 
     The totals of an assay of normalized values are left out: they are not
-    sequencing depths.
+    sequencing depths. A percentage column that preparation left unavailable,
+    since no gene of its pattern was measured by every source of a merged
+    store's cells, is left out with a warning.
     """
-    holds_counts = store._get_assay(assay).holdsCounts
+    target = store._get_assay(assay)
+    columns = [f"{assay}_{suffix}" for suffix in suffixes]
+    target._warn_unavailable_percentages(
+        [column for column in columns if column not in store.cells.columns],
+        "Cell filtering",
+    )
     return tuple(
         column
-        for suffix in suffixes
-        if (column := f"{assay}_{suffix}") in store.cells.columns
-        and (holds_counts or suffix != "nCounts")
+        for suffix, column in zip(suffixes, columns, strict=True)
+        if column in store.cells.columns and (target.holdsCounts or suffix != "nCounts")
     )
 
 

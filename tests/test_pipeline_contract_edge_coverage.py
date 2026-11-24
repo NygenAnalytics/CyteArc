@@ -479,6 +479,11 @@ class _FakeRNA:
     # Doublet scoring needs the default library-size normalization.
     normMethod = staticmethod(norm_lib_size)
 
+    def _warn_unavailable_percentages(self, names: Any, step: str) -> None:
+        # Default filtering asks about the percentage columns it lacks, of
+        # which preparation left none unavailable here.
+        return None
+
 
 class _RecipeStore:
     def __init__(self) -> None:

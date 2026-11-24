@@ -386,14 +386,15 @@ def _band_sizes(band_groups: np.ndarray, n_groups: int) -> np.ndarray:
 
 
 def cell_totals_over_features(
-    assay: "Assay", cell_idx: np.ndarray, feat_idx: np.ndarray
+    assay: "Assay", cell_idx: np.ndarray, feat_idx: np.ndarray, *, held_bytes: int = 0
 ) -> np.ndarray:
     """Return each selected cell's total count over the features ``feat_idx``.
 
     The counts of those features are read feature-major from ``countsT``, a
     band at a time in a fixed order, and each band's sums are added to its
     cells' totals. The stream's plan charges the totals, the mask of the
-    features and the sums of one band for each worker beside its bands. An
+    features, the sums of one band for each worker and ``held_bytes``, what
+    the caller holds throughout, beside its bands. An
     assay without ``countsT``, as ATAC and ADT assays usually are, sums the
     rows of its counts of the features instead, a budgeted block of cells at
     a time.
@@ -402,6 +403,7 @@ def cell_totals_over_features(
         assay: An assay; every RNA assay holds ``countsT``.
         cell_idx: The sorted, unique selected cells.
         feat_idx: The features whose counts are summed.
+        held_bytes: What the caller holds throughout.
 
     Returns:
         The float64 total of each cell of ``cell_idx``, in its order.
@@ -430,7 +432,8 @@ def cell_totals_over_features(
     assert geometry is not None
     band_cells = min(int(geometry.axisChunk(1)), len(cell_idx))
     scratch = (
-        totals.nbytes
+        held_bytes
+        + totals.nbytes
         + summed.nbytes
         + assay.resources.workers * np.dtype(np.float64).itemsize * band_cells
     )
@@ -457,7 +460,11 @@ def cell_totals_over_features(
 
 
 def cell_totals(
-    assay: "Assay", cell_idx: np.ndarray, features: np.ndarray | None = None
+    assay: "Assay",
+    cell_idx: np.ndarray,
+    features: np.ndarray | None = None,
+    *,
+    held_bytes: int = 0,
 ) -> np.ndarray:
     """Return each selected cell's total count over the features of the Boolean mask ``features``.
 
@@ -474,6 +481,8 @@ def cell_totals(
         assay: A prepared assay.
         cell_idx: The sorted, unique selected cells.
         features: The features to total, every feature when None.
+        held_bytes: What the caller holds throughout, which the pass over
+            ``countsT`` charges beside its bands.
 
     Returns:
         The float64 total of each cell of ``cell_idx``, in its order.
@@ -483,8 +492,12 @@ def cell_totals(
         return totals
     kept = np.asarray(features, dtype=bool)
     if np.count_nonzero(kept) < kept.size / 2:
-        return cell_totals_over_features(assay, cell_idx, np.flatnonzero(kept))
-    totals -= cell_totals_over_features(assay, cell_idx, np.flatnonzero(~kept))
+        return cell_totals_over_features(
+            assay, cell_idx, np.flatnonzero(kept), held_bytes=held_bytes
+        )
+    totals -= cell_totals_over_features(
+        assay, cell_idx, np.flatnonzero(~kept), held_bytes=held_bytes + totals.nbytes
+    )
     np.maximum(totals, 0.0, out=totals)
     return totals
 

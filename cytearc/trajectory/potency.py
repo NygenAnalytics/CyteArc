@@ -51,6 +51,7 @@ __all__ = [
     "ProteinNetwork",
     "largest_eigenvalue",
     "match_network",
+    "network_features",
     "network_scores",
     "read_network",
     "smooth_on_graph",
@@ -198,20 +199,13 @@ def largest_eigenvalue(adjacency: sparse.csr_matrix) -> float:
     return float(value[0])
 
 
-def match_network(
+def _node_features(
     network: ProteinNetwork,
     feature_keys: np.ndarray,
     key: Literal["ensembl", "symbol"],
-) -> MatchedNetwork:
-    """Match a network's genes to features and keep the largest connected part.
-
-    Network genes match features by Ensembl gene ID, versions ignored, or by
-    symbol, exactly. A key that several features share matches the first of
-    them.
-
-    Raises:
-        ValueError: If ``key`` is unknown, or the matched genes share no edge.
-    """
+    measured: np.ndarray | None,
+) -> np.ndarray:
+    """Return the position of the feature that each network gene matches, -1 for none, as :func:`match_network` matches them."""
     if key == "ensembl":
         names = network.ensembl_ids
         keys = [strip_ensembl_version(str(value)) for value in feature_keys]
@@ -222,12 +216,49 @@ def match_network(
         raise ValueError(f"key must be 'ensembl' or 'symbol', got {key!r}")
     first: dict[str, int] = {}
     for position, value in enumerate(keys):
-        first.setdefault(value, position)
-    node_features = np.fromiter(
+        if measured is None or measured[position]:
+            first.setdefault(value, position)
+    return np.fromiter(
         (first.get(str(name), -1) for name in names),
         dtype=np.int64,
         count=network.n_genes,
     )
+
+
+def network_features(
+    network: ProteinNetwork,
+    feature_keys: np.ndarray,
+    key: Literal["ensembl", "symbol"],
+) -> np.ndarray:
+    """Return the Boolean mask of the features that some gene of ``network`` matches, as :func:`match_network` matches them.
+
+    Raises:
+        ValueError: If ``key`` is unknown.
+    """
+    node_features = _node_features(network, feature_keys, key, None)
+    mask = np.zeros(len(feature_keys), dtype=bool)
+    mask[node_features[node_features >= 0]] = True
+    return mask
+
+
+def match_network(
+    network: ProteinNetwork,
+    feature_keys: np.ndarray,
+    key: Literal["ensembl", "symbol"],
+    *,
+    measured: np.ndarray | None = None,
+) -> MatchedNetwork:
+    """Match a network's genes to features and keep the largest connected part.
+
+    Network genes match features by Ensembl gene ID, versions ignored, or by
+    symbol, exactly. A key that several features share matches the first of
+    them. A feature outside the Boolean mask ``measured``, such as one that
+    some source of a merged store's cells did not measure, matches no gene.
+
+    Raises:
+        ValueError: If ``key`` is unknown, or the matched genes share no edge.
+    """
+    node_features = _node_features(network, feature_keys, key, measured)
     matched = np.flatnonzero(node_features >= 0)
     renumber = np.full(network.n_genes, -1, dtype=np.int64)
     renumber[matched] = np.arange(len(matched))
