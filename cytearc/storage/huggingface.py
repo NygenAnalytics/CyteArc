@@ -464,7 +464,9 @@ class HfReadStore(FsspecStore):
         """Open the store at ``url``, taking its timeouts from ``storage_options``.
 
         ``request_timeout`` and ``retry_timeout`` are seconds, as the class
-        describes. The other options open Hugging Face's file system.
+        describes. The other options open Hugging Face's file system, by
+        default one of the store's own, which looks the bucket or repository
+        up itself rather than reuse what another store found.
         """
         options = dict(storage_options or {})
         timeouts = {
@@ -472,6 +474,13 @@ class HfReadStore(FsspecStore):
             for name in _TIMEOUT_OPTIONS
             if name in options
         }
+        # Hugging Face's file system class, as fsspec's do, hands every store
+        # opened on a thread with the same options one instance, and that
+        # instance keeps whether each bucket and repository exists for the life
+        # of the process. A store opened after a login, whose token option is
+        # still None, or after its bucket was created, would read the bucket
+        # as missing without asking.
+        options.setdefault("skip_instance_cache", True)
         store = super().from_url(
             url,
             storage_options=options,

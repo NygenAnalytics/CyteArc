@@ -700,6 +700,8 @@ def test_read_store_takes_its_timeouts_from_storage_options():
     assert "retry_timeout" not in store.fs.sync_fs.storage_options
     assert read_only.read_only and not store.read_only
     assert (read_only.request_timeout, read_only.retry_timeout) == (5.0, 30.5)
+    # The caller's options stay as they were passed.
+    assert options == {"token": False, "endpoint": "http://127.0.0.1:9"}
 
 
 async def _names(listing):
@@ -1665,6 +1667,37 @@ def test_read_store_reads_a_store_whose_bucket_or_repository_is_missing_as_empty
     assert not exists and keys == [] and value is None
     # The lookup that found nothing is the only request: nothing is listed.
     assert loopback_hub.requests == [(missing, "")]
+
+
+@pytest.mark.parametrize("read_only", [True, False])
+@pytest.mark.parametrize(
+    ("missing", "uri"), [("bucket", LOOPBACK_URI), ("repository", REPOSITORY_URI)]
+)
+@pytest.mark.parametrize("logged_in", [True, False])
+def test_a_store_looks_up_a_bucket_or_repository_that_an_earlier_store_found_missing(
+    loopback_hub, monkeypatch, logged_in, missing, uri, read_only
+):
+    # The first store meets a private bucket or repository before the user
+    # logs in, or one that is created after the store looked it up.
+    loopback_hub.plan[missing] = [(404, {"X-Error-Code": "RepoNotFound"})]
+    # Without a token in its options, a store sends the token of the login.
+    options = {"token": None} if logged_in else {}
+    earlier = _loopback_store(loopback_hub, read_only=read_only, uri=uri, **options)
+    try:
+        found_before = sync(earlier.exists("zarr.json"), timeout=GUARD_SECONDS)
+    finally:
+        earlier.close()
+    if logged_in:
+        monkeypatch.setenv("HF_TOKEN", "hf_login")
+    later = _loopback_store(loopback_hub, read_only=read_only, uri=uri, **options)
+    try:
+        found_after = sync(later.exists("zarr.json"), timeout=GUARD_SECONDS)
+    finally:
+        later.close()
+    assert (found_before, found_after) == (False, True)
+    # The later store asked again, with the token it holds now.
+    tokens = [token for kind, token in loopback_hub.authorizations if kind == missing]
+    assert tokens == [None, "Bearer hf_login" if logged_in else None]
 
 
 def test_read_store_lists_and_reads_a_dataset_repository(loopback_hub):
