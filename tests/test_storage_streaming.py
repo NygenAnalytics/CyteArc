@@ -390,3 +390,45 @@ def test_a_cell_table_reads_a_list_of_ids_once_for_its_ids_and_names(
     )
     assert made == [5]
     assert group["ids"][:].tolist() == ids == group["names"][:].tolist()
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected", "least"),
+    [
+        # 200,000 IDs of one ASCII character, bytes as an H5AD reader keeps
+        # them, gathered in an order: a block of 100,000 holds a reference to
+        # each, the text it becomes, 4 bytes each, and NumPy's length of
+        # each, 8 bytes, as the text's width is measured: more than Zarr's
+        # writes of the two whole chunks of 400,000 bytes and the stored
+        # block beside each.
+        ("short-bytes", 100_000 * (8 + 4 + 8), 100_000 * (8 + 4 + 8)),
+        # IDs of an e with an acute accent and a letter, bytes that are not
+        # ASCII, become Python strings before they are text: at most 60
+        # bytes and four a character each, with a reference, beside the
+        # bytes as NumPy bytes and the text twice, which the stored text
+        # that Zarr writes, 1,607,274 at most, does not reach.
+        ("accented-bytes", 100_000 * (8 + 68 + 3 * 8), 1_607_274 + 128 * 1024),
+    ],
+)
+def test_a_cell_table_of_bytes_holds_no_more_than_its_size_helper_charges(
+    kind: str, expected: int, least: int
+) -> None:
+    from cytearc.storage.async_execution import register_store_threads
+    from cytearc.storage.schema import cell_table_write_bytes, create_cell_data
+    from tests.memory_helpers import chunkless_store, traced_charge
+
+    letters = [chr(97 + row % 26) for row in range(200_000)]
+    texts = letters if kind == "short-bytes" else [f"é{letter}" for letter in letters]
+    ids = np.array([text.encode() for text in texts], dtype=object)
+    order = np.random.default_rng(8).permutation(200_000)
+    assert cell_table_write_bytes(ids, ids, 1, order=order) == expected
+
+    def write(_ledger: object) -> None:
+        store = chunkless_store()
+        register_store_threads(store, 1)
+        create_cell_data(
+            zarr.open_group(store=store, mode="w"), None, ids, ids, order=order
+        )
+
+    held = traced_charge(write).held
+    assert least <= held <= expected + 128 * 1024

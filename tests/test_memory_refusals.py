@@ -1245,6 +1245,54 @@ def test_a_csv_import_charges_the_write_of_a_number_column_as_one_copy(
     assert (item, held + n_cells * (8 + 1) + scores + scores // 128 + 1_024) in checks
 
 
+@pytest.mark.parametrize("shuffle_cells", [False, True], ids=["file", "shuffled"])
+def test_a_csv_import_charges_the_gather_of_a_long_column_beside_its_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shuffle_cells: bool
+) -> None:
+    from cytearc.readers import CSVReader
+    from cytearc.utils.memory_budget import MemoryLedger
+    from cytearc.writers import CSVtoZarr
+
+    n_cells = 200_000
+    path = tmp_path / "counts.csv"
+    path.write_text(
+        "g0,score\n" + "".join(f"{row % 3},{row / 8}\n" for row in range(n_cells))
+    )
+    checks: list[tuple[str, int]] = []
+    refuse_beyond = MemoryLedger.refuse_beyond
+
+    def recorded(
+        ledger: MemoryLedger, item: str, needed: int, remedy: str | None = None
+    ) -> None:
+        checks.append((item, int(needed)))
+        refuse_beyond(ledger, item, needed, remedy)
+
+    monkeypatch.setattr(MemoryLedger, "refuse_beyond", recorded)
+    CSVtoZarr(
+        CSVReader(
+            str(path), id_column=None, cell_data_cols=["score"], temp_dir=str(tmp_path)
+        ),
+        MemoryStore(),
+        "RNA",
+        nthreads=1,
+        shuffle_cells=shuffle_cells,
+    )
+    # The scores, float64 with a missing mark each, are joined, and a
+    # shuffle gathers them and their marks in the order, a copy of both;
+    # then one write thread writes their two chunks of 100,000 rows, 800,000
+    # bytes, one at a time, each into a buffer of at most a 128th more and
+    # 1,024 bytes. The import holds the scores, the count summary, 40 bytes a
+    # cell and 16 for the gene, and a shuffle's order, 8 bytes a cell.
+    column = n_cells * (8 + 1)
+    buffer = 800_000 + 800_000 // 128 + 1_024
+    held = column + 40 * n_cells + 16 + (8 * n_cells if shuffle_cells else 0)
+    write = max(column, buffer) if shuffle_cells else buffer
+    item = (
+        f"the largest cell column's write beside the {held} bytes that the import holds"
+    )
+    assert (item, held + column + write) in checks
+
+
 def test_a_csv_import_charges_its_counts_write_beside_its_ids_and_cell_columns(
     tmp_path: Path,
 ) -> None:
