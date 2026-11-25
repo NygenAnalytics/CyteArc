@@ -430,6 +430,31 @@ def test_a_cell_table_write_holds_what_its_size_helper_charges(
     assert least <= held <= charge + 128 * 1024
 
 
+@pytest.mark.parametrize("kind", ["bytes", "byte-objects"])
+def test_a_cell_table_measures_wide_bytes_a_block_of_its_write_at_a_time(
+    kind: str,
+) -> None:
+    from cytearc.storage.async_execution import register_store_threads
+    from cytearc.storage.schema import cell_table_write_bytes, create_cell_data
+    from tests.memory_helpers import chunkless_store, traced_charge
+
+    # 60,000 IDs of 400 ASCII characters are text of 1,600 bytes each, 10,485
+    # rows to a chunk. Their width is measured a block of the write's rows at
+    # a time, where every row at once would make 96,000,000 bytes of text.
+    ids = np.array([f"{row:0400d}".encode() for row in range(60_000)])
+    if kind == "byte-objects":
+        ids = ids.astype(object)
+    charge = cell_table_write_bytes(ids, ids, 1)
+    assert charge < 60_000 * 1_600 // 2
+
+    def write(_ledger: object) -> None:
+        store = chunkless_store()
+        register_store_threads(store, 1)
+        create_cell_data(zarr.open_group(store=store, mode="w"), None, ids, ids)
+
+    assert traced_charge(write).held <= charge + 128 * 1024
+
+
 def test_a_cell_table_reads_a_list_of_ids_once_for_its_ids_and_names(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

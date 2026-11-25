@@ -466,7 +466,6 @@ class SparseToZarr:
         dtypes = {}
         # The scans and the cell table's IDs run beside the import's copy of
         # the cell IDs too.
-        id_bytes = int(cell_ids.nbytes)
         held_items = ["the matrix" if single else "the matrices"]
         if self._cellOrder is not None:
             held_items.append("the cell order")
