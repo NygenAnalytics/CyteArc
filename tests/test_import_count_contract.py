@@ -43,7 +43,7 @@ from cytearc.writers import (
     create_zarr_count_assay,
     subset_assay_zarr,
 )
-from tests.memory_helpers import traced_charge
+from tests.memory_helpers import traced_charge, traced_reruns
 from tests.storage_helpers import finalize_test_counts, write_count_store
 from tests.test_seurat_reader import _Wire
 
@@ -2439,7 +2439,6 @@ def test_a_matrix_market_parse_of_many_chunks_holds_no_more_than_its_charge(
 def test_sorting_matrix_market_entries_into_rows_holds_no_more_than_its_charge(
     tmp_path, order, shape, lines
 ):
-    import gc
     import tracemalloc
 
     reader = _source("mtx", tmp_path, _producer_counts(*shape)[:, :-4], order)
@@ -2449,14 +2448,19 @@ def test_sorting_matrix_market_entries_into_rows_holds_no_more_than_its_charge(
         # again once a release has removed them, as a later import does.
         engine.release()
         charge = reader._sparse_import_preparation_bytes(lines)
-        gc.collect()
-        tracemalloc.start()
-        try:
+
+        def sort() -> tuple[int, bool]:
+            before, _ = tracemalloc.get_traced_memory()
             engine.prepare(lines)
-            held = tracemalloc.get_traced_memory()[1]
-        finally:
-            tracemalloc.stop()
-        assert engine._csrIndptr is not None
+            held = tracemalloc.get_traced_memory()[1] - before
+            prepared = engine._csrIndptr is not None
+            # The next sort sorts the rows again, after a release that runs
+            # beside the untraced sort first.
+            engine.release()
+            return held, prepared
+
+        ((held, prepared),) = traced_reruns(sort)
+        assert prepared
     finally:
         _close(reader)
     assert held <= charge
