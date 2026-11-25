@@ -9,6 +9,7 @@ from scipy.sparse import csr_matrix
 
 from cytearc.embeddings import localmap
 from cytearc.utils.numba import numba_threads
+from tests.memory_helpers import traced_reruns
 from tests.perturbation_helpers import use_python_kernels
 from tests.random_stream_helpers import child_key, draw
 
@@ -796,23 +797,22 @@ def test_peak_bytes_cover_what_a_layout_holds_at_its_peak(
     # The third phase runs from iteration 3, and iteration 10 draws further
     # pairs again, as each tenth iteration of a full third phase does.
     options = {"iterations": (1, 1, 9), "nthreads": nthreads}
-    # A first layout loads what a layout imports and compiles, which would
-    # count otherwise.
-    localmap.localmap_layout(start, graph, mid_near, further, **options)
     # The partner lists are built as Python, whose arrays tracemalloc sees; the
     # other kernels allocate a few values for each block of cells.
     monkeypatch.setattr(localmap, "_partners", localmap._partners.py_func)
-    tracemalloc.start()
-    try:
+
+    def layout() -> int:
         before, _ = tracemalloc.get_traced_memory()
         localmap.localmap_layout(start, graph, mid_near, further, **options)
-        _, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
+        return tracemalloc.get_traced_memory()[1] - before
+
+    # The untraced layout loads what a layout imports and compiles, which
+    # would count otherwise.
+    (traced,) = traced_reruns(layout)
 
     # The estimate also counts the rows of the pairs, which the caller holds,
     # and stays within a tenth above what the layout held.
-    held = peak - before + mid_near.nbytes + further.nbytes
+    held = traced + mid_near.nbytes + further.nbytes
     estimate = localmap.localmap_peak_bytes(
         n_cells,
         graph.nnz,

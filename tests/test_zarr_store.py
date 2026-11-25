@@ -60,7 +60,7 @@ from cytearc.storage.stores import (
     open_store,
 )
 from cytearc.storage.types import array_metadata_shards
-from tests.memory_helpers import HandedArrays
+from tests.memory_helpers import HandedArrays, traced_reruns
 from tests.store_probes import RecordingStore
 
 
@@ -1722,8 +1722,6 @@ def test_a_copy_whose_band_fails_frees_the_band(tmp_path, monkeypatch, failing, 
         chunks=(1_000, 500),
         shards=(2_000, 500),
     )
-    # A first copy starts the pools that every copy shares.
-    copy_zarr_array(source, target, resources=ResourceBudget(256 * 1024**2, 1))
     get, set_ = LocalStore.get, LocalStore.set
 
     async def failing_get(self, key, prototype, byte_range=None):
@@ -1740,27 +1738,33 @@ def test_a_copy_whose_band_fails_frees_the_band(tmp_path, monkeypatch, failing, 
         monkeypatch.setattr(LocalStore, "get", failing_get)
     else:
         monkeypatch.setattr(LocalStore, "set", failing_set)
-    kept: list[BaseException] = []
-    gc.collect()
-    gc.disable()
-    tracemalloc.start()
-    try:
+
+    def failed_copy() -> tuple[list[BaseException], int]:
+        kept: list[BaseException] = []
+        gc.disable()
         try:
-            copy_zarr_array(source, target, resources=ResourceBudget(256 * 1024**2, 1))
-        except OSError as error:
-            if held:
-                kept.append(error)
-        # The failed band holds its 2 MB values, read or about to be written.
-        # With the collector off, only reference counting frees them, once
-        # the copy's threads have let go.
-        deadline = time.monotonic() + 10
-        while (traced := tracemalloc.get_traced_memory()[0]) >= 500_000:
-            if time.monotonic() > deadline:
-                break
-            time.sleep(0.02)
-    finally:
-        tracemalloc.stop()
-        gc.enable()
+            try:
+                copy_zarr_array(
+                    source, target, resources=ResourceBudget(256 * 1024**2, 1)
+                )
+            except OSError as error:
+                if held:
+                    kept.append(error)
+            # The failed band holds its 2 MB values, read or about to be
+            # written. With the collector off, only reference counting frees
+            # them, once the copy's threads have let go.
+            deadline = time.monotonic() + 10
+            while (traced := tracemalloc.get_traced_memory()[0]) >= 500_000:
+                if time.monotonic() > deadline:
+                    break
+                time.sleep(0.02)
+        finally:
+            gc.enable()
+        return kept, traced
+
+    # A failed copy first, untraced, starts the pools that every copy shares
+    # and makes the first calls of every function that the traced one runs.
+    ((kept, traced),) = traced_reruns(failed_copy)
     assert traced < 500_000
     if held:
         [error] = kept

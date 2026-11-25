@@ -17,6 +17,7 @@ import gc
 import http.server
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 
 from typing import Any
@@ -48,6 +49,7 @@ from cytearc.storage.virtual_arrays import (
     _reads_on_any_loop,
     read_selection,
 )
+from tests.memory_helpers import traced_reruns
 from tests.test_composite import _write_source
 from tests.test_composite_source_cache import (
     BODY,
@@ -790,19 +792,43 @@ def _failed_read_error(path: str, read: Any) -> str | None:
     return asyncio.run(inside())
 
 
+def _traced_without_the_collector[T](call: Callable[[], T]) -> T:
+    """Return what ``call`` returns when traced after an untraced call, with automatic collection off in both, so that only reference counting frees what a read drops."""
+
+    def uncollected() -> T:
+        gc.disable()
+        try:
+            return call()
+        finally:
+            gc.enable()
+
+    (result,) = traced_reruns(uncollected)
+    return result
+
+
+def test_reads_traced_without_the_collector_run_once_untraced_with_it_off() -> None:
+    import tracemalloc
+
+    states: list[tuple[bool, bool]] = []
+
+    def call() -> int:
+        states.append((tracemalloc.is_tracing(), gc.isenabled()))
+        return len(states)
+
+    assert _traced_without_the_collector(call) == 2
+    assert states == [(False, False), (True, False)]
+    assert gc.isenabled()
+
+
 @pytest.mark.parametrize("layout", FAILED_READS)
 @pytest.mark.parametrize("scope", ["under a stream stop", "outside a stream"])
 @pytest.mark.parametrize("path", ["own loop", "Zarr's loop", "inside a running loop"])
 def test_a_failed_read_frees_its_output_once_its_error_is_dropped(path, scope, layout):
-    import tracemalloc
-
     from cytearc.storage.async_execution import ReadStop, read_stop_scope
 
     array, selection = _failing_read(layout)
-    gc.collect()
-    gc.disable()
-    tracemalloc.start()
-    try:
+
+    def failed_read() -> tuple[str | None, int, list[BaseException]]:
         with (
             read_stop_scope(ReadStop())
             if scope == "under a stream stop"
@@ -815,10 +841,9 @@ def test_a_failed_read_frees_its_output_once_its_error_is_dropped(path, scope, l
         traced = _traced_bytes_settle_below(FAILED_READ_CHUNK_BYTES)
         # Nor does any error of the read stay, such as the group that Zarr
         # raised inside a shard read before the one that reached the caller.
-        left = _read_errors_left()
-    finally:
-        tracemalloc.stop()
-        gc.enable()
+        return raised, traced, _read_errors_left()
+
+    raised, traced, left = _traced_without_the_collector(failed_read)
     assert raised == (
         "ExceptionGroup" if layout == "the chunks of a shard" else "OSError"
     )
@@ -827,8 +852,6 @@ def test_a_failed_read_frees_its_output_once_its_error_is_dropped(path, scope, l
 
 
 def test_an_interrupted_read_frees_its_output_once_the_interruption_is_dropped():
-    import tracemalloc
-
     async def read() -> None:
         # The read's frame holds 4 MB while the interruption reaches it.
         output = np.ones(FAILED_READ_SHAPE, dtype=np.uint16)
@@ -840,18 +863,18 @@ def test_an_interrupted_read_frees_its_output_once_the_interruption_is_dropped()
         await asyncio.sleep(30)
         del output
 
-    gc.collect()
-    gc.disable()
-    tracemalloc.start()
-    try:
+    def interrupted_read() -> tuple[bool, int]:
         try:
             run_read(read())
         except KeyboardInterrupt:
             interrupted = True
-        traced = _traced_bytes_settle_below(FAILED_READ_CHUNK_BYTES, timeout=2)
-    finally:
-        tracemalloc.stop()
-        gc.enable()
+        else:
+            interrupted = False
+        return interrupted, _traced_bytes_settle_below(
+            FAILED_READ_CHUNK_BYTES, timeout=2
+        )
+
+    interrupted, traced = _traced_without_the_collector(interrupted_read)
     # The interruption is raised, and the cancellation that it caused in the
     # read, whose traceback reaches the read's frame, is dropped with it.
     assert interrupted
@@ -861,29 +884,24 @@ def test_an_interrupted_read_frees_its_output_once_the_interruption_is_dropped()
 @pytest.mark.parametrize("layout", FAILED_READS)
 @pytest.mark.parametrize("path", ["own loop", "Zarr's loop"])
 def test_a_failed_read_frees_its_output_while_its_error_is_still_held(path, layout):
-    import tracemalloc
-
     from cytearc.storage.async_execution import run_on_zarr_loop
 
     # A notebook keeps the last error, and its traceback, until the next one,
     # as IPython's sys.last_traceback does, so the read's frames give up what
     # they hold before the error reaches the caller.
     array, selection = _failing_read(layout)
-    kept: list[BaseException] = []
-    gc.collect()
-    gc.disable()
-    tracemalloc.start()
-    try:
+
+    def failed_read() -> tuple[list[BaseException], int]:
+        kept: list[BaseException] = []
         try:
             (run_read if path == "own loop" else run_on_zarr_loop)(
                 array.async_array.getitem(selection)
             )
         except (OSError, ExceptionGroup) as error:
             kept.append(error)
-        traced = _traced_bytes_settle_below(FAILED_READ_CHUNK_BYTES)
-    finally:
-        tracemalloc.stop()
-        gc.enable()
+        return kept, _traced_bytes_settle_below(FAILED_READ_CHUNK_BYTES)
+
+    kept, traced = _traced_without_the_collector(failed_read)
     [error] = kept
     assert "the store could not read" in repr(error)
     # The traceback keeps its lines, from the runner to the store's failure.
@@ -896,8 +914,6 @@ def test_a_failed_read_frees_its_output_while_its_error_is_still_held(path, layo
 def test_a_failed_read_frees_the_output_that_only_an_error_inside_its_error_reaches(
     path, reached
 ):
-    import tracemalloc
-
     from cytearc.storage.async_execution import run_on_zarr_loop
 
     async def decode() -> None:
@@ -927,19 +943,15 @@ def test_a_failed_read_frees_the_output_that_only_an_error_inside_its_error_reac
         # as its cause, and has no context.
         raise RuntimeError("the read failed") from failure
 
-    kept: list[BaseException] = []
-    gc.collect()
-    gc.disable()
-    tracemalloc.start()
-    try:
+    def failed_read() -> tuple[list[BaseException], int]:
+        kept: list[BaseException] = []
         try:
             (run_read if path == "own loop" else run_on_zarr_loop)(read())
         except (RuntimeError, ExceptionGroup) as error:
             kept.append(error)
-        traced = _traced_bytes_settle_below(FAILED_READ_CHUNK_BYTES, timeout=2)
-    finally:
-        tracemalloc.stop()
-        gc.enable()
+        return kept, _traced_bytes_settle_below(FAILED_READ_CHUNK_BYTES, timeout=2)
+
+    kept, traced = _traced_without_the_collector(failed_read)
     [error] = kept
     if reached == "a cause":
         assert error.__context__ is None
@@ -960,8 +972,6 @@ def test_a_failed_read_frees_the_output_that_only_an_error_inside_its_error_reac
 def test_a_stopped_read_frees_its_output_while_its_stop_is_held_and_once_dropped(
     path, held
 ):
-    import tracemalloc
-
     from cytearc.storage.async_execution import (
         ReadStop,
         ReadStopped,
@@ -969,20 +979,19 @@ def test_a_stopped_read_frees_its_output_while_its_stop_is_held_and_once_dropped
         run_on_zarr_loop,
     )
 
-    stop = ReadStop()
+    def stopped_read() -> tuple[bool, list[BaseException], int]:
+        # Each read has a stop of its own, which stops it once.
+        stop = ReadStop()
 
-    async def read() -> None:
-        # The read's frame holds 4 MB while the stream's stop reaches it.
-        output = np.ones(FAILED_READ_SHAPE, dtype=np.uint16)
-        asyncio.get_running_loop().call_soon(stop.stop)
-        await asyncio.sleep(30)
-        del output
+        async def read() -> None:
+            # The read's frame holds 4 MB while the stream's stop reaches it.
+            output = np.ones(FAILED_READ_SHAPE, dtype=np.uint16)
+            asyncio.get_running_loop().call_soon(stop.stop)
+            await asyncio.sleep(30)
+            del output
 
-    kept: list[BaseException] = []
-    gc.collect()
-    gc.disable()
-    tracemalloc.start()
-    try:
+        kept: list[BaseException] = []
+        stopped = False
         try:
             with read_stop_scope(stop):
                 (run_read if path == "own loop" else run_on_zarr_loop)(read())
@@ -991,9 +1000,12 @@ def test_a_stopped_read_frees_its_output_while_its_stop_is_held_and_once_dropped
             # A stream drops the stop as it closes; a caller may still hold it.
             if held:
                 kept.append(error)
-        traced = _traced_bytes_settle_below(FAILED_READ_CHUNK_BYTES, timeout=2)
-    finally:
-        tracemalloc.stop()
-        gc.enable()
+        return (
+            stopped,
+            kept,
+            _traced_bytes_settle_below(FAILED_READ_CHUNK_BYTES, timeout=2),
+        )
+
+    stopped, _kept, traced = _traced_without_the_collector(stopped_read)
     assert stopped
     assert traced < FAILED_READ_CHUNK_BYTES

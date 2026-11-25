@@ -1235,6 +1235,7 @@ def test_h5ad_import_processes_are_charged_what_tracing_finds_their_reader_keeps
     from cytearc.readers import H5adReader
     from cytearc.writers import H5adToZarr
     from cytearc.writers import h5ad as h5ad_writer
+    from tests.memory_helpers import traced_reruns
 
     n_cells, n_feats = 50_000, 4
     rng = np.random.default_rng(2)
@@ -1295,17 +1296,17 @@ def test_h5ad_import_processes_are_charged_what_tracing_finds_their_reader_keeps
         # The sparse counts write loads the row pointers before it plans.
         reader._prepare_sparse_import()
         charged = writer._window_process_bytes()
-        gc.collect()
-        tracemalloc.start()
-        try:
+
+        def process() -> None:
             # The reader that each process of the counts write opens, to
             # write its window or to send its bands, and closes once its work
             # returns.
+            kept.clear()
             h5ad_writer._run_worker(
                 reader._clone_kwargs(), pipe, work, writer._shuffled_rows_directory()
             )
-        finally:
-            tracemalloc.stop()
+
+        traced_reruns(process)
     finally:
         reader.close()
     assert pipe.messages == [] and pipe.closed
@@ -1341,7 +1342,7 @@ def test_h5ad_processes_send_their_arrays_without_a_pickled_copy(tmp_path, proce
     from cytearc.storage.sharding import plan_dense_band_writes
     from cytearc.writers import H5adToZarr
     from cytearc.writers import h5ad as h5ad_writer
-    from tests.memory_helpers import TracedPipeEnd
+    from tests.memory_helpers import TracedPipeEnd, traced_reruns
 
     n_cells, n_feats = 20_000, 64
     rng = np.random.default_rng(4)
@@ -1362,11 +1363,8 @@ def test_h5ad_processes_send_their_arrays_without_a_pickled_copy(tmp_path, proce
         # Bands of 5,000 cells of 64 uint8 counts.
         assert counts.dtype == np.uint8 and array_shard_rows(counts) == 5_000
         stop = threading.Event()
-        # The process runs here, sending through a pipe end that pickles a
-        # message as multiprocessing's connections do.
-        gc.collect()
-        tracemalloc.start()
-        try:
+
+        def run_window(pipe_end: TracedPipeEnd) -> None:
             if process == "sparse writer":
                 h5ad_writer._write_h5ad_process_window(
                     reader._clone_kwargs(),
@@ -1383,7 +1381,7 @@ def test_h5ad_processes_send_their_arrays_without_a_pickled_copy(tmp_path, proce
                     0,
                     1,
                     None,
-                    pipe,
+                    pipe_end,
                     stop,
                     {},
                 )
@@ -1399,7 +1397,7 @@ def test_h5ad_processes_send_their_arrays_without_a_pickled_copy(tmp_path, proce
                     ("RNA",),
                     None,
                     plan_dense_band_writes((counts,), ResourceBudget(1 << 30, 1), 4),
-                    pipe,
+                    pipe_end,
                     stop,
                     {},
                 )
@@ -1411,7 +1409,7 @@ def test_h5ad_processes_send_their_arrays_without_a_pickled_copy(tmp_path, proce
                     n_cells,
                     {"RNA": counts},
                     None,
-                    pipe,
+                    pipe_end,
                     stop,
                     {},
                 )
@@ -1428,12 +1426,18 @@ def test_h5ad_processes_send_their_arrays_without_a_pickled_copy(tmp_path, proce
                     {"RNA": spec},
                     ("RNA",),
                     None,
-                    pipe,
+                    pipe_end,
                     stop,
                     {},
                 )
-        finally:
-            tracemalloc.stop()
+
+        # The process runs here, sending through a pipe end that pickles a
+        # message as multiprocessing's connections do: once untraced through
+        # a pipe end of its own, so that the traced run makes no first call,
+        # then traced through ``pipe``.
+        traced_reruns(
+            lambda: run_window(pipe if tracemalloc.is_tracing() else TracedPipeEnd())
+        )
     finally:
         reader.close()
 
@@ -2685,6 +2689,7 @@ def test_subset_assay_zarr_band_tasks_fit_their_reserve_at_the_writes_concurrenc
     from cytearc.storage import sharding
     from cytearc.storage.count_matrix import create_product_counts_array
     from cytearc.storage.execution import execution_report_scope
+    from tests.memory_helpers import traced_reruns
 
     # Counts of 4,000 cells by 400 genes, shards of 1,000 cells in ten
     # chunks. A subset band of 1,000 cells, the shard of the subset's own
@@ -2712,18 +2717,6 @@ def test_subset_assay_zarr_band_tasks_fit_their_reserve_at_the_writes_concurrenc
         else rng.poisson(2.0, size=(4_000, 400)).astype(np.uint32)
     )
     source[:] = values
-    # A subset beforehand compiles the count summary's kernel and warms
-    # Zarr's own buffers, which the traced subset would otherwise hold too.
-    subset_assay_zarr(
-        store,
-        "RNA/counts",
-        "warm/counts",
-        cells[:10],
-        np.arange(400),
-        mem_budget="1G",
-        nthreads=1,
-        policy=policy,
-    )
     tasks: list[int] = []
     stream = sharding.stream_shards
 
@@ -2739,21 +2732,27 @@ def test_subset_assay_zarr_band_tasks_fit_their_reserve_at_the_writes_concurrenc
         return stream(items, task, **kwargs)
 
     monkeypatch.setattr(sharding, "stream_shards", traced)
-    tracemalloc.start()
-    try:
+
+    def subset():  # type: ignore[no-untyped-def]
+        # The untraced subset also compiles the count summary's kernel and
+        # warms Zarr's own buffers, which the traced subset would otherwise
+        # hold too. Each subset writes a destination of its own.
+        tasks.clear()
+        destination = "selected" if tracemalloc.is_tracing() else "warm"
         with execution_report_scope() as reports:
             subset_assay_zarr(
                 store,
                 "RNA/counts",
-                "selected/counts",
+                f"{destination}/counts",
                 cells,
                 np.arange(400),
                 mem_budget="1G",
                 nthreads=1,
                 policy=policy,
             )
-    finally:
-        tracemalloc.stop()
+        return reports
+
+    (reports,) = traced_reruns(subset)
     np.testing.assert_array_equal(root["selected/counts"][:], values[cells])
     (report,) = (item for item in reports if item.unitKind == "countsRowBand")
     plan = report.plan

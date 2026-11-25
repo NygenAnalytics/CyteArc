@@ -35,6 +35,7 @@ from cytearc.utils.logging import logger
 from cytearc.writers import SubsetZarr, create_zarr_count_assay
 from cytearc.writers._store import write_membership_column
 from cytearc.writers.counts_t import finalize_writer_counts_t
+from tests.memory_helpers import traced_reruns
 from tests.storage_helpers import (
     by_cell_id,
     drop_row_nonzero,
@@ -970,13 +971,11 @@ def test_counting_merged_cells_charges_what_placing_each_sources_counts_holds(
         return rows
 
     monkeypatch.setattr(RowPlan, "destination_rows", traced)
-    tracemalloc.start()
-    try:
-        cumulative, _, _ = merge_writer._cumulative_row_nnz(
+    (cumulative,) = traced_reruns(
+        lambda: merge_writer._cumulative_row_nnz(
             assays, row_plan, ResourceBudget(profile + place, 1), resident_bytes=0
-        )
-    finally:
-        tracemalloc.stop()
+        )[0]
+    )
     np.testing.assert_array_equal(
         np.diff(cumulative), _merged_order_values(row_plan, [("", c) for c in counts])
     )

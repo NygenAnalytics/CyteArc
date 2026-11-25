@@ -19,6 +19,7 @@ from cytearc.quality_control import doublets
 from cytearc.storage.artifacts import artifact_group, callable_identity
 from cytearc.storage.budget import ResourceBudget
 from cytearc.storage.count_matrix import CountMatrixPolicy
+from tests.memory_helpers import traced_reruns
 
 from .doublet_fixtures import write_doublet_target_zarr
 
@@ -1315,16 +1316,14 @@ def test_the_charges_of_the_builds_and_a_query_block_hold_their_arrays(
     )
     phases: dict[str, int] = {}
     instantiate = doublets.instantiate_knn_index
-    # The first index imports hnswlib, outside the traced call.
-    instantiate("l2", 12, 1, 100, 16, 0, 100, 1)
     monkeypatch.setattr(
         doublets,
         "instantiate_knn_index",
         lambda *args: _TracedPhases(instantiate(*args), phases),
     )
 
-    tracemalloc.start()
-    try:
+    def counted() -> tuple[int, int]:
+        phases.clear()
         before = tracemalloc.get_traced_memory()[0]
         tracemalloc.reset_peak()
         doublets.count_simulated_neighbors(
@@ -1336,9 +1335,9 @@ def test_the_charges_of_the_builds_and_a_query_block_hold_their_arrays(
             workers=2,
             resources=ResourceBudget(1024**3, 2),
         )
-        queries = tracemalloc.get_traced_memory()[1] - before
-    finally:
-        tracemalloc.stop()
+        return before, tracemalloc.get_traced_memory()[1] - before
+
+    ((before, queries),) = traced_reruns(counted)
 
     # A part being built holds its positions, and a contiguous copy of its
     # rows when the sample is split, which the charge of the builds holds.

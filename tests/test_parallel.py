@@ -820,6 +820,22 @@ def test_progress_stream_reports_a_failure_with_its_cleanup_errors(monkeypatch):
         stream.close()
 
 
+def test_progress_bars_in_tests_start_no_monitor_thread():
+    import threading
+
+    from tqdm._monitor import TMonitor
+
+    from cytearc.utils.progress import tqdmbar
+
+    # tests/conftest.py turns tqdm's monitor off, which would otherwise wake on
+    # a thread of its own and allocate inside other threads' memory traces. A
+    # second bar is the one that consults a running monitor.
+    for _ in range(2):
+        with tqdmbar(total=2, desc="monitored") as bar:
+            bar.update(2)
+    assert not any(isinstance(thread, TMonitor) for thread in threading.enumerate())
+
+
 def test_progress_bars_let_explicit_settings_replace_cytearc_defaults(monkeypatch):
     import tqdm.auto
 

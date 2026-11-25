@@ -54,6 +54,7 @@ from cytearc.trajectory.artifacts import (
     validate_resolved_ann_parameters,
 )
 from cytearc.trajectory.parameters import resolve_aggregation_ann_params
+from tests.memory_helpers import traced_charge, traced_reruns
 
 
 def test_diffusion_loading_validates_and_builds_from_one_read_per_array(monkeypatch):
@@ -622,14 +623,12 @@ def test_listed_labels_keep_wide_codes_and_refuse_other_shapes() -> None:
     ids=["text", "objects", "integers", "floats"],
 )
 def test_listed_labels_hold_what_their_estimate_states(labels: np.ndarray) -> None:
-    import tracemalloc
-
-    tracemalloc.start()
-    before, _ = tracemalloc.get_traced_memory()
-    listed_labels(labels, None, ["a2" + "x" * 24, "t1" + "x" * 24, 1, 2], "labels")
-    _, peak = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
-    assert peak - before <= listed_labels_bytes(len(labels), labels.dtype)
+    traced = traced_charge(
+        lambda _ledger: listed_labels(
+            labels, None, ["a2" + "x" * 24, "t1" + "x" * 24, 1, 2], "labels"
+        )
+    )
+    assert traced.held <= listed_labels_bytes(len(labels), labels.dtype)
 
 
 # What checking a saved feature analysis holds
@@ -812,25 +811,25 @@ _FEATURE_LOADS = {
 def _traced_check(
     check: Any, group: zarr.Group, arguments: dict[str, object]
 ) -> tuple[bool, int]:
-    """Run a payload's check, traced at its most, and return its verdict and the bytes it held."""
+    """Run a payload's check, traced at its most after an untraced check, and return its verdict and the bytes it held."""
     import gc
     import tracemalloc
 
     from cytearc.storage.content_stamps import clear_content_cache
 
-    # The first check of a process fingerprints the frozen names and IDs,
-    # and a full collection empties CPython's free lists, so the check
-    # allocates, and is traced at, its most.
-    clear_content_cache()
-    gc.collect()
-    tracemalloc.start()
-    try:
+    def checked() -> tuple[bool, int]:
+        # The first check of a process fingerprints the frozen names and IDs,
+        # and a full collection empties CPython's free lists, so the check
+        # allocates, and is traced at, its most.
+        clear_content_cache()
+        gc.collect()
         before, _ = tracemalloc.get_traced_memory()
         verdict = check(group, **arguments)
         _, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
-    return verdict, peak - before
+        return verdict, peak - before
+
+    (traced,) = traced_reruns(checked)
+    return traced
 
 
 # Each payload makes one step of its check hold the most: kind, features,
