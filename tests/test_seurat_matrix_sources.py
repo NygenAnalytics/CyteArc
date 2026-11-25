@@ -2993,6 +2993,51 @@ def test_source_preparation_names_the_budget_of_a_row_that_its_limit_refuses(
     assert list(tmp_path.iterdir()) == []
 
 
+def test_source_preparation_names_a_budget_beside_the_row_pointers_of_sources_converted_before(
+    tmp_path,
+):
+    from cytearc.readers._seurat.sources import (
+        prepare_matrix_sources,
+        release_temporary_storage,
+    )
+    from tests.test_memory_refusals import named_budget_runs
+
+    # Two sparse transposes of 3 features of 2,000 cells bound as six cells
+    # of 2,000 features: each converts its cells, and the second converts
+    # beside the first's row pointers, 8 bytes a cell and one.
+    matrix = csc_matrix(np.arange(6_000, dtype=np.float32).reshape(3, 2_000) % 4)
+
+    def bound() -> CellBindMatrixSource:
+        parts = []
+        for _ in range(2):
+            part = TransposeMatrixSource(
+                CscMatrixSource(
+                    matrix.data, matrix.indices, matrix.indptr, matrix.shape
+                )
+            )
+            part._tempDir = tmp_path
+            parts.append(part)
+        return CellBindMatrixSource(parts)
+
+    def at_budget(budget: int) -> None:
+        source = bound()
+        try:
+            prepare_matrix_sources(source, max_bytes=budget)
+            assert all(part._rowStore is not None for part in source.sources)
+        finally:
+            release_temporary_storage(source)
+
+    # The first refusal names a budget at which both convert: the check of
+    # one cell of each counts the pointers that the first keeps for the
+    # second, as the second's own check before it converts does.
+    named_budget_runs(
+        at_budget,
+        bound().resident_bytes + 1,
+        item="preparing one cell of a Seurat source",
+    )
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_shared_sparse_transpose_prepares_and_releases_one_row_store(tmp_path):
     from cytearc.readers._seurat.sources import (
         prepare_matrix_sources,

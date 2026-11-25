@@ -215,19 +215,23 @@ class CrReader(ABC):
             OSError: If the temporary disk lacks room for the rows.
         """
         self._release_shuffled_rows()
-        destinations = checked_destinations(destinationRows, self.nCells)
 
-        def planned(budget: int) -> RowSpillPlan:
-            return row_spill_plan(
-                destinations,
-                (self.nCells, self.nFeatures),
-                self.matrix_dtype,
-                entries=entries,
-                longest=longest,
-                maxBytes=budget,
-            )
+        def planner(destinations: np.ndarray) -> Callable[[int], RowSpillPlan]:
+            def planned(budget: int) -> RowSpillPlan:
+                return row_spill_plan(
+                    destinations,
+                    (self.nCells, self.nFeatures),
+                    self.matrix_dtype,
+                    entries=entries,
+                    longest=longest,
+                    maxBytes=budget,
+                )
 
-        plan = admitted_spill_plan(planned, maxBytes)
+            return planned
+
+        plan = admitted_spill_plan(
+            planner(checked_destinations(destinationRows, self.nCells)), maxBytes
+        )
         share = plan.maxBytes - plan.ownerBytes
         store, result = spill_rows(
             plan,
@@ -240,7 +244,9 @@ class CrReader(ABC):
             entries=expected_entries,
         )
         self._shuffledRows = store
-        self._shuffledPlanned = planned
+        # The buckets of other budgets, which the counts write's checks plan,
+        # do not depend on the cells' destinations, which are let go.
+        self._shuffledPlanned = planner(np.empty(0, dtype=np.int64))
         return result
 
     def _consume_shuffled(self, batch_size: int) -> Generator[coo_matrix, None, None]:

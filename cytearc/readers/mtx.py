@@ -2210,18 +2210,21 @@ class MtxReader(CrReader):
                 engine.producer_staging_bytes(rows, lines)
             )
 
-        def planned(budget: int) -> RowSpillPlan:
-            return row_spill_plan(
-                destinations,
-                (self.nCells, self.nFeatures),
-                engine.matrixDtype,
-                entries=int(pointers[-1]),
-                longest=longest,
-                maxBytes=budget,
-                least=lambda plan: held(plan, 1),
-            )
+        def planner(rows: np.ndarray) -> Callable[[int], RowSpillPlan]:
+            def planned(budget: int) -> RowSpillPlan:
+                return row_spill_plan(
+                    rows,
+                    (self.nCells, self.nFeatures),
+                    engine.matrixDtype,
+                    entries=int(pointers[-1]),
+                    longest=longest,
+                    maxBytes=budget,
+                    least=lambda plan: held(plan, 1),
+                )
 
-        plan = admitted_spill_plan(planned, maxBytes)
+            return planned
+
+        plan = admitted_spill_plan(planner(destinations), maxBytes)
         # Batches start at the cells of a million counts on average and
         # halve until their widest window fits.
         window = scan_window_values(longest)
@@ -2264,7 +2267,9 @@ class MtxReader(CrReader):
                 dense=False,
                 temp_dir=engine.tempDir,
             )
-            self._shuffledPlanned = planned
+            # The buckets of other budgets, which the counts write's checks
+            # plan, do not depend on the cells' destinations, which are let go.
+            self._shuffledPlanned = planner(np.empty(0, dtype=np.int64))
         finally:
             batches.close()
 

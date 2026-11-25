@@ -175,9 +175,10 @@ def prepare_matrix_sources(
 
     ``max_bytes`` caps the block limit of each source at what the sources'
     resident data leave of it. The read of one cell of every source is
-    checked before any is prepared, and again before each is prepared, as a
-    source that converts its cells keeps their row pointers beside the
-    resident data. A refusal of one cell names the least budget at which
+    checked before any is prepared, beside the row pointers that each
+    source before it that converts its cells keeps beside the resident
+    data, and again before each is prepared. A refusal of one cell names the
+    least budget at which
     every source still to be prepared reads one cell, since the block limit
     that the budget sets grows with it, and with it the read of one cell
     that a source converting its cells estimates.
@@ -242,15 +243,24 @@ def _admit_one_cell_of_each(
 ) -> None:
     """Check that ``max_bytes`` reads one cell of each of ``sources``, naming the least budget that does.
 
+    Each source reads beside the ``resident`` bytes and the row pointers
+    of the sources before it that convert their cells, as they are
+    prepared in turn.
+
     Raises:
         MemoryBudgetError: Naming the least budget at which every source
-            reads one cell beside the ``resident`` bytes, found from the
-            need of the first that refuses at ``max_bytes``.
+            reads one cell beside them, found from the need of the first
+            that refuses at ``max_bytes``.
     """
 
     def admit(budget: int) -> None:
+        held = int(resident)
         for current in sources:
-            _admit_one_cell(current, resident, budget)
+            _admit_one_cell(current, held, budget)
+            # A source that converts its cells keeps their row pointers
+            # beside the resident data as the sources after it prepare.
+            if current._converts_cells():
+                held += (current.n_cells + 1) * np.dtype(np.int64).itemsize
 
     try:
         admit(max_bytes)
@@ -727,6 +737,10 @@ class BaseMatrixSource(ABC):
     def _prepare_for_read(self) -> None:
         pass
 
+    def _converts_cells(self) -> bool:
+        """Return whether preparing the source converts its cells into a row store, whose row pointers it then keeps."""
+        return False
+
     def _prepare_row_store(
         self,
         chunks: Callable[[int], Iterator[coo_matrix]],
@@ -876,8 +890,11 @@ class CompressedMatrixSource(BaseMatrixSource):
             source_bytes=(self.n_features + 1) * _INDEX_BYTES,
         ).read(start, stop)
 
+    def _converts_cells(self) -> bool:
+        return self._rowStore is None and not self._cellsCompressed and self.n_cells > 0
+
     def _prepare_for_read(self) -> None:
-        if not self._cellsCompressed and self.n_cells:
+        if self._converts_cells():
             self._prepare_row_store(
                 self._feature_chunks,
                 entries=self.nnz,
@@ -1280,6 +1297,14 @@ class TransposeMatrixSource(BaseMatrixSource):
         """Return the values that the source stores, when it records them."""
         nnz = getattr(self.source, "nnz", None)
         return None if nnz is None else int(nnz)
+
+    def _converts_cells(self) -> bool:
+        return (
+            self._rowStore is None
+            and self.is_sparse
+            and self.n_cells > 0
+            and self.n_features > 0
+        )
 
     def _prepare_for_read(self) -> None:
         if not self.n_cells or not self.n_features:

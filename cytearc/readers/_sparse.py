@@ -478,6 +478,56 @@ def _piece_bytes(ragged: bool) -> int:
     return 120 if ragged else 48
 
 
+def _band_starts(
+    indptr: np.ndarray, first: int, last: int, fits: Callable[[int, int], bool]
+) -> list[int]:
+    """Return the first rows of the bands of rows ``first`` to ``last``.
+
+    Each band is the most rows from its first whose entries and rows
+    ``fits(entries, rows)`` admits, and one row at least.
+    """
+    bands = []
+    start = first
+    while start < last:
+        stop, low, high = start + 1, start + 1, last
+        while low <= high:
+            middle = (low + high) // 2
+            if fits(int(indptr[middle] - indptr[start]), middle - start):
+                stop, low = middle, middle + 1
+            else:
+                high = middle - 1
+        bands.append(start)
+        start = stop
+    return bands
+
+
+def _bucket_read_bytes(
+    rows: np.ndarray,
+    entries: np.ndarray,
+    pieces: np.ndarray,
+    *,
+    itemsize: int,
+    value_itemsize: int,
+    sum_duplicates: bool,
+    ragged: bool,
+) -> tuple[int, int]:
+    """Return the most that loading one of these buckets holds, and that one assembled holds.
+
+    ``itemsize`` is the wider of the source and read dtypes, and
+    ``value_itemsize`` the read dtype's. An assembled bucket holds its
+    values, each with its int64 column index unless the rows are ragged,
+    and its row pointers.
+    """
+    peak = (
+        entries * _entry_bytes(itemsize, sum_duplicates, ragged)
+        + pieces * _piece_bytes(ragged)
+        + (rows + 1) * 32
+    )
+    index_bytes = 0 if ragged else 8
+    held = entries * (value_itemsize + index_bytes) + (rows + 1) * 8
+    return int(peak.max(initial=0)), int(held.max(initial=0))
+
+
 class _PendingBuckets:
     """Pieces waiting for their bucket's file, written in blocks beyond a limit.
 
@@ -1236,26 +1286,12 @@ class SparseRowStore:
         """Return the first rows of bands of a bucket, each read within the split size."""
         first, last = (int(row) for row in self.bucket_starts[bucket : bucket + 2])
         pieces = int(self._bucketPieces[bucket])
-        bands = []
-        start = first
-        while start < last:
-            stop, low, high = start + 1, start + 1, last
-            while low <= high:
-                middle = (low + high) // 2
-                entries = int(self.indptr[middle] - self.indptr[start])
-                band_pieces = (
-                    middle - start if self._wholeRows else min(pieces, entries)
-                )
-                if (
-                    self._bucket_cost(entries, band_pieces, middle - start)
-                    <= self._splitLimit
-                ):
-                    stop, low = middle, middle + 1
-                else:
-                    high = middle - 1
-            bands.append(start)
-            start = stop
-        return bands
+
+        def fits(entries: int, rows: int) -> bool:
+            band_pieces = rows if self._wholeRows else min(pieces, entries)
+            return self._bucket_cost(entries, band_pieces, rows) <= self._splitLimit
+
+        return _band_starts(self.indptr, first, last, fits)
 
     def _split_buckets(self) -> None:
         """Rewrite every bucket that needs more than the split size to read in bands.
@@ -1408,20 +1444,15 @@ class SparseRowStore:
         if self._readBytes is None:
             rows = np.diff(self.bucket_starts)
             entries = np.diff(self.indptr[self.bucket_starts])
-            pieces = (
-                rows if self._wholeRows else np.minimum(self._bucketPieces, entries)
+            self._readBytes = _bucket_read_bytes(
+                rows,
+                entries,
+                rows if self._wholeRows else np.minimum(self._bucketPieces, entries),
+                itemsize=max(self._sourceDtype.itemsize, self.dtype.itemsize),
+                value_itemsize=self.dtype.itemsize,
+                sum_duplicates=self._sumDuplicates,
+                ragged=self._ragged,
             )
-            itemsize = max(self._sourceDtype.itemsize, self.dtype.itemsize)
-            peak = (
-                entries * _entry_bytes(itemsize, self._sumDuplicates, self._ragged)
-                + pieces * _piece_bytes(self._ragged)
-                + (rows + 1) * 32
-            )
-            # An assembled bucket holds its values, each with its int64
-            # column index unless the rows are ragged, and its row pointers.
-            index_bytes = 0 if self._ragged else 8
-            held = entries * (self.dtype.itemsize + index_bytes) + (rows + 1) * 8
-            self._readBytes = (int(peak.max(initial=0)), int(held.max(initial=0)))
         peak, held = self._readBytes
         return int(self.bucket_starts.nbytes) + peak + (held if read_ahead else 0)
 
@@ -1875,38 +1906,29 @@ class SparseRowStore:
         pointers = np.asarray(indptr, dtype=np.int64)
         n_rows = int(pointers.size) - 1
         itemsize = np.dtype(dtype).itemsize
-        per_entry = _entry_bytes(itemsize, False)
+        step = max(1, int(bucket_rows))
 
-        def cost(entries: int, rows: int) -> int:
-            return _bucket_bytes(entries, rows, rows, itemsize, False)
+        def fits(entries: int, rows: int) -> bool:
+            return _bucket_bytes(entries, rows, rows, itemsize, False) <= split_bytes
 
         starts: list[int] = []
-        for first in range(0, n_rows, max(1, int(bucket_rows))):
-            last = min(n_rows, first + max(1, int(bucket_rows)))
-            if cost(int(pointers[last] - pointers[first]), last - first) <= split_bytes:
+        for first in range(0, n_rows, step):
+            last = min(n_rows, first + step)
+            if fits(int(pointers[last] - pointers[first]), last - first):
                 starts.append(first)
-                continue
-            start = first
-            while start < last:
-                stop, low, high = start + 1, start + 1, last
-                while low <= high:
-                    middle = (low + high) // 2
-                    entries = int(pointers[middle] - pointers[start])
-                    if cost(entries, middle - start) <= split_bytes:
-                        stop, low = middle, middle + 1
-                    else:
-                        high = middle - 1
-                starts.append(start)
-                start = stop
+            else:
+                starts.extend(_band_starts(pointers, first, last, fits))
         bounds = np.append(np.asarray(starts, dtype=np.int64), n_rows)
         rows = np.diff(bounds)
-        entries = np.diff(pointers[bounds])
-        peak = int(
-            (entries * per_entry + rows * _piece_bytes(False) + (rows + 1) * 32).max(
-                initial=0
-            )
+        peak, held = _bucket_read_bytes(
+            rows,
+            np.diff(pointers[bounds]),
+            rows,
+            itemsize=itemsize,
+            value_itemsize=itemsize,
+            sum_duplicates=False,
+            ragged=False,
         )
-        held = int((entries * (itemsize + 8) + (rows + 1) * 8).max(initial=0))
         return int(bounds.nbytes) + peak + (held if read_ahead else 0)
 
     @staticmethod

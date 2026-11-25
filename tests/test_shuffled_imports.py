@@ -1496,6 +1496,54 @@ def _replace_barcodes(path: Path, barcodes: Any, **options: Any) -> None:
         h5["matrix"].create_dataset("barcodes", data=barcodes, **options)
 
 
+@pytest.mark.parametrize("kind", ["10x-cutoff", "mtx-cellMajor-filtered"])
+def test_a_shuffled_import_lets_go_of_its_cells_destinations_once_it_spills_them(
+    tmp_path, monkeypatch, kind
+) -> None:
+    import gc
+    import weakref
+
+    import cytearc.readers.cellranger as cellranger
+    import cytearc.readers.mtx as mtx
+    import cytearc.storage.cell_order as cell_order
+    import cytearc.storage.schema as schema
+
+    # The destination row of each cell, 8 bytes a cell, as the import makes
+    # it and as each reader checks it before its spill.
+    made: list[weakref.ref[np.ndarray]] = []
+
+    def recorded(make: Callable[..., np.ndarray]) -> Callable[..., np.ndarray]:
+        def made_rows(*args: Any) -> np.ndarray:
+            rows = make(*args)
+            made.append(weakref.ref(rows))
+            return rows
+
+        return made_rows
+
+    monkeypatch.setattr(
+        cell_order, "destination_rows", recorded(cell_order.destination_rows)
+    )
+    for module in (cellranger, mtx):
+        monkeypatch.setattr(
+            module, "checked_destinations", recorded(module.checked_destinations)
+        )
+    held: list[bool] = []
+    write = schema.create_cell_data
+
+    def checked(*args: Any, **kwargs: Any) -> Any:
+        gc.collect()
+        held.extend(ref() is not None for ref in made)
+        return write(*args, **kwargs)
+
+    monkeypatch.setattr(schema, "create_cell_data", checked)
+    run, _expected = _source(tmp_path, kind)
+    run(tmp_path / "store.zarr", {"shuffle_cells": True})
+    # By the cell table's write, after the counts layout's checks have
+    # planned the buckets of other budgets, nothing holds them.
+    assert len(made) >= 2
+    assert held == [False] * len(made)
+
+
 @pytest.mark.parametrize("cutoff", [False, True], ids=["filtered", "cutoff"])
 def test_a_10x_reader_gives_its_kept_barcodes_as_the_file_holds_them(
     tmp_path, cutoff
