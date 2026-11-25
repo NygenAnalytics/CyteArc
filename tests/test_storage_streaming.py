@@ -315,13 +315,14 @@ _ID_ENCODED = 4_032_274
         # beside them.
         ("unicode", True, 1, 2_000_000 + _ID_CHUNK + _ID_ENCODED, 10_000_000),
         # Two threads write the last two chunks at once beside their
-        # 150,000 gathered IDs.
+        # 150,000 gathered IDs; the first block's two whole chunks are
+        # encoded at once beside its 200,000.
         (
             "unicode",
             True,
             2,
             6_000_000 + _ID_CHUNK + 2 * _ID_ENCODED,
-            6_000_000 + 3 * _ID_CHUNK,
+            8_000_000,
         ),
         # Objects become text, which the last block holds as its 50,000
         # rows, beside the filled chunk and its buffer: more than a whole
@@ -334,13 +335,14 @@ def test_a_cell_table_write_holds_what_its_size_helper_charges(
 ) -> None:
     from contextlib import nullcontext
 
-    from zarr.codecs import BloscCodec
+    from zarr.codecs import ZstdCodec
 
     from cytearc.storage.async_execution import register_store_threads
     from cytearc.storage.schema import cell_table_write_bytes, create_cell_data
     from tests.memory_helpers import (
         chunkless_store,
         encodes_held_together,
+        held_together,
         traced_charge,
     )
 
@@ -351,20 +353,30 @@ def test_a_cell_table_write_holds_what_its_size_helper_charges(
     charge = cell_table_write_bytes(ids, ids, threads, order=order)
     assert charge == expected
 
-    def write(_ledger: object) -> None:
-        store = chunkless_store()
-        register_store_threads(store, threads)
-        create_cell_data(
-            zarr.open_group(store=store, mode="w"), None, ids, ids, order=order
-        )
-
+    # The store, which is neither a local nor a memory store, takes the cloud
+    # profile's Zstd codec.
     together = (
-        encodes_held_together(BloscCodec, threads) if threads > 1 else nullcontext()
+        encodes_held_together(ZstdCodec, threads) if threads > 1 else nullcontext([])
     )
-    with together:
+    with together as sizes:
+
+        def write(_ledger: object) -> None:
+            sizes.clear()
+            store = chunkless_store()
+            register_store_threads(store, threads)
+            create_cell_data(
+                zarr.open_group(store=store, mode="w"), None, ids, ids, order=order
+            )
+
         held = traced_charge(write).held
+    if threads > 1:
+        # Each block of the IDs or names holds its gathered rows beside the
+        # encoded chunks that it writes at once.
+        assert sizes, "no encode waited for the others"
+        least += max(held_together(sizes, threads))
     # Beside the IDs and the order, the write holds at least its gathered
-    # rows and its chunks' buffers, each the chunk's bytes, and at most the
+    # rows and its chunks' buffers, with one thread a codec's buffer of the
+    # chunk's bound before it is cut to the encoded bytes, and at most the
     # charge with Zarr's objects, tens of kilobytes.
     assert least <= held <= charge + 128 * 1024
 

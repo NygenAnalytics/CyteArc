@@ -39,33 +39,46 @@ def _traced_write(
     missing: np.ndarray,
     threads: int,
     encodes_at_once: int = 1,
-) -> int:
+) -> tuple[int, int]:
     """Trace a write of a column to a store that encodes on ``threads`` threads and keeps no chunks.
 
     With more than one encode at once, each encode waits until that many
     hold their chunks, so the block of a write holds them together on any
-    machine.
+    machine, and the most bytes of encoded chunks that it held at once come
+    back beside what it held.
     """
     from contextlib import nullcontext
 
-    from zarr.codecs import BloscCodec
+    from zarr.codecs import ZstdCodec
 
     from cytearc.storage.async_execution import register_store_threads
-    from tests.memory_helpers import chunkless_store, encodes_held_together
-
-    def write(_ledger: object) -> None:
-        store = chunkless_store()
-        register_store_threads(store, threads)
-        group = zarr.open_group(store=store, mode="w")
-        write_metadata_column(group, "column", values, missing)
-
-    together = (
-        encodes_held_together(BloscCodec, encodes_at_once)
-        if encodes_at_once > 1
-        else nullcontext()
+    from tests.memory_helpers import (
+        chunkless_store,
+        encodes_held_together,
+        held_together,
     )
-    with together:
-        return traced_charge(write).held
+
+    # The store, which is neither a local nor a memory store, takes the cloud
+    # profile's Zstd codec.
+    together = (
+        encodes_held_together(ZstdCodec, encodes_at_once)
+        if encodes_at_once > 1
+        else nullcontext([])
+    )
+    with together as sizes:
+
+        def write(_ledger: object) -> None:
+            sizes.clear()
+            store = chunkless_store()
+            register_store_threads(store, threads)
+            group = zarr.open_group(store=store, mode="w")
+            write_metadata_column(group, "column", values, missing)
+
+        held = traced_charge(write).held
+    if encodes_at_once == 1:
+        return held, 0
+    assert sizes, "no encode waited for the others"
+    return held, max(held_together(sizes, encodes_at_once))
 
 
 # Text of 200 characters takes 16,777,216 // 800 = 20,971 rows to a chunk of
@@ -82,8 +95,8 @@ _WIDE_ENCODED = _WIDE_CHUNK + _WIDE_CHUNK // 128 + 1_024
         # One chunk at a time: the last block holds the filled chunk and its
         # encoded buffer.
         (1, _WIDE_CHUNK + _WIDE_ENCODED, 2 * _WIDE_CHUNK),
-        # Every chunk at once: three encoded buffers and the filled chunk.
-        (4, 3 * _WIDE_ENCODED + _WIDE_CHUNK, 4 * _WIDE_CHUNK),
+        # Every chunk at once: three encoded buffers beside the filled chunk.
+        (4, 3 * _WIDE_ENCODED + _WIDE_CHUNK, _WIDE_CHUNK),
     ],
 )
 def test_a_wide_text_column_write_holds_one_encoded_chunk_a_write_thread(
@@ -93,12 +106,16 @@ def test_a_wide_text_column_write_holds_one_encoded_chunk_a_write_thread(
     missing = np.zeros(50_000, dtype=bool)
     charge = metadata_column_write_bytes(50_000, 800, missing=False, threads=threads)
     assert charge == expected
-    held = _traced_write(values, missing, threads, encodes_at_once=min(threads, 3))
-    # Beside the column, the write holds its chunks' buffers, each at least
-    # the chunk's bytes, and at most the charge with Zarr's objects of the
-    # array and its writes, tens of kilobytes, and what a coverage tracer
-    # records of the lines that the write runs.
-    assert least <= held <= charge + 128 * 1024
+    held, encoded = _traced_write(
+        values, missing, threads, encodes_at_once=min(threads, 3)
+    )
+    # Beside the column, the write holds its chunks' buffers, the encoded
+    # chunks that it holds at once, and with one thread a codec's buffer of
+    # the chunk's bound before it is cut to the encoded bytes; and at most
+    # the charge with Zarr's objects of the array and its writes, tens of
+    # kilobytes, and what a coverage tracer records of the lines that the
+    # write runs.
+    assert least + encoded <= held <= charge + 128 * 1024
 
 
 @pytest.mark.parametrize(
@@ -127,13 +144,14 @@ def test_a_wide_text_column_write_holds_one_encoded_chunk_a_write_thread(
             2 * 800_000,
         ),
         # Two encoded buffers at a time of 400,000 values of two characters
-        # in four whole chunks of 100,000 rows, 800,000 bytes each.
+        # in four whole chunks of 100,000 rows, 800,000 bytes each, which
+        # Zarr lends to the codec.
         (
             _astral_text(400_000, 2),
             np.zeros(400_000, dtype=bool),
             2,
             2 * 807_274,
-            2 * 800_000,
+            0,
         ),
         # 200,000 values of two characters, one blank, are two chunks of
         # 100,000 rows: the copy of the column is made beside a copy of the
@@ -185,8 +203,8 @@ def test_a_column_write_holds_what_its_size_helper_charges(
         threads=threads,
     )
     assert charge == expected
-    held = _traced_write(values, missing, threads, encodes_at_once=threads)
-    assert least <= held <= charge + 128 * 1024
+    held, encoded = _traced_write(values, missing, threads, encodes_at_once=threads)
+    assert least + encoded <= held <= charge + 128 * 1024
 
 
 def test_a_column_with_a_third_missing_holds_less_than_its_charge() -> None:
@@ -196,7 +214,7 @@ def test_a_column_with_a_third_missing_holds_less_than_its_charge() -> None:
     values = _astral_text(30_000, 200)
     missing = np.arange(30_000) % 3 == 0
     charge = metadata_column_write_bytes(30_000, 800, missing=True, threads=1)
-    held = _traced_write(values, missing, 1)
+    held, _ = _traced_write(values, missing, 1)
     assert held <= charge
     # It holds the column's copy and the present values' at least.
     assert held >= 30_000 * 800 + 20_000 * 800
@@ -207,7 +225,7 @@ def test_a_column_of_blank_text_holds_less_than_the_charge_of_missing_rows() -> 
     # its write holds less than the charge, which counts them.
     values, missing = np.full(100_000, ""), np.ones(100_000, dtype=bool)
     charge = metadata_column_write_bytes(100_000, 4, missing=True, threads=1)
-    held = _traced_write(values, missing, 1)
+    held, _ = _traced_write(values, missing, 1)
     assert held <= charge
 
 

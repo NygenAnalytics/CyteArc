@@ -327,8 +327,8 @@ def decodes_on_threads_held_together(
 @contextmanager
 def encodes_held_together(
     codec: type, parties: int, timeout: float = 10.0
-) -> Iterator[None]:
-    """Make each encode of Zarr's ``codec`` hold its encoded chunk until ``parties`` encodes hold theirs.
+) -> Iterator[list[int]]:
+    """Make each encode of Zarr's ``codec`` hold its encoded chunk until ``parties`` encodes hold theirs, and yield the encoded chunks' sizes.
 
     How many of a write's encodes overlap depends on the threads that run
     them and on how the machine schedules them, so a traced write of
@@ -338,14 +338,21 @@ def encodes_held_together(
     chunks at once on any machine. A write that never has that many encodes
     in flight raises ``TimeoutError`` after ``timeout`` seconds instead of
     being traced at less.
+
+    The list gets the bytes of each encoded chunk in the order that the
+    encodes end, so each ``parties`` sizes in a row are chunks that a write
+    held together. A codec can encode a chunk in fewer bytes than the chunk,
+    so these sizes, not the chunks' bytes, bound below what a write holds.
     """
     encode = codec._encode_single
     barriers: weakref.WeakKeyDictionary[Any, asyncio.Barrier] = (
         weakref.WeakKeyDictionary()
     )
+    sizes: list[int] = []
 
     async def held(self: Any, chunk: Any, chunk_spec: Any) -> Any:
         encoded = await encode(self, chunk, chunk_spec)
+        sizes.append(len(encoded))
         # Each event loop that runs a write has a barrier of its own.
         loop = asyncio.get_running_loop()
         barrier = barriers.get(loop)
@@ -357,9 +364,16 @@ def encodes_held_together(
 
     codec._encode_single = held
     try:
-        yield
+        yield sizes
     finally:
         codec._encode_single = encode
+
+
+def held_together(sizes: Sequence[int], parties: int) -> list[int]:
+    """Return the bytes of each ``parties`` encoded chunks in a row that :func:`encodes_held_together` recorded."""
+    return [
+        sum(sizes[start : start + parties]) for start in range(0, len(sizes), parties)
+    ]
 
 
 def chunkless_store() -> Any:
