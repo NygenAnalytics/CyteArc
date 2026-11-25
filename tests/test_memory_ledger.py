@@ -498,12 +498,12 @@ def test_a_read_of_a_local_file_is_charged_the_buffer_that_python_gives_it(
 ) -> None:
     import io
     import sys
-    import tracemalloc
     from types import SimpleNamespace
 
     from zarr.storage import LocalStore, LoggingStore, MemoryStore
 
     from cytearc.storage import geometry
+    from tests.memory_helpers import traced_charge
 
     root = zarr.open_group(tmp_path / "store.zarr", mode="w")
     values = np.ones(1_000, dtype=bool)
@@ -516,17 +516,8 @@ def test_a_read_of_a_local_file_is_charged_the_buffer_that_python_gives_it(
     )
 
     def held(read) -> int:
-        """The least that three traced reads held."""
-        peaks = []
-        for _ in range(3):
-            tracemalloc.start()
-            try:
-                read()
-                _, peak = tracemalloc.get_traced_memory()
-            finally:
-                tracemalloc.stop()
-            peaks.append(peak)
-        return min(peaks)
+        """The least that three traced reads held, after an untraced read."""
+        return traced_charge(lambda _ledger: read(), runs=3).held
 
     def unbuffered() -> bytes:
         with open(chunk, "rb", buffering=0) as file:

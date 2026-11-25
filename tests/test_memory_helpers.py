@@ -2,7 +2,12 @@
 
 import pytest
 
-from tests.memory_helpers import TracedPipeEnd, named_budget, traced_charge
+from tests.memory_helpers import (
+    TracedPipeEnd,
+    named_budget,
+    traced_charge,
+    traced_reruns,
+)
 
 
 def test_named_budget_reads_the_budget_that_a_refusal_closes_with() -> None:
@@ -47,6 +52,43 @@ def test_named_budget_refuses_a_refusal_that_names_no_budget_it_holds(
 ) -> None:
     with pytest.raises(AssertionError):
         named_budget(MemoryError(message))
+
+
+def test_traced_reruns_call_once_untraced_before_the_traced_calls() -> None:
+    import gc
+    import tracemalloc
+
+    tracing: list[bool] = []
+    finalized: list[bool] = []
+
+    class Garbage:
+        """An object that only a collection frees, which notes whether tracemalloc traced as it went."""
+
+        def __init__(self) -> None:
+            self.cycle = self
+
+        def __del__(self) -> None:
+            finalized.append(tracemalloc.is_tracing())
+
+    def call() -> int:
+        if not tracing:
+            Garbage()
+        tracing.append(tracemalloc.is_tracing())
+        return len(tracing)
+
+    # The first call runs untraced, so it alone can be a first call of the
+    # functions that every call runs; the traced calls' results come back.
+    # What the untraced call leaves for a collection goes before tracing.
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        assert traced_reruns(call, runs=2) == [2, 3]
+    finally:
+        if enabled:
+            gc.enable()
+    assert tracing == [False, True, True]
+    assert finalized == [False]
+    assert not tracemalloc.is_tracing()
 
 
 def test_traced_charge_leaves_out_what_only_a_first_call_allocates() -> None:

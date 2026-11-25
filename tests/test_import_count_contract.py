@@ -43,6 +43,7 @@ from cytearc.writers import (
     create_zarr_count_assay,
     subset_assay_zarr,
 )
+from tests.memory_helpers import traced_charge
 from tests.storage_helpers import finalize_test_counts, write_count_store
 from tests.test_seurat_reader import _Wire
 
@@ -1764,9 +1765,12 @@ def _drain_sparse_writes(
     each band before the producer resumes, as a write would once it wrote
     the band, and records the producer's peak traced bytes against the
     reserve its plan admitted, and how many of the bands it handed over the
-    producer still held whenever it buffered a batch. Garbage is collected
-    before the tracing starts, so no object that an earlier test left is
-    finalized, and counted, during the drain.
+    producer still held whenever it buffered a batch. A drain consumes the
+    producer, so the import first runs once into a directory of its own
+    with an untraced drain, which makes the first calls of the producer's
+    functions outside the trace, as :func:`tests.memory_helpers.traced_reruns`
+    describes. Garbage is collected before the tracing starts, so no object
+    that an earlier test left is finalized, and counted, during the drain.
 
     Tracing covers every thread of the process, so a peak above the reserve
     may come from outside the producer. The import then runs once more,
@@ -1785,6 +1789,7 @@ def _drain_sparse_writes(
     handed: list[weakref.ref] = []
     kept: list[int] = []
     frames = 1
+    traced_drains = False
     buffer_batch = sharding.SparseShardBuffer.add
 
     def add(self, batch):
@@ -1794,6 +1799,10 @@ def _drain_sparse_writes(
     def drain(writes, *, producerReserveBytes: int = 0, **_options: Any) -> None:
         handed.clear()
         kept.clear()
+        if not traced_drains:
+            for item in writes:
+                del item
+            return
         largest, allocations = 0, ""
         gc.collect()
         tracemalloc.start(frames)
@@ -1825,6 +1834,10 @@ def _drain_sparse_writes(
 
     monkeypatch.setattr(sharding.SparseShardBuffer, "add", add)
     monkeypatch.setattr(sharding, "write_sparse_bands", drain)
+    untraced = directory / "untraced"
+    untraced.mkdir()
+    run_import(untraced)
+    traced_drains = True
     first = directory / "import"
     first.mkdir()
     run_import(first)
@@ -1832,6 +1845,17 @@ def _drain_sparse_writes(
     record["why"] = ""
     if record["held"] > record["reserve"]:
         frames = 25
+        # The repeat summarizes snapshots inside its trace. Taking one, which
+        # refuses while nothing is traced, and summarizing one of two
+        # allocations of a size, which its sort compares by where they were
+        # made, here make the first calls of those functions untraced.
+        try:
+            tracemalloc.take_snapshot()
+        except RuntimeError:
+            pass
+        _largest_allocations(
+            tracemalloc.Snapshot([(0, 1, ((__file__, line),), 1) for line in (1, 2)], 1)
+        )
         traced = directory / "traced"
         traced.mkdir()
         run_import(traced)
@@ -1952,6 +1976,7 @@ def test_a_drain_finalizes_what_earlier_tests_left_before_it_traces(
     tmp_path, monkeypatch
 ):
     import gc
+    import tracemalloc
 
     from cytearc.storage import sharding
 
@@ -1968,11 +1993,13 @@ def test_a_drain_finalizes_what_earlier_tests_left_before_it_traces(
             finalized.append(bytes(30_000_000))
 
     buffer_batch = sharding.SparseShardBuffer.add
+    tracing: list[bool] = []
 
     def collecting_add(self, batch):
         # A collection during the drain, as the producer's allocations can
         # start one.
         gc.collect()
+        tracing.append(tracemalloc.is_tracing())
         yield from buffer_batch(self, batch)
 
     monkeypatch.setattr(sharding.SparseShardBuffer, "add", collecting_add)
@@ -1998,7 +2025,10 @@ def test_a_drain_finalizes_what_earlier_tests_left_before_it_traces(
     finally:
         if enabled:
             gc.enable()
-    assert len(finalized) == 1
+    # The import ran untraced, then traced, and its garbage was finalized
+    # once each time, the traced import's before its drain traced.
+    assert not tracing[0] and tracing[-1]
+    assert len(finalized) == 2
     assert record["held"] <= record["reserve"], record["why"]
 
 
@@ -2256,17 +2286,25 @@ def test_a_seurat_import_stores_the_counts_of_dense_and_coo_blocks_of_a_sparse_s
     np.testing.assert_array_equal(root["RNA/counts"][:], values)
 
 
+def _traced_parse(header: Any, chunk_rows: int) -> int:
+    """Return what parsing ``header``'s entries ``chunk_rows`` lines at a time holds at its peak, traced after an untraced parse."""
+    from cytearc.readers._matrix_market import matrix_market_entries
+
+    def parse(_ledger: Any) -> None:
+        for entries in matrix_market_entries(header, chunk_rows, counts=True):
+            del entries
+
+    return traced_charge(parse).held
+
+
 @pytest.mark.parametrize("compressed", [False, True], ids=["plain", "gzip"])
 @pytest.mark.parametrize("encoding", ["integer", "real"])
 def test_a_matrix_market_parse_of_the_largest_values_holds_no_more_than_its_charge(
     tmp_path, encoding, compressed
 ):
-    import gc
     import gzip
-    import tracemalloc
 
     from cytearc.readers._matrix_market import (
-        matrix_market_entries,
         matrix_market_header,
         matrix_market_parse_bytes,
     )
@@ -2297,16 +2335,6 @@ def test_a_matrix_market_parse_of_the_largest_values_holds_no_more_than_its_char
             handle.write(text)
         return path
 
-    def parse_peak(header: Any, chunk_rows: int) -> int:
-        gc.collect()
-        tracemalloc.start()
-        try:
-            for entries in matrix_market_entries(header, chunk_rows, counts=True):
-                del entries
-            return tracemalloc.get_traced_memory()[1]
-        finally:
-            tracemalloc.stop()
-
     # Lines of about 60 characters: 6,000 of them, more than the 256 KiB
     # that pandas reads at a time, in chunks of 10, where pandas' buffers
     # outweigh the lines; and 120,000 in chunks of 10,000 and 40,000, where
@@ -2314,7 +2342,7 @@ def test_a_matrix_market_parse_of_the_largest_values_holds_no_more_than_its_char
     small = matrix_market_header(write(tmp_path / "small.mtx", 6_000))
     large = matrix_market_header(write(tmp_path / "large.mtx", 120_000))
     peaks = {
-        (header.n_entries, chunk_rows): parse_peak(header, chunk_rows)
+        (header.n_entries, chunk_rows): _traced_parse(header, chunk_rows)
         for header, chunk_rows in ((small, 10), (large, 10_000), (large, 40_000))
     }
     for (n_entries, chunk_rows), peak in peaks.items():
@@ -2332,12 +2360,9 @@ def test_a_matrix_market_parse_reads_through_its_own_buffer_on_a_large_block_fil
     tmp_path, monkeypatch, compressed
 ):
     import builtins
-    import gc
     import gzip
-    import tracemalloc
 
     from cytearc.readers._matrix_market import (
-        matrix_market_entries,
         matrix_market_header,
         matrix_market_parse_bytes,
     )
@@ -2362,28 +2387,18 @@ def test_a_matrix_market_parse_reads_through_its_own_buffer_on_a_large_block_fil
         return opened(file, mode, buffering, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "open", large_block_open)
-    gc.collect()
-    tracemalloc.start()
-    try:
-        for entries in matrix_market_entries(header, 1_000, counts=True):
-            del entries
-        peak = tracemalloc.get_traced_memory()[1]
-    finally:
-        tracemalloc.stop()
+    held = _traced_parse(header, 1_000)
     # Read through 4 MiB, the parse would hold more than twice its charge.
-    assert peak <= matrix_market_parse_bytes(header, 1_000) < 4 * 1024**2
+    assert held <= matrix_market_parse_bytes(header, 1_000) < 4 * 1024**2
 
 
 @pytest.mark.slow
 def test_a_matrix_market_parse_of_many_chunks_holds_no_more_than_its_charge(
     tmp_path,
 ):
-    import gc
     import gzip
-    import tracemalloc
 
     from cytearc.readers._matrix_market import (
-        matrix_market_entries,
         matrix_market_header,
         matrix_market_parse_bytes,
     )
@@ -2399,15 +2414,7 @@ def test_a_matrix_market_parse_of_many_chunks_holds_no_more_than_its_charge(
             for index in range(60_000)
         )
     header = matrix_market_header(path)
-    gc.collect()
-    tracemalloc.start()
-    try:
-        for entries in matrix_market_entries(header, 10, counts=True):
-            del entries
-        peak = tracemalloc.get_traced_memory()[1]
-    finally:
-        tracemalloc.stop()
-    assert peak <= matrix_market_parse_bytes(header, 10)
+    assert _traced_parse(header, 10) <= matrix_market_parse_bytes(header, 10)
 
 
 @pytest.mark.parametrize(

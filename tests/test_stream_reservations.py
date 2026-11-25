@@ -19,7 +19,7 @@ from cytearc.storage.geometry import (
     array_geometry,
 )
 from cytearc.storage.partition import row_read_parts
-from tests.memory_helpers import decodes_held_together
+from tests.memory_helpers import decodes_held_together, traced_charge
 from tests.thread_helpers import blas_threads, raised_threads
 
 
@@ -496,8 +496,6 @@ def test_a_row_block_read_of_an_unsharded_array_holds_no_more_than_its_plan(
 def test_a_band_read_of_a_sharded_array_holds_no_more_than_its_charge(
     tmp_path: Any, profile: str
 ) -> None:
-    import tracemalloc
-
     from cytearc.storage.arrays import create_numeric_array
     from cytearc.storage.geometry import array_geometry
     from cytearc.storage.layout import row_sharded_array_spec
@@ -523,13 +521,7 @@ def test_a_band_read_of_a_sharded_array_holds_no_more_than_its_charge(
     assert geometry is not None
 
     with zarr.config.set({"async.concurrency": 1}):
-        tracemalloc.start()
-        try:
-            base, _ = tracemalloc.get_traced_memory()
-            band = stored[:, :]
-            _current, peak = tracemalloc.get_traced_memory()
-        finally:
-            tracemalloc.stop()
+        held = traced_charge(lambda _ledger: stored[:, :]).held
 
     # The read held its result, Zarr's shard-level copy of it, the shard's
     # two compressed chunks and one decoded chunk, more than those alone. No
@@ -537,9 +529,10 @@ def test_a_band_read_of_a_sharded_array_holds_no_more_than_its_charge(
     # charge for one decode at a time covers all of it with the read's
     # objects, 88 KiB, in place of the decoded chunk that it reserved before.
     decoded = 4_096 * 512 * 4
-    assert peak - base > 2 * band.nbytes + 3 * decoded
-    assert geometry.readBytes(band.nbytes, 2, decodes=1) >= peak - base
-    assert geometry.readBytes(band.nbytes, 2, decodes=1) - decoded < peak - base
+    band_bytes = 8_192 * 512 * 4
+    assert held > 2 * band_bytes + 3 * decoded
+    assert geometry.readBytes(band_bytes, 2, decodes=1) >= held
+    assert geometry.readBytes(band_bytes, 2, decodes=1) - decoded < held
 
 
 def test_a_whole_read_of_an_unsharded_array_holds_no_decoded_chunk_beside_its_decodes(
@@ -980,7 +973,9 @@ def test_a_read_of_a_run_of_cells_given_as_an_index_array_holds_its_charge(
     feature = np.array([2])
     with zarr_io_concurrency(1):
         read = read_selection(stored, cells, feature)
-        tracemalloc_peak = _traced(lambda: read_selection(stored, cells, feature))
+        held = traced_charge(
+            lambda _ledger: read_selection(stored, cells, feature)
+        ).held
     np.testing.assert_array_equal(read, values[:, [2]])
     fixed, per_row = row_read_parts(
         geometry,
@@ -990,23 +985,7 @@ def test_a_read_of_a_run_of_cells_given_as_an_index_array_holds_its_charge(
     )
     # Finding the run takes its steps 65,536 at a time; all at once they
     # would hold 9 bytes a cell, 900 KB, beyond the read's charge.
-    assert tracemalloc_peak <= read.nbytes + fixed + cells.size * per_row
-
-
-def _traced(call: Any) -> int:
-    """Return what ``call`` holds at its peak, traced after a full collection."""
-    import gc
-    import tracemalloc
-
-    gc.collect()
-    tracemalloc.start()
-    try:
-        base, _ = tracemalloc.get_traced_memory()
-        call()
-        _current, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
-    return peak - base
+    assert held <= read.nbytes + fixed + cells.size * per_row
 
 
 @pytest.mark.parametrize("sharded", [True, False], ids=["sharded", "unsharded"])

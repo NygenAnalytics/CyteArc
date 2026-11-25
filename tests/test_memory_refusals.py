@@ -1184,10 +1184,6 @@ def test_a_csv_import_lets_go_of_its_cell_columns_and_count_summary_before_count
             shuffle_cells=False,
         )
 
-    # An untraced import first compiles and imports what a first import does
-    # once, which stays held.
-    importer().dump()
-    writer = importer()
     seen: list[tuple[int, int]] = []
     preflight = sharding.preflight_counts_t_spec
 
@@ -1198,6 +1194,14 @@ def test_a_csv_import_lets_go_of_its_cell_columns_and_count_summary_before_count
         return preflight(*args, **options)
 
     monkeypatch.setattr(sharding, "preflight_counts_t_spec", recorded)
+    # An import consumes its reader, so an untraced import first makes the
+    # first calls of every function that the traced dump runs, this test's
+    # own among them, and compiles and imports what a first import does
+    # once, which stays held, as tests.memory_helpers.traced_reruns describes.
+    importer().dump()
+    writer = importer()
+    # Only the traced dump's admission of countsT is checked.
+    seen.clear()
     tracemalloc.start()
     try:
         writer.dump()

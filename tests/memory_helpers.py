@@ -1,4 +1,4 @@
-"""Read the budget that a memory refusal names, follow refusals to a budget that runs, give a domain function a ledger of a budget, trace what a call holds against what its ledger charges, trace a read of selected cells, wait until the arrays handed to writes are freed, hold a read's decodes together while it is traced, record and trace what an import's process sends through its pipe, and skip tests that need the resident memory of the test process."""
+"""Read the budget that a memory refusal names, follow refusals to a budget that runs, give a domain function a ledger of a budget, trace a call after an untraced call, trace what a call holds against what its ledger charges, trace a read of selected cells, wait until the arrays handed to writes are freed, hold a read's decodes together while it is traced, record and trace what an import's process sends through its pipe, and skip tests that need the resident memory of the test process."""
 
 import asyncio
 import re
@@ -122,46 +122,61 @@ class TracedCharge(NamedTuple):
     kept_charged: int
 
 
-def traced_charge(call: Callable[[Any], Any], runs: int = 1) -> TracedCharge:
-    """Run ``call(ledger)`` once untraced, then ``runs`` times traced after a full collection each, against a :func:`recording_ledger`, and return the run that held the least.
+def traced_reruns[T](call: Callable[[], T], runs: int = 1) -> list[T]:
+    """Call ``call`` once untraced, then ``runs`` times while tracemalloc traces, each after a full collection, and return what the traced calls returned.
 
-    The untraced run warms what a first call allocates once, such as
-    imports, Zarr's objects and coverage's records. Coverage, measuring
-    through ``sys.monitoring`` as CI's Python 3.14 job does, records each
-    function at its first call in a dict whose table doubles when it fills;
-    a traced dense reader process whose pipe end's first call filled it held
-    the new table, 1.31 MB, beside its own 0.45 MB. A traced run can also
-    hold a block that the call does not make for itself: the interpreter's
-    table of interned strings resizes when it fills, as pathlib's interning
-    of the paths that Zarr's local store reads fills it, which one of five
-    traced reads of 1,000 bands held as a block of 3.84 MB. The least of a
-    few runs leaves such a block out.
+    ``call`` reads tracemalloc's counts itself, which read zero in the
+    untraced call; ``tracemalloc.is_tracing()`` tells the calls apart, as a
+    call that writes a new destination each time needs. The untraced call
+    makes the first calls of every function that the traced calls run, so
+    that what a first call allocates once stays out of the traces: imports,
+    Zarr's objects and coverage's records. Coverage, measuring through
+    ``sys.monitoring`` as CI's Python 3.14 job does, records each function
+    at its first call in a dict whose table doubles when it fills; a traced
+    dense reader process whose pipe end's first call filled it held the new
+    table, 1.31 MB, beside its own 0.45 MB.
     """
     import gc
     import tracemalloc
 
-    call(recording_ledger())
+    call()
     traced = []
     for _ in range(max(1, int(runs))):
         gc.collect()
-        ledger = recording_ledger()
         tracemalloc.start()
         try:
-            before, _ = tracemalloc.get_traced_memory()
-            result = call(ledger)
-            _, peak = tracemalloc.get_traced_memory()
-            # What the call keeps is what stays reachable, its result among it.
-            gc.collect()
-            current, _ = tracemalloc.get_traced_memory()
+            traced.append(call())
         finally:
             tracemalloc.stop()
+    return traced
+
+
+def traced_charge(call: Callable[[Any], Any], runs: int = 1) -> TracedCharge:
+    """Run ``call(ledger)`` against a :func:`recording_ledger` through :func:`traced_reruns`, and return the traced run that held the least.
+
+    A traced run can also hold a block that the call does not make for
+    itself: the interpreter's table of interned strings resizes when it
+    fills, as pathlib's interning of the paths that Zarr's local store reads
+    fills it, which one of five traced reads of 1,000 bands held as a block
+    of 3.84 MB. The least of a few runs leaves such a block out.
+    """
+    import gc
+    import tracemalloc
+
+    def measured() -> TracedCharge:
+        ledger = recording_ledger()
+        before, _ = tracemalloc.get_traced_memory()
+        result = call(ledger)
+        _, peak = tracemalloc.get_traced_memory()
+        # What the call keeps is what stays reachable, its result among it.
+        gc.collect()
+        current, _ = tracemalloc.get_traced_memory()
         del result
-        traced.append(
-            TracedCharge(
-                peak - before, ledger.most, current - before, ledger.held_bytes
-            )
+        return TracedCharge(
+            peak - before, ledger.most, current - before, ledger.held_bytes
         )
-    return min(traced, key=lambda run: run.held)
+
+    return min(traced_reruns(measured, runs), key=lambda run: run.held)
 
 
 def traced_selection_read(
@@ -355,7 +370,7 @@ class TracedPipeEnd:
     must be on. Make it before tracing starts: it sends a message and a
     buffer untraced as it is made, and drops them, so that no traced send
     makes a first call, which under coverage allocates records inside the
-    trace, as :func:`traced_charge` describes.
+    trace, as :func:`traced_reruns` describes.
     """
 
     def __init__(self) -> None:

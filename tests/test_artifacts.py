@@ -828,8 +828,7 @@ def test_stored_array_fingerprint_matches_ordered_in_memory_values() -> None:
 
 
 def test_stored_arrays_are_fingerprinted_one_band_at_a_time(tmp_path) -> None:
-    import gc
-    import tracemalloc
+    from tests.memory_helpers import traced_charge
 
     # Two arrays of 4 MB, each one stored chunk. Reading one holds its values,
     # its decoded chunk and its stored bytes, which random values leave about
@@ -839,15 +838,10 @@ def test_stored_arrays_are_fingerprinted_one_band_at_a_time(tmp_path) -> None:
     root = zarr.open_group(str(tmp_path / "store.zarr"), mode="w")
     for name in ("first", "second"):
         root.create_array(name, data=values, chunks=(500_000,))
-    gc.collect()
-    tracemalloc.start()
-    try:
-        before, _ = tracemalloc.get_traced_memory()
-        fingerprint_stored_arrays(root, ("first", "second"))
-        _, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
-    assert peak - before < 3.5 * values.nbytes
+    traced = traced_charge(
+        lambda _ledger: fingerprint_stored_arrays(root, ("first", "second"))
+    )
+    assert traced.held < 3.5 * values.nbytes
 
 
 def test_stored_string_fingerprint_normalizes_fixed_string_dtypes() -> None:
