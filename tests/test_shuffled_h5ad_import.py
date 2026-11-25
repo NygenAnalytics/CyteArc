@@ -1595,3 +1595,61 @@ def test_a_disk_without_room_for_dense_rows_is_refused_before_any_is_written(
     monkeypatch.setattr(sparse.shutil, "disk_usage", usage(required))
     _import(source, MemoryStore(), shuffle_cells=True, **in_tmp)
     assert not _temporary_folders(tmp_path)
+
+
+@pytest.mark.parametrize("shuffle_cells", [False, True], ids=["file", "shuffled"])
+def test_an_import_of_wide_ids_names_the_budget_that_writes_its_cell_table(
+    tmp_path, shuffle_cells
+) -> None:
+    import anndata
+
+    from tests.test_memory_refusals import named_budget_runs
+
+    ids = [f"cell-{row}-" + "x" * 1_990 for row in range(_N_CELLS)]
+    features = [f"g{f}" for f in range(_N_FEATURES)]
+    source = tmp_path / "wide.h5ad"
+    anndata.AnnData(
+        csr_matrix(_counts(_N_CELLS).astype(np.float32)),
+        obs=pd.DataFrame(index=ids),
+        var=pd.DataFrame(index=features),
+    ).write_h5ad(source)
+    # The reader keeps the IDs and feature IDs as bytes objects, and the
+    # feature IDs as names, NumPy text of 4 bytes a character of g11. In
+    # the file's order it then holds the file's int32 row pointers; a
+    # shuffle holds its order and its rows' pointers, 8 bytes a cell each.
+    held = _id_bytes(ids) + _id_bytes(features) + _text_bytes(features)
+    held += 8 * _N_CELLS + 8 * (_N_CELLS + 1) if shuffle_cells else 4 * (_N_CELLS + 1)
+    # The IDs are 1,999 characters at the longest, cell-156- and 1,990
+    # more: 7,996 bytes each as stored, whose 157 rows are one chunk that a
+    # codec encodes into a buffer of at most a 128th more and 1,024 bytes.
+    # Zarr writes the stored IDs beside it, more than making them, two
+    # copies of their text and a reference to each gathered one.
+    chunk = _N_CELLS * 4 * 1_999
+    table = chunk + chunk // 128 + 1_024 + chunk
+    assert _N_CELLS * (8 + 2 * 4 * 1_999) < table
+    item = (
+        f"the cell table's IDs and names beside the {held} bytes that the import holds"
+    )
+    attempts = iter(range(20))
+
+    def at_budget(budget: int) -> None:
+        destination = tmp_path / f"store-{next(attempts)}.zarr"
+        reader = H5adReader(str(source), temp_dir=str(tmp_path))
+        try:
+            H5adToZarr(
+                reader,
+                str(destination),
+                mem_budget=budget,
+                nthreads=1,
+                shuffle_cells=shuffle_cells,
+            ).dump()
+        except MemoryBudgetError as error:
+            if error.item.startswith("the cell table's"):
+                assert not destination.exists()
+                raise
+        finally:
+            reader.close()
+
+    refusal = named_budget_runs(at_budget, held + table - 1, item=item)
+    assert refusal.needed_bytes == held + table
+    assert not _temporary_folders(tmp_path)

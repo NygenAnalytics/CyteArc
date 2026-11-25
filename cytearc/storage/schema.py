@@ -10,6 +10,7 @@ from zarr.errors import ContainsArrayError
 from .types import as_zarr_array, as_zarr_group, read_fresh_group
 from .arrays import (
     MetadataBlock,
+    column_write_rows,
     create_metadata_column,
     create_streamed_metadata_column,
     create_zarr_obj_array,
@@ -723,30 +724,251 @@ def _create_empty_columns(
             column[:] = True
 
 
+def _stored_cell_dtype(
+    values: np.ndarray, threads: int, *, name: str
+) -> tuple[np.dtype[Any], bool]:
+    """Return the dtype that a cell table stores ``values`` in, as :func:`encode_metadata_values` gives the whole column, and whether making a block of them text takes Python strings.
+
+    Unicode text keeps its width, and numbers their dtype. Objects that hold
+    no byte string or None are as wide as the longest text of one, made in
+    turn. Byte strings, and objects that hold one or None, are made text a
+    block at a time, as :func:`~cytearc.storage.arrays.text_array_and_python`
+    makes them, and are as wide as the longest text without its trailing
+    NULs, one character at least.
+
+    Raises:
+        ValueError: If byte strings are not valid UTF-8, naming the column
+            ``name``.
+    """
+    from .arrays import (
+        _text_width,
+        decodes_metadata_text,
+        invalid_utf8_refusal,
+        text_array_and_python,
+        text_value,
+    )
+
+    dtype: np.dtype[Any] = np.dtype(values.dtype)
+    if dtype.kind not in "SO":
+        return dtype, False
+    if not decodes_metadata_text(values):
+        return np.dtype(f"U{max(1, _text_width(values))}"), False
+    n_rows = len(values)
+    width, python = 0, False
+    try:
+        # Decoding adds no characters, so text as wide as the longest value's
+        # bytes, characters or text sets blocks no longer than the write's.
+        if dtype.kind == "S":
+            widest = dtype.itemsize
+        elif set(map(type, values.flat)) <= {str, bytes, np.bytes_, type(None)}:
+            widest = max(map(len, filter(None, values.flat)), default=0)
+        else:
+            widest = max((len(text_value(value)) for value in values.flat), default=0)
+        rows = column_write_rows(column_chunk_rows(n_rows, 4 * max(1, widest)), threads)
+        for start in range(0, n_rows, rows):
+            text, made = text_array_and_python(values[start : start + rows])
+            python = python or made
+            width = max(width, _text_width(text))
+            del text
+    except UnicodeDecodeError as exc:
+        raise invalid_utf8_refusal(name) from exc
+    return np.dtype(f"U{max(1, width)}"), python
+
+
+def _cell_text_block_bytes(
+    values: np.ndarray, dtype: np.dtype[Any], *, gathered: bool, python: bool
+) -> tuple[int, int]:
+    """Return what one row of ``values`` holds in a block of a cell table's write: as it is read and made the stored text, and as it is written.
+
+    An array gathered in an order copies its rows, and one in place lends
+    them. Byte strings and objects become text of their block's width,
+    measured with the length of each, and then of the column's, two copies
+    at once; with ``python`` they are made Python strings first, each with
+    a reference and up to 60 bytes and four a character, beside objects'
+    bytes as NumPy bytes. Only the stored text is kept while Zarr writes
+    it.
+    """
+    source = np.dtype(values.dtype)
+    gather = source.itemsize if gathered else 0
+    if source.kind not in "SO":
+        return gather, gather
+    stored = dtype.itemsize
+    making = 68 + 3 * stored if python else max(stored + 8, 2 * stored)
+    return gather + making, stored
+
+
+def _cell_column_phases(
+    columns: list[tuple[tuple[str, ...], Any]], n_rows: int, threads: int
+) -> list[tuple[tuple[str, ...], Any, np.dtype[Any], bool, int, int]]:
+    """Return each text source of a cell table with its stored dtype, whether its text takes Python strings, its chunk rows and its block rows."""
+    phases = []
+    for names, values in columns:
+        # The stored width sets the chunk.
+        dtype, python = _stored_cell_dtype(values, threads, name=names[0])
+        rows = column_chunk_rows(n_rows, max(1, dtype.itemsize))
+        phases.append(
+            (names, values, dtype, python, rows, column_write_rows(rows, threads))
+        )
+    return phases
+
+
+def _cell_columns(ids: Any, names: Any) -> list[tuple[tuple[str, ...], Any]]:
+    """Return the text columns of a cell table by source: names that are the IDs are read once for both."""
+    same = names is ids
+    ids = np.asarray(ids)
+    if same:
+        return [(("ids", "names"), ids)]
+    names = np.asarray(names)
+    if len(names) != len(ids):
+        raise ValueError(
+            f"A cell table needs one name for each of its {len(ids)} cells; "
+            f"found {len(names)} names"
+        )
+    return [(("ids",), ids), (("names",), names)]
+
+
+def _checked_cell_order(order: np.ndarray | None, n_rows: int) -> np.ndarray | None:
+    if order is None:
+        return None
+    rows = np.asarray(order)
+    if rows.shape != (n_rows,) or rows.dtype.kind not in "iu":
+        raise ValueError(
+            f"A cell table's order must hold one integer row for each of its "
+            f"{n_rows} cells; found dtype {rows.dtype} and shape {rows.shape}"
+        )
+    return rows
+
+
+def cell_table_write_bytes(
+    ids: Any, names: Any, threads: int, *, order: np.ndarray | None = None
+) -> int:
+    """Return the most that :func:`create_cell_data` holds beside ``ids``, ``names`` and ``order``.
+
+    Each text column is written a block of
+    :func:`~cytearc.storage.arrays.column_write_rows` rows at a time: the
+    block is read from its source, in ``order`` when it is given, and made
+    the stored text, which Zarr then writes, holding what
+    :func:`~cytearc.storage.arrays.column_write_bytes` counts on ``threads``
+    threads. ``I`` is written after them the same way, a block of ones at a
+    time.
+
+    Args:
+        ids: The cell IDs, as :func:`create_cell_data` takes them.
+        names: The cell names, which may be the IDs.
+        threads: The threads that the store encodes on, such as the
+            ``nthreads`` that a writer registers for it.
+        order: The order of the cells that the table stores, or None.
+
+    Raises:
+        ValueError: As :func:`create_cell_data` refuses its arguments.
+    """
+    from .arrays import column_write_bytes
+
+    columns = _cell_columns(ids, names)
+    n_rows = len(columns[0][1])
+    gathered = _checked_cell_order(order, n_rows) is not None
+    held = []
+    for _names, values, dtype, python, _rows, block in _cell_column_phases(
+        columns, n_rows, threads
+    ):
+        read, kept = _cell_text_block_bytes(
+            values, dtype, gathered=gathered, python=python
+        )
+        held.append(
+            max(
+                min(n_rows, block) * read,
+                column_write_bytes(
+                    n_rows, dtype.itemsize, threads, block_row_bytes=kept
+                ),
+            )
+        )
+    held.append(column_write_bytes(n_rows, 1, threads, block_row_bytes=1))
+    return max(held)
+
+
 def create_cell_data(
     root: zarr.Group,
     workspace: str | None,
-    ids: np.ndarray,
-    names: np.ndarray,
+    ids: Any,
+    names: Any,
     profile: StorageProfile | None = None,
+    *,
+    order: np.ndarray | None = None,
 ) -> zarr.Group:
+    """Create a cell table of ``ids``, ``names`` and an all-true ``I``.
+
+    Each column is chunked by :func:`~cytearc.storage.layout.column_chunk_rows`
+    and written a block of one chunk for each of the store's write threads
+    at a time, so the write holds what :func:`cell_table_write_bytes` counts
+    beside ``ids`` and ``names`` rather than a copy of either. Unicode text
+    keeps its width and numbers their dtype; byte strings, decoded as UTF-8,
+    and objects are stored as text as wide as the longest. Names that are
+    the IDs themselves are read once for both columns.
+
+    Args:
+        root: The store's root group.
+        workspace: The workspace of the table, or None for the root's.
+        ids: Each cell's ID: an array, or values that ``np.asarray`` makes
+            one.
+        names: Each cell's name, of the same kinds.
+        profile: Zarr encoding profile. When None, chosen from the store.
+        order: Row ``r`` of the table holds ``ids[order[r]]`` and
+            ``names[order[r]]``, gathered a block at a time, as a shuffled
+            import stores its cells. None keeps the rows in place.
+
+    Returns:
+        The table's group.
+
+    Raises:
+        ValueError: If ``names`` and ``ids`` differ in length, ``order``
+            is not one integer row for each cell, or byte strings are not
+            valid UTF-8, naming the column.
+    """
+    from .async_execution import store_codec_threads
+
+    columns = _cell_columns(ids, names)
+    n_rows = len(columns[0][1])
+    rows_order = _checked_cell_order(order, n_rows)
     group = root.create_group(_cell_data_path(workspace))
-    for name, values in (
-        ("ids", ids),
-        ("names", names),
-        ("I", np.ones(len(ids), dtype=bool)),
+    threads = store_codec_threads(group.store)
+    for column_names, values, dtype, _python, rows, block in _cell_column_phases(
+        columns, n_rows, threads
     ):
-        # Encoded once: the stored width of the text sets its chunk, and
-        # writing the encoded values copies them no further.
-        stored = encode_metadata_values(values, values.dtype, name=name)
-        create_zarr_obj_array(
-            group,
-            name,
-            stored,
-            stored.dtype,
-            chunk_size=column_chunk_rows(len(stored), max(1, stored.dtype.itemsize)),
-            profile=profile,
-        )
+        outputs = [
+            create_metadata_column(
+                group,
+                name,
+                dtype=dtype,
+                shape=n_rows,
+                chunkSize=rows,
+                profile=profile,
+            )
+            for name in column_names
+        ]
+        for start in range(0, n_rows, block):
+            stop = min(start + block, n_rows)
+            selected = (
+                values[start:stop]
+                if rows_order is None
+                else values[rows_order[start:stop]]
+            )
+            stored = encode_metadata_values(
+                selected, values.dtype, name=column_names[0]
+            )
+            del selected
+            if stored.dtype != dtype:
+                stored = stored.astype(dtype)
+            for output in outputs:
+                output[start:stop] = stored
+            del stored
+    rows = column_chunk_rows(n_rows, 1)
+    flags = create_metadata_column(
+        group, "I", dtype=bool, shape=n_rows, chunkSize=rows, profile=profile
+    )
+    block = column_write_rows(rows, threads)
+    for start in range(0, n_rows, block):
+        stop = min(start + block, n_rows)
+        flags[start:stop] = np.ones(stop - start, dtype=bool)
     return group
 
 

@@ -7,7 +7,9 @@ import zarr
 
 from .layout import (
     ZarrArraySpec,
+    _encoded_chunk_bound,
     _group_zarr_format,
+    column_chunk_rows,
     get_compressors,
     normalize_chunks,
 )
@@ -177,15 +179,29 @@ def text_array(values: np.ndarray) -> np.ndarray:
     Raises:
         UnicodeDecodeError: If a byte string is not valid UTF-8.
     """
+    return text_array_and_python(values)[0]
+
+
+def text_array_and_python(values: np.ndarray) -> tuple[np.ndarray, bool]:
+    """Return values as :func:`text_array` makes them text, and whether it made a Python string of each value first.
+
+    Unicode text, ASCII byte strings, and objects that are all Python
+    strings or all ASCII byte strings convert in whole-array NumPy
+    operations; byte strings that are not ASCII are decoded one at a time,
+    and other values are made text one at a time.
+
+    Raises:
+        UnicodeDecodeError: If a byte string is not valid UTF-8.
+    """
     kind = values.dtype.kind
     if kind == "U":
         width = int(np.strings.str_len(values).max(initial=0))
-        return values.astype(np.dtype((np.str_, max(1, width))))
+        return values.astype(np.dtype((np.str_, max(1, width)))), False
     if kind == "S":
         if _is_ascii(values):
             width = int(np.strings.str_len(values).max(initial=0))
-            return _ascii_text(values, max(1, width))
-        return _decoded_text(values.flat, values.shape)
+            return _ascii_text(values, max(1, width)), False
+        return _decoded_text(values.flat, values.shape), True
     if kind == "O":
         # Each distinct type is checked once rather than each value. Only the
         # exact types qualify: str() of a subclass, such as np.str_, can drop
@@ -194,17 +210,16 @@ def text_array(values: np.ndarray) -> np.ndarray:
         # widens values that are all empty.
         kinds = set(map(type, values.flat))
         if kinds <= {str}:
-            return values.astype(str)
+            return values.astype(str), False
         if kinds <= {bytes, np.bytes_}:
             # Trailing NULs count toward the width, as they count toward the
             # length of the ASCII text.
             raw = values.astype(np.bytes_)
             if _is_ascii(raw):
-                return _ascii_text(raw, raw.dtype.itemsize)
-            return _decoded_text(values.flat, values.shape)
-    return np.asarray([text_value(value) for value in values.flat], dtype=str).reshape(
-        values.shape
-    )
+                return _ascii_text(raw, raw.dtype.itemsize), False
+            return _decoded_text(values.flat, values.shape), True
+    text = np.asarray([text_value(value) for value in values.flat], dtype=str)
+    return text.reshape(values.shape), True
 
 
 def _holds_bytes_or_none(values: np.ndarray) -> bool:
@@ -216,14 +231,25 @@ def _holds_bytes_or_none(values: np.ndarray) -> bool:
     )
 
 
+def decodes_metadata_text(values: np.ndarray) -> bool:
+    """Return whether :func:`encode_metadata_values` makes ``values`` text with :func:`text_array`: byte strings, and objects that hold a byte string or None."""
+    return values.dtype.kind == "S" or (
+        values.dtype.hasobject and _holds_bytes_or_none(values)
+    )
+
+
 def _decode_metadata_values(data: Any) -> np.ndarray:
     """Decode UTF-8 byte strings and missing values, keeping the array shape."""
     values = np.asarray(data)
-    if values.dtype.kind == "S" or (
-        values.dtype.hasobject and _holds_bytes_or_none(values)
-    ):
-        return text_array(values)
-    return values
+    return text_array(values) if decodes_metadata_text(values) else values
+
+
+def invalid_utf8_refusal(name: str) -> ValueError:
+    """Return the error that refuses column ``name`` for holding text that is not valid UTF-8."""
+    return ValueError(
+        f"Column {name!r} holds text that is not valid UTF-8; pass str values "
+        "or UTF-8 encoded bytes"
+    )
 
 
 def _text_width(block: Any) -> int:
@@ -287,10 +313,7 @@ def encode_metadata_values(
     try:
         values = _decode_metadata_values(raw)
     except UnicodeDecodeError as exc:
-        raise ValueError(
-            f"Column {name!r} holds text that is not valid UTF-8; pass str values "
-            "or UTF-8 encoded bytes"
-        ) from exc
+        raise invalid_utf8_refusal(name) from exc
     # Text is stored at its decoded width, whatever the source S or O dtype.
     if (
         dtype is None
@@ -353,6 +376,52 @@ def create_metadata_column(
         compressors=compressors,
         attributes=attrs,
     )
+
+
+def column_write_rows(chunk_rows: int, threads: int) -> int:
+    """Return the rows of a block that a column's write hands Zarr at once: one chunk for each write thread.
+
+    Zarr encodes every chunk of one write at once, as many as its async
+    concurrency lets it, so a column written whole holds the buffers of
+    that many encodes; a block of one chunk for each of the store's write
+    threads holds those of the encodes that the threads run.
+    """
+    return max(1, int(chunk_rows)) * max(1, int(threads))
+
+
+def column_write_bytes(
+    n_rows: int, itemsize: int, threads: int, *, block_row_bytes: int = 0
+) -> int:
+    """Return the most that writing a column holds beside its values, a block of :func:`column_write_rows` rows at a time.
+
+    The column holds ``n_rows`` values of ``itemsize`` bytes each, in the
+    chunks of :func:`~cytearc.storage.layout.column_chunk_rows`, and its
+    store encodes on ``threads`` threads. Zarr encodes each chunk of a block
+    into a buffer of up to the chunk's encoded bound, which it keeps until
+    the store has the chunk; a chunk that the column ends inside is first
+    copied whole, its rows past the column's end filled, so the block that
+    writes it holds that copy too. A writer that holds ``block_row_bytes``
+    for each row of the block it writes, such as the block gathered in an
+    order, holds them beside. Zarr's objects of the array and of its
+    writes, tens of kilobytes, are left out, as the charges of the runtime's
+    own objects are.
+    """
+    n_rows, itemsize = int(n_rows), max(1, int(itemsize))
+    if n_rows <= 0:
+        return 0
+    rows = column_chunk_rows(n_rows, itemsize)
+    chunk = rows * itemsize
+    encoded = _encoded_chunk_bound(chunk)
+    chunks = -(-n_rows // rows)
+    per_block = min(max(1, int(threads)), chunks)
+    blocks = -(-chunks // per_block)
+    block_rows = per_block * rows
+    last_rows = n_rows - (blocks - 1) * block_rows
+    last_chunks = chunks - (blocks - 1) * per_block
+    filled = chunk if n_rows % rows else 0
+    row_bytes = max(0, int(block_row_bytes))
+    whole = per_block * encoded + block_rows * row_bytes if blocks > 1 else 0
+    return max(whole, last_chunks * encoded + filled + last_rows * row_bytes)
 
 
 def create_streamed_metadata_column(

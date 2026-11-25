@@ -200,3 +200,357 @@ def test_selected_stored_string_fingerprint_matches_materialized_values():
 
     assert count == 3
     assert digest == fingerprint_strings(ids[:][selection[:]])
+
+
+def _whole_cell_table(root: zarr.Group, ids: np.ndarray) -> zarr.Group:
+    """Write a cell table as imports wrote it before it was written in blocks: each column whole."""
+    from cytearc.storage.arrays import create_zarr_obj_array, encode_metadata_values
+    from cytearc.storage.layout import column_chunk_rows
+
+    group = root.create_group("cellData")
+    for name, values in (("ids", ids), ("names", ids), ("I", np.ones(len(ids), bool))):
+        stored = encode_metadata_values(values, values.dtype, name=name)
+        create_zarr_obj_array(
+            group,
+            name,
+            stored,
+            stored.dtype,
+            chunk_size=column_chunk_rows(len(stored), max(1, stored.dtype.itemsize)),
+        )
+    return group
+
+
+_CELL_ID_KINDS = {
+    # 250,000 IDs of up to 11 characters are three chunks of 100,000 rows.
+    "unicode": np.array([f"cell-{row}" for row in range(250_000)]),
+    "wide-unicode": np.array([f"c{row}" for row in range(30)], dtype="U40"),
+    "bytes": np.array([f"cell-{row}".encode() for row in range(120_000)]),
+    "utf8-bytes": np.array([f"célula-{row}".encode() for row in range(1_000)]),
+    "objects": np.array([f"cell-{row}" for row in range(150_000)], dtype=object),
+    "objects-with-bytes": np.array(
+        [f"c{row}" if row % 2 else f"c{row}".encode() for row in range(1_000)],
+        dtype=object,
+    ),
+    "numbers": np.arange(300_000, dtype=np.int64),
+    "empty": np.array([], dtype="U3"),
+    "empty-objects": np.array([], dtype=object),
+    # Short bytes in a wider dtype are as wide as the longest.
+    "padded-bytes": np.array([f"c{row}".encode() for row in range(1_000)], dtype="S20"),
+    # Python strings count their trailing NULs toward the width, U3; text
+    # made from bytes or beside None does not, U2 and U1.
+    "objects-with-trailing-nul": np.array(["ab\x00", "c"] * 500, dtype=object),
+    "bytes-objects-with-trailing-nul": np.array([b"ab\x00", b"c"] * 500, dtype=object),
+    "utf8-bytes-objects-with-trailing-nul": np.array(
+        ["é\x00".encode(), b"c"] * 500, dtype=object
+    ),
+    "objects-with-none-and-trailing-nul": np.array(
+        ["ab\x00", None] * 500, dtype=object
+    ),
+    # Numbers beside bytes and None are made text one at a time.
+    "mixed-objects": np.array([1, "b", b"c", 2.5, None] * 200, dtype=object),
+    # A None in the last block makes the first block's text without its
+    # trailing NUL, U2, as a whole write of the column makes it.
+    "trailing-nul-blocks-before-none": np.array(
+        ["ab\x00"] + ["x"] * 250_000 + [None], dtype=object
+    ),
+}
+
+
+@pytest.mark.parametrize("threads", [1, 3])
+@pytest.mark.parametrize("ordered", [False, True], ids=["in-place", "ordered"])
+@pytest.mark.parametrize("kind", list(_CELL_ID_KINDS))
+def test_a_cell_table_written_a_block_at_a_time_stores_what_a_whole_write_stored(
+    kind: str, ordered: bool, threads: int
+) -> None:
+    from cytearc.storage.arrays import text_value
+    from cytearc.storage.async_execution import register_store_threads
+    from cytearc.storage.schema import create_cell_data
+
+    ids = _CELL_ID_KINDS[kind]
+    order = np.random.default_rng(6).permutation(len(ids)) if ordered else None
+    whole_store, block_store = MemoryStore(), MemoryStore()
+    register_store_threads(block_store, threads)
+    _whole_cell_table(
+        zarr.open_group(store=whole_store, mode="w"),
+        ids if order is None else ids[order],
+    )
+    blocks = create_cell_data(
+        zarr.open_group(store=block_store, mode="w"), None, ids, ids, order=order
+    )
+    # The stores hold the same arrays, metadata and chunks byte for byte.
+    assert sorted(block_store._store_dict) == sorted(whole_store._store_dict)
+    for key, value in whole_store._store_dict.items():
+        assert block_store._store_dict[key].to_bytes() == value.to_bytes(), key
+    # Text is stored decoded without trailing NULs, row r holding the ID of
+    # the order's row r.
+    if len(ids) and kind != "numbers":
+        row = len(ids) - 1
+        source = ids[row if order is None else order[row]]
+        expected = text_value(source).rstrip("\x00")
+        assert blocks["ids"][row] == expected == blocks["names"][row]
+    assert blocks["I"][:].all()
+
+
+def test_a_cell_table_reads_names_apart_from_ids_and_refuses_misaligned_ones() -> None:
+    from cytearc.storage.schema import create_cell_data
+
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    ids = np.array(["a", "b", "c"])
+    names = np.array(["x", "yy", "zzz"], dtype=object)
+    group = create_cell_data(root, None, ids, names, order=np.array([2, 0, 1]))
+    assert group["ids"][:].tolist() == ["c", "a", "b"]
+    assert group["names"][:].tolist() == ["zzz", "x", "yy"]
+    assert group["names"].dtype == np.dtype("U3")
+    with pytest.raises(ValueError, match="one name for each of its 3 cells; found 2"):
+        create_cell_data(root, "w1", ids, names[:2])
+    for order in (np.array([0, 1]), np.array([0.0, 1.0, 2.0])):
+        with pytest.raises(ValueError, match="one integer row for each of its 3"):
+            create_cell_data(root, "w2", ids, ids, order=order)
+    # Nothing was written for the refused tables.
+    assert "w1" not in root and "w2" not in root
+
+
+@pytest.mark.parametrize(
+    ("ids", "names", "column"),
+    [
+        (np.array([b"a", b"\xff"]), None, "ids"),
+        (np.array(["a", b"\xff"], dtype=object), None, "ids"),
+        (np.array(["a", "b"]), np.array([b"x", b"\xc3"]), "names"),
+    ],
+    ids=["bytes", "objects", "names"],
+)
+def test_a_cell_table_refuses_text_that_is_not_utf8_naming_its_column(
+    ids: np.ndarray, names: np.ndarray | None, column: str
+) -> None:
+    from cytearc.storage.schema import cell_table_write_bytes, create_cell_data
+
+    names = ids if names is None else names
+    message = (
+        f"Column '{column}' holds text that is not valid UTF-8; pass str values "
+        "or UTF-8 encoded bytes"
+    )
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    for refused in (
+        lambda: cell_table_write_bytes(ids, names, 1),
+        lambda: create_cell_data(root, None, ids, names),
+    ):
+        with pytest.raises(ValueError) as caught:
+            refused()
+        assert str(caught.value) == message
+        assert isinstance(caught.value.__cause__, UnicodeDecodeError)
+
+
+def _astral_ids(n_rows: int, width: int) -> np.ndarray:
+    """Return IDs of ``width`` random characters beyond the Basic Multilingual Plane, which barely compress."""
+    codes = np.random.default_rng(9).integers(
+        0x10000, 0x10FFFF, size=(n_rows, width), dtype=np.uint32
+    )
+    return codes.view(f"<U{width}").ravel()
+
+
+# 350,000 IDs of 10 characters, 40 bytes each, are three chunks of 100,000
+# rows, 4,000,000 bytes, and 50,000 rows of a fourth, which Zarr fills before
+# encoding it; a codec's buffer of a chunk takes at most a 128th more and
+# 1,024 bytes: 4,032,274.
+_ID_CHUNK = 4_000_000
+_ID_ENCODED = 4_032_274
+
+
+@pytest.mark.parametrize(
+    ("kind", "ordered", "threads", "expected", "least"),
+    [
+        # In place, a block lends its rows to Zarr: the last one holds the
+        # filled chunk and its encoded buffer.
+        ("unicode", False, 1, _ID_CHUNK + _ID_ENCODED, 2 * _ID_CHUNK),
+        # Gathered in an order, the last block's 50,000 IDs are a copy
+        # beside them.
+        ("unicode", True, 1, 2_000_000 + _ID_CHUNK + _ID_ENCODED, 10_000_000),
+        # Two threads write the last two chunks at once beside their
+        # 150,000 gathered IDs; the first block's two whole chunks are
+        # encoded at once beside its 200,000.
+        (
+            "unicode",
+            True,
+            2,
+            6_000_000 + _ID_CHUNK + 2 * _ID_ENCODED,
+            8_000_000,
+        ),
+        # Objects become text, which the last block holds as its 50,000
+        # rows, beside the filled chunk and its buffer: more than a whole
+        # block's references and two copies of its text, 88 bytes a row.
+        ("objects", True, 1, 2_000_000 + _ID_CHUNK + _ID_ENCODED, 10_000_000),
+    ],
+)
+def test_a_cell_table_write_holds_what_its_size_helper_charges(
+    kind: str, ordered: bool, threads: int, expected: int, least: int
+) -> None:
+    from contextlib import nullcontext
+
+    from zarr.codecs import ZstdCodec
+
+    from cytearc.storage.async_execution import register_store_threads
+    from cytearc.storage.schema import cell_table_write_bytes, create_cell_data
+    from tests.memory_helpers import (
+        chunkless_store,
+        encodes_held_together,
+        held_together,
+        traced_charge,
+    )
+
+    ids = _astral_ids(350_000, 10)
+    if kind == "objects":
+        ids = ids.astype(object)
+    order = np.random.default_rng(7).permutation(350_000) if ordered else None
+    charge = cell_table_write_bytes(ids, ids, threads, order=order)
+    assert charge == expected
+
+    # The store, which is neither a local nor a memory store, takes the cloud
+    # profile's Zstd codec.
+    together = (
+        encodes_held_together(ZstdCodec, threads) if threads > 1 else nullcontext([])
+    )
+    with together as sizes:
+
+        def write(_ledger: object) -> None:
+            sizes.clear()
+            store = chunkless_store()
+            register_store_threads(store, threads)
+            create_cell_data(
+                zarr.open_group(store=store, mode="w"), None, ids, ids, order=order
+            )
+
+        held = traced_charge(write).held
+    if threads > 1:
+        # Each block of the IDs or names holds its gathered rows beside the
+        # encoded chunks that it writes at once.
+        assert sizes, "no encode waited for the others"
+        least += max(held_together(sizes, threads))
+    # Beside the IDs and the order, the write holds at least its gathered
+    # rows and its chunks' buffers, with one thread a codec's buffer of the
+    # chunk's bound before it is cut to the encoded bytes, and at most the
+    # charge with Zarr's objects, tens of kilobytes.
+    assert least <= held <= charge + 128 * 1024
+
+
+@pytest.mark.parametrize("kind", ["bytes", "byte-objects", "byte-objects-and-a-number"])
+def test_a_cell_table_measures_wide_bytes_a_block_of_its_write_at_a_time(
+    kind: str,
+) -> None:
+    from cytearc.storage.async_execution import register_store_threads
+    from cytearc.storage.schema import cell_table_write_bytes, create_cell_data
+    from tests.memory_helpers import chunkless_store, traced_charge
+
+    # 60,000 IDs of 400 ASCII characters are text of 1,600 bytes each, 10,485
+    # rows to a chunk. Their width is measured a block of the write's rows at
+    # a time, where every row at once would make 96,000,000 bytes of text.
+    ids = np.array([f"{row:0400d}".encode() for row in range(60_000)])
+    if kind != "bytes":
+        ids = ids.astype(object)
+    if kind == "byte-objects-and-a-number":
+        # A number makes each value text in turn, the bytes through a Python
+        # string of each.
+        ids[0] = 7
+    charge = cell_table_write_bytes(ids, ids, 1)
+    assert charge < 60_000 * 1_600
+
+    def write(_ledger: object) -> None:
+        store = chunkless_store()
+        register_store_threads(store, 1)
+        create_cell_data(zarr.open_group(store=store, mode="w"), None, ids, ids)
+
+    assert traced_charge(write).held <= charge + 128 * 1024
+
+
+def test_a_cell_table_reads_a_list_of_ids_once_for_its_ids_and_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cytearc.storage.schema as schema
+
+    # A list that the caller gives as both is one source, whose blocks are
+    # made text once for both columns.
+    ids = [f"cell-{row}" for row in range(5)]
+    made: list[int] = []
+    encode = schema.encode_metadata_values
+
+    def recorded(values: object, *args: object, **kwargs: object) -> np.ndarray:
+        made.append(len(np.asarray(values)))
+        return encode(values, *args, **kwargs)
+
+    monkeypatch.setattr(schema, "encode_metadata_values", recorded)
+    group = schema.create_cell_data(
+        zarr.open_group(store=MemoryStore(), mode="w"), None, ids, ids
+    )
+    assert made == [5]
+    assert group["ids"][:].tolist() == ids == group["names"][:].tolist()
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected", "least"),
+    [
+        # 200,000 IDs of one ASCII character, bytes as an H5AD reader keeps
+        # them, gathered in an order: a block of 100,000 holds a reference to
+        # each, the text it becomes, 4 bytes each, and NumPy's length of
+        # each, 8 bytes, as the text's width is measured: more than Zarr's
+        # writes of the two whole chunks of 400,000 bytes and the stored
+        # block beside each.
+        ("short-bytes", 100_000 * (8 + 4 + 8), 100_000 * (8 + 4 + 8)),
+        # IDs of an e with an acute accent and a letter, bytes that are not
+        # ASCII, become Python strings before they are text: at most 60
+        # bytes and four a character each, with a reference, beside the
+        # bytes as NumPy bytes and the text twice, which the stored text
+        # that Zarr writes, 1,607,274 at most, does not reach.
+        ("accented-bytes", 100_000 * (8 + 68 + 3 * 8), 1_607_274 + 128 * 1024),
+    ],
+)
+def test_a_cell_table_of_bytes_holds_no_more_than_its_size_helper_charges(
+    kind: str, expected: int, least: int
+) -> None:
+    from cytearc.storage.async_execution import register_store_threads
+    from cytearc.storage.schema import cell_table_write_bytes, create_cell_data
+    from tests.memory_helpers import chunkless_store, traced_charge
+
+    letters = [chr(97 + row % 26) for row in range(200_000)]
+    texts = letters if kind == "short-bytes" else [f"é{letter}" for letter in letters]
+    ids = np.array([text.encode() for text in texts], dtype=object)
+    order = np.random.default_rng(8).permutation(200_000)
+    assert cell_table_write_bytes(ids, ids, 1, order=order) == expected
+
+    def write(_ledger: object) -> None:
+        store = chunkless_store()
+        register_store_threads(store, 1)
+        create_cell_data(
+            zarr.open_group(store=store, mode="w"), None, ids, ids, order=order
+        )
+
+    held = traced_charge(write).held
+    assert least <= held <= expected + 128 * 1024
+
+
+def test_a_cell_table_hands_zarr_one_chunk_for_each_write_thread_at_a_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cytearc.storage.async_execution import register_store_threads
+    from cytearc.storage.schema import create_cell_data
+
+    # 250,000 IDs of up to 8 characters, and their flags, are chunks of
+    # 100,000 rows; two write threads take two chunks at a time, the last
+    # block the half chunk left, the IDs and names one block after another
+    # from one read of the IDs.
+    writes: list[tuple[str, int, int]] = []
+    setitem = zarr.Array.__setitem__
+
+    def recorded(array: zarr.Array, selection: object, value: object) -> None:
+        assert isinstance(selection, slice)
+        writes.append((array.basename, int(selection.start), int(selection.stop)))
+        setitem(array, selection, value)
+
+    monkeypatch.setattr(zarr.Array, "__setitem__", recorded)
+    store = MemoryStore()
+    register_store_threads(store, 2)
+    ids = np.array([f"c{row}" for row in range(250_000)])
+    create_cell_data(zarr.open_group(store=store, mode="w"), None, ids, ids)
+    blocks = [(0, 200_000), (200_000, 250_000)]
+    assert writes == [
+        *((name, start, stop) for start, stop in blocks for name in ("ids", "names")),
+        *(("I", start, stop) for start, stop in blocks),
+    ]

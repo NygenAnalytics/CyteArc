@@ -9,6 +9,7 @@ from scipy.sparse import coo_matrix, csc_matrix, csr_matrix
 from zarr.storage import MemoryStore
 
 from cytearc.readers import CrH5Reader, H5adReader
+from cytearc.readers.cellranger import CrReader
 from cytearc.storage.budget import ResourceBudget
 from cytearc.storage.count_matrix import CountMatrixPolicy
 from cytearc.storage.layout import ZarrArraySpec, array_shard_rows, get_compressors
@@ -306,6 +307,9 @@ class _PlanningReader:
 
     def cell_names(self) -> list[str]:
         return [f"cell-{index}" for index in range(self.nCells)]
+
+    # A cell table's write reads the names that the reader makes.
+    _cell_names_source = CrReader._cell_names_source
 
     def feature_ids(self, assay: str) -> list[str]:
         return [f"feature-{index}" for index in range(self.nFeatures)]

@@ -1008,6 +1008,26 @@ def test_a_registered_store_decodes_on_its_threads_unless_its_caller_sets_them(
     assert pools.threads("write") == [2]
 
 
+def test_a_stores_codec_threads_are_those_that_its_writes_encode_on(tmp_path) -> None:
+    from cytearc.storage.async_execution import store_codec_threads
+    from cytearc.writers._store import write_metadata_column
+
+    # A store registered with two threads encodes on two, a caller's three
+    # win, and a store that no one registered encodes on the host's threads.
+    root, _values_written = _registered_values(tmp_path, 2)
+    other = zarr.open_group(str(tmp_path / "other.zarr"), mode="w")
+    assert store_codec_threads(root.store) == 2
+    with zarr_decoding_threads(3):
+        assert store_codec_threads(root.store) == 3
+    assert store_codec_threads(other.store) == ensure_zarr_host_ceiling()
+    # A column written to the registered store encodes each of its chunks
+    # on the two threads that it counts.
+    with recorded_codec_pools(host_threads=_HOST_THREADS) as pools:
+        pools.label = "column"
+        write_metadata_column(root, "labels", np.arange(250_000) % 7)
+    assert pools.threads("column") == [2] * 3
+
+
 def test_a_copy_or_another_open_of_a_registered_location_takes_its_threads(
     tmp_path,
 ) -> None:

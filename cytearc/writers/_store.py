@@ -175,9 +175,11 @@ def write_metadata_column(
     """
     from ..storage.arrays import (
         MetadataBlock,
+        column_write_rows,
         create_streamed_metadata_column,
         encode_metadata_values,
     )
+    from ..storage.async_execution import store_codec_threads
 
     validate_metadata_column_name(name)
     array = np.asarray(values)
@@ -210,40 +212,56 @@ def write_metadata_column(
     # write then copies them no further.
     stored = encode_metadata_values(stored, stored.dtype, name=name)
     rows = column_chunk_rows(int(array.size), max(1, stored.dtype.itemsize))
-    if not has_missing:
-        _create_zarr_obj_array(
-            group, name, stored, stored.dtype, chunk_size=rows, profile=profile
-        )
-        return
+    # Zarr encodes every chunk of one write at once, so the column goes to it
+    # a block of one chunk for each of the store's write threads at a time.
+    block = column_write_rows(rows, store_codec_threads(group.store))
     create_streamed_metadata_column(
         group,
         name,
         shape=int(array.size),
         dtype=stored.dtype,
-        blocks=(MetadataBlock(0, stored, mask),),
+        blocks=(
+            MetadataBlock(
+                start,
+                stored[start : start + block],
+                mask[start : start + block] if has_missing else None,
+            )
+            for start in range(0, int(array.size), block)
+        ),
         chunkSize=rows,
-        hasMissing=True,
+        hasMissing=has_missing,
         profile=profile,
     )
 
 
-def metadata_column_write_bytes(n_rows: int, itemsize: int, *, missing: bool) -> int:
+def metadata_column_write_bytes(
+    n_rows: int, itemsize: int, *, missing: bool, threads: int
+) -> int:
     """Return the most that :func:`write_metadata_column` holds beside a column and its missing mask.
 
-    Zarr encodes about a copy of the column as it writes it. A column with
-    missing rows is copied first with a placeholder in each, text as its
-    present values and then as the whole column, which Zarr encodes in
-    place of the column. Zarr's objects of the new array and of its writes,
-    tens of kilobytes, are left out, as the charges of the runtime's own
-    objects are.
+    The column holds numbers, booleans or fixed-width text. Zarr writes it a
+    block of one chunk for each of the store's write threads at a time, and
+    holds what :func:`~cytearc.storage.arrays.column_write_bytes` counts. A
+    column with missing rows is copied first with a placeholder in each,
+    text from a copy of its present values, which the write finds with a
+    mark a row and whose width it measures with the int64 length of each,
+    and Zarr writes the copy beside it.
 
     Args:
         n_rows: The rows of the column.
         itemsize: The bytes of one value, such as 4 a character of text.
         missing: Whether some rows are missing, as a text column's blank
             values may be.
+        threads: The threads that the store encodes on, such as the
+            ``nthreads`` that a writer registered for it.
     """
-    return (2 if missing else 1) * int(n_rows) * int(itemsize)
+    from ..storage.arrays import column_write_bytes
+
+    write = column_write_bytes(n_rows, itemsize, threads)
+    if not missing:
+        return write
+    column = int(n_rows) * int(itemsize)
+    return column + max(column + int(n_rows), 8 * int(n_rows), write)
 
 
 def write_categorical_column(

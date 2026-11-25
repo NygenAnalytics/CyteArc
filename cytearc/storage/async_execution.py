@@ -625,6 +625,19 @@ def store_decoding_threads(store: Any) -> Iterator[None]:
         _DECODING_THREADS.reset(token)
 
 
+def store_codec_threads(store: Any) -> int:
+    """Return the threads that the Zarr reads and writes of ``store`` made here decode and encode on.
+
+    They are the calling context's, as :func:`zarr_decoding_threads` sets
+    them, or else the fewest registered for the store, or else the host's
+    threads of Zarr's codec pool.
+    """
+    threads = _DECODING_THREADS.get()
+    if threads is None:
+        threads = _registered_threads(store)
+    return ensure_zarr_host_ceiling() if threads is None else threads
+
+
 def _batch_store(batch_info: list[Any]) -> Any:
     """Return the store of a batch's first chunk, or None for the chunks of a shard in memory."""
     return getattr(batch_info[0][0], "store", None) if batch_info else None

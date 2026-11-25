@@ -22,50 +22,273 @@ def _group() -> zarr.Group:
     return zarr.open_group(store=MemoryStore(), mode="w")
 
 
-def _third_missing(n_rows: int) -> np.ndarray:
-    return np.arange(n_rows) % 3 == 0
+def _astral_text(n_rows: int, width: int) -> np.ndarray:
+    """Return text of ``width`` random characters beyond the Basic Multilingual Plane a value.
+
+    Its four bytes a character barely compress, so each chunk that Zarr
+    encodes holds about the chunk's bytes once encoded.
+    """
+    codes = np.random.default_rng(4).integers(
+        0x10000, 0x10FFFF, size=(n_rows, width), dtype=np.uint32
+    )
+    return codes.view(f"<U{width}").ravel()
+
+
+def _traced_write(
+    values: np.ndarray,
+    missing: np.ndarray,
+    threads: int,
+    encodes_at_once: int = 1,
+) -> tuple[int, int]:
+    """Trace a write of a column to a store that encodes on ``threads`` threads and keeps no chunks.
+
+    With more than one encode at once, each encode waits until that many
+    hold their chunks, so the block of a write holds them together on any
+    machine, and the most bytes of encoded chunks that it held at once come
+    back beside what it held.
+    """
+    from contextlib import nullcontext
+
+    from zarr.codecs import ZstdCodec
+
+    from cytearc.storage.async_execution import register_store_threads
+    from tests.memory_helpers import (
+        chunkless_store,
+        encodes_held_together,
+        held_together,
+    )
+
+    # The store, which is neither a local nor a memory store, takes the cloud
+    # profile's Zstd codec.
+    together = (
+        encodes_held_together(ZstdCodec, encodes_at_once)
+        if encodes_at_once > 1
+        else nullcontext([])
+    )
+    with together as sizes:
+
+        def write(_ledger: object) -> None:
+            sizes.clear()
+            store = chunkless_store()
+            register_store_threads(store, threads)
+            group = zarr.open_group(store=store, mode="w")
+            write_metadata_column(group, "column", values, missing)
+
+        held = traced_charge(write).held
+    if encodes_at_once == 1:
+        return held, 0
+    assert sizes, "no encode waited for the others"
+    return held, max(held_together(sizes, encodes_at_once))
+
+
+# Text of 200 characters takes 16,777,216 // 800 = 20,971 rows to a chunk of
+# 16,776,800 bytes, and a codec's buffer of a chunk at most a 128th more and
+# 1,024 bytes beside: 16,908,892 bytes. 50,000 rows are two whole chunks and
+# 8,058 rows of a third, which Zarr fills to a whole chunk before encoding it.
+_WIDE_CHUNK = 20_971 * 800
+_WIDE_ENCODED = _WIDE_CHUNK + _WIDE_CHUNK // 128 + 1_024
 
 
 @pytest.mark.parametrize(
-    ("values", "missing"),
+    ("threads", "expected", "least"),
     [
-        # Text of 200 characters, with and without missing rows, whose
-        # copies dwarf what else the write holds.
-        (np.full(20_000, "n" * 200), _third_missing(20_000)),
-        (np.full(20_000, "n" * 200), np.zeros(20_000, dtype=bool)),
-        # Narrow text, numbers and flags, each a stored chunk of 100,000 rows.
-        (np.full(100_000, "ab"), _third_missing(100_000)),
-        (np.arange(100_000, dtype=np.float64), _third_missing(100_000)),
-        (np.arange(100_000, dtype=np.float64), np.zeros(100_000, dtype=bool)),
-        (np.arange(100_000) % 2 == 0, np.zeros(100_000, dtype=bool)),
+        # One chunk at a time: the last block holds the filled chunk and its
+        # encoded buffer.
+        (1, _WIDE_CHUNK + _WIDE_ENCODED, 2 * _WIDE_CHUNK),
+        # Every chunk at once: three encoded buffers beside the filled chunk.
+        (4, 3 * _WIDE_ENCODED + _WIDE_CHUNK, _WIDE_CHUNK),
     ],
-    ids=["text", "text-none-missing", "narrow", "float", "float-none-missing", "flags"],
 )
-def test_a_column_write_holds_what_its_size_helper_charges(values, missing) -> None:
-    n_rows = values.size
-    charge = metadata_column_write_bytes(
-        n_rows, values.dtype.itemsize, missing=bool(missing.any())
+def test_a_wide_text_column_write_holds_one_encoded_chunk_a_write_thread(
+    threads: int, expected: int, least: int
+) -> None:
+    values = _astral_text(50_000, 200)
+    missing = np.zeros(50_000, dtype=bool)
+    charge = metadata_column_write_bytes(50_000, 800, missing=False, threads=threads)
+    assert charge == expected
+    held, encoded = _traced_write(
+        values, missing, threads, encodes_at_once=min(threads, 3)
     )
-    held = traced_charge(
-        lambda _ledger: write_metadata_column(_group(), "column", values, missing)
-    ).held
-    # Beside the column and its mask, which the caller holds, the write holds
-    # the charge, within what the charge leaves out: Zarr's objects of the
-    # new array and of its writes, about 40 KB, and what a coverage tracer
-    # records of the lines that the write runs.
-    left_out = 128 * 1024
-    assert charge - left_out <= held <= charge + left_out
+    # Beside the column, the write holds its chunks' buffers, the encoded
+    # chunks that it holds at once, and with one thread a codec's buffer of
+    # the chunk's bound before it is cut to the encoded bytes; and at most
+    # the charge with Zarr's objects of the array and its writes, tens of
+    # kilobytes, and what a coverage tracer records of the lines that the
+    # write runs.
+    assert least + encoded <= held <= charge + 128 * 1024
+
+
+@pytest.mark.parametrize(
+    ("values", "missing", "threads", "expected", "least"),
+    [
+        # 20,000 values of 200 characters, one blank, are one chunk of
+        # 16,000,000 bytes, whose codec's buffer takes at most 16,126,024:
+        # the text is copied with a placeholder in the blank row, from a copy
+        # of its present values, beside which the write first finds them
+        # with a mark a row; then Zarr encodes the copy.
+        (
+            _astral_text(20_000, 200),
+            np.arange(20_000) == 0,
+            1,
+            16_000_000 + max(16_000_000 + 20_000, 16_126_024),
+            2 * 16_000_000 - 800,
+        ),
+        # 250,000 float64 values are chunks of 100,000 rows, 800,000 bytes,
+        # and 50,000 rows of a third, which Zarr fills, beside a buffer of
+        # at most 807,274 bytes.
+        (
+            np.random.default_rng(5).random(250_000),
+            np.zeros(250_000, dtype=bool),
+            1,
+            800_000 + 807_274,
+            2 * 800_000,
+        ),
+        # Two encoded buffers at a time of 400,000 values of two characters
+        # in four whole chunks of 100,000 rows, 800,000 bytes each, which
+        # Zarr lends to the codec.
+        (
+            _astral_text(400_000, 2),
+            np.zeros(400_000, dtype=bool),
+            2,
+            2 * 807_274,
+            0,
+        ),
+        # 200,000 values of two characters, one blank, are two chunks of
+        # 100,000 rows: the copy of the column is made beside a copy of the
+        # present values and a mark a row, more than Zarr's buffer of a
+        # chunk, 807,274 bytes at most, beside the copy.
+        (
+            _astral_text(200_000, 2),
+            np.arange(200_000) == 0,
+            1,
+            1_600_000 + 1_600_000 + 200_000,
+            1_600_000 + 1_599_992 + 200_000,
+        ),
+        # Text of one character, one blank: the present values' width is
+        # measured with their int64 lengths, 8 bytes each, which outweigh
+        # the text itself, 4 bytes a value, beside the present values.
+        (
+            _astral_text(200_000, 1),
+            np.arange(200_000) == 0,
+            1,
+            800_000 + 8 * 200_000,
+            799_996 + 8 * 199_999,
+        ),
+        # 250,000 flags in chunks of 100,000 rows, of 100,000 bytes, whose
+        # buffer takes at most 101,805, beside the filled last chunk.
+        (
+            np.arange(250_000) % 2 == 0,
+            np.zeros(250_000, dtype=bool),
+            1,
+            100_000 + 101_805,
+            2 * 100_000,
+        ),
+    ],
+    ids=[
+        "text-one-blank",
+        "float",
+        "narrow-two-threads",
+        "narrow-text-one-blank",
+        "letters-one-blank",
+        "flags",
+    ],
+)
+def test_a_column_write_holds_what_its_size_helper_charges(
+    values: np.ndarray, missing: np.ndarray, threads: int, expected: int, least: int
+) -> None:
+    charge = metadata_column_write_bytes(
+        values.size,
+        values.dtype.itemsize,
+        missing=bool(missing.any()),
+        threads=threads,
+    )
+    assert charge == expected
+    held, encoded = _traced_write(values, missing, threads, encodes_at_once=threads)
+    assert least + encoded <= held <= charge + 128 * 1024
+
+
+def test_a_column_with_a_third_missing_holds_less_than_its_charge() -> None:
+    # The charge counts a copy of the present values as large as the
+    # column, since a blank in one row leaves nearly all of them; with a
+    # third of the rows blank, their copy is two thirds of the column.
+    values = _astral_text(30_000, 200)
+    missing = np.arange(30_000) % 3 == 0
+    charge = metadata_column_write_bytes(30_000, 800, missing=True, threads=1)
+    held, _ = _traced_write(values, missing, 1)
+    assert held <= charge
+    # It holds the column's copy and the present values' at least.
+    assert held >= 30_000 * 800 + 20_000 * 800
 
 
 def test_a_column_of_blank_text_holds_less_than_the_charge_of_missing_rows() -> None:
     # Text that is missing in every row has no present values to copy, so
     # its write holds less than the charge, which counts them.
     values, missing = np.full(100_000, ""), np.ones(100_000, dtype=bool)
-    charge = metadata_column_write_bytes(100_000, 4, missing=True)
-    held = traced_charge(
-        lambda _ledger: write_metadata_column(_group(), "column", values, missing)
-    ).held
+    charge = metadata_column_write_bytes(100_000, 4, missing=True, threads=1)
+    held, _ = _traced_write(values, missing, 1)
     assert held <= charge
+
+
+def test_a_column_write_hands_zarr_one_chunk_for_each_write_thread_at_a_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cytearc.storage.async_execution import register_store_threads
+
+    # 700,000 one-byte flags are seven chunks of 100,000 rows; three write
+    # threads take three chunks at a time, the last block one, and the
+    # missing marks go with their block.
+    writes: list[tuple[str, int, int]] = []
+    setitem = zarr.Array.__setitem__
+
+    def recorded(array: zarr.Array, selection: object, value: object) -> None:
+        assert isinstance(selection, slice)
+        writes.append((array.basename, int(selection.start), int(selection.stop)))
+        setitem(array, selection, value)
+
+    monkeypatch.setattr(zarr.Array, "__setitem__", recorded)
+    store = MemoryStore()
+    register_store_threads(store, 3)
+    group = zarr.open_group(store=store, mode="w")
+    values = (np.arange(700_000) % 3).astype(np.int8)
+    missing = np.arange(700_000) % 7 == 0
+    write_metadata_column(group, "column", values, missing)
+    blocks = [(0, 300_000), (300_000, 600_000), (600_000, 700_000)]
+    assert writes == [
+        (name, start, stop)
+        for start, stop in blocks
+        for name in ("column", "__cytearc_missing__column")
+    ]
+    np.testing.assert_array_equal(group["column"][:], np.where(missing, 0, values))
+    np.testing.assert_array_equal(linked_missing_mask(group, "column")[:], missing)
+
+
+def test_metadata_column_write_bytes_counts_a_block_of_write_threads() -> None:
+    from cytearc.storage.arrays import column_write_bytes
+
+    # Ten chunks of 100,000 float64 rows, each 800,000 bytes and at most
+    # 807,274 encoded. Four threads encode four at a time; the last block
+    # holds two.
+    assert (
+        metadata_column_write_bytes(1_000_000, 8, missing=False, threads=4)
+        == 4 * 807_274
+    )
+    # Ten threads, or more, take every chunk at once.
+    for threads in (10, 64):
+        assert column_write_bytes(1_000_000, 8, threads) == 10 * 807_274
+    # A last chunk of 1 row past 900,000 is filled whole, and with three
+    # threads it is the last block's one chunk beside the filled one, which
+    # the whole blocks' three buffers outweigh.
+    assert column_write_bytes(900_001, 8, 3) == 3 * 807_274
+    assert column_write_bytes(900_001, 8, 10) == 10 * 807_274 + 800_000
+    # A column of fewer rows than a chunk is one chunk of its rows, whole.
+    assert column_write_bytes(10, 8, 4) == 80 + 80 // 128 + 1_024
+    # A column of no rows writes nothing.
+    assert column_write_bytes(0, 8, 4) == 0
+    # A writer's block beside them: a gathered block of 4 bytes a row in
+    # blocks of 400,000 rows, and the last of 200,000.
+    assert column_write_bytes(1_000_000, 8, 4, block_row_bytes=4) == 4 * 807_274 + (
+        4 * 400_000
+    )
 
 
 def test_decode_text_accepts_text_and_rejects_other_values() -> None:

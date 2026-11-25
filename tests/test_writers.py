@@ -7,6 +7,7 @@ import zarr
 from zarr.storage import LocalStore, MemoryStore
 
 from cytearc.readers import CSVReader
+from cytearc.readers.cellranger import CrReader
 from cytearc.storage.count_matrix import CountMatrixPolicy
 from cytearc.utils.count_values import CountValueRange
 from cytearc.writers import (
@@ -215,6 +216,8 @@ def test_crtozarr_preserves_exact_counts_metadata_and_transpose():
 
         def cell_names(self):
             return ["c1", "c2", "c3"]
+
+        _cell_names_source = CrReader._cell_names_source
 
         def feature_ids(self, assay_name):
             return ["f1", "f2", "f3"]
@@ -2422,6 +2425,8 @@ def _write_reserved_cellranger(tmp_path):
         def cell_names(self):
             return ["c0", "c1", "c2"]
 
+        _cell_names_source = CrReader._cell_names_source
+
         def feature_ids(self, assay_name):
             return ["f0", "f1", "f2"]
 
@@ -4458,6 +4463,8 @@ def test_crtozarr_forwards_storage_options(monkeypatch):
 
         def cell_names(self):
             return ["c1"]
+
+        _cell_names_source = CrReader._cell_names_source
 
         def feature_ids(self, assay_name):
             return ["f1"]

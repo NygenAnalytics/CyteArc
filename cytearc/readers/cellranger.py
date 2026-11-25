@@ -81,6 +81,8 @@ class CrReader(ABC):
     #: The rows of an import that shuffles cells, in the import's order, on
     #: local disk; ``consume`` yields them once, deleting them as it goes.
     _shuffledRows: SparseRowStore | None = None
+    #: The plan of the spill that wrote them, of each budget of the spill.
+    _shuffledPlanned: Callable[[int], RowSpillPlan] | None = None
 
     def __init__(self, grp_names: dict[str, Any]) -> None:
         self.autoNames = dict(AUTO_ASSAY_NAMES)
@@ -213,19 +215,23 @@ class CrReader(ABC):
             OSError: If the temporary disk lacks room for the rows.
         """
         self._release_shuffled_rows()
-        destinations = checked_destinations(destinationRows, self.nCells)
 
-        def planned(budget: int) -> RowSpillPlan:
-            return row_spill_plan(
-                destinations,
-                (self.nCells, self.nFeatures),
-                self.matrix_dtype,
-                entries=entries,
-                longest=longest,
-                maxBytes=budget,
-            )
+        def planner(destinations: np.ndarray) -> Callable[[int], RowSpillPlan]:
+            def planned(budget: int) -> RowSpillPlan:
+                return row_spill_plan(
+                    destinations,
+                    (self.nCells, self.nFeatures),
+                    self.matrix_dtype,
+                    entries=entries,
+                    longest=longest,
+                    maxBytes=budget,
+                )
 
-        plan = admitted_spill_plan(planned, maxBytes)
+            return planned
+
+        plan = admitted_spill_plan(
+            planner(checked_destinations(destinationRows, self.nCells)), maxBytes
+        )
         share = plan.maxBytes - plan.ownerBytes
         store, result = spill_rows(
             plan,
@@ -238,6 +244,9 @@ class CrReader(ABC):
             entries=expected_entries,
         )
         self._shuffledRows = store
+        # The buckets of other budgets, which the counts write's checks plan,
+        # do not depend on the cells' destinations, which are let go.
+        self._shuffledPlanned = planner(np.empty(0, dtype=np.int64))
         return result
 
     def _consume_shuffled(self, batch_size: int) -> Generator[coo_matrix, None, None]:
@@ -267,11 +276,42 @@ class CrReader(ABC):
             read_ahead=True
         )
 
+    def _shuffled_staging_within(self, maxBytes: int) -> Callable[[int], int]:
+        """Return what reading a batch of shuffled cells would hold beside the batch, had their spill been planned within ``maxBytes``.
+
+        The spill sizes its buckets from its budget, and the counts write
+        reads a bucket at a time, so a budget other than the spill's would
+        read other buckets of the same cells, whose row pointers give them
+        without reading the cells, as :meth:`_shuffled_staging_bytes` counts
+        them for the buckets that the spill made.
+
+        Raises:
+            MemoryBudgetError: If ``maxBytes`` cannot hold the spill, as its
+                plan refuses it.
+        """
+        store, planned = self._shuffledRows, self._shuffledPlanned
+        assert store is not None and planned is not None
+        plan = planned(int(maxBytes))
+        reading = SparseRowStore.planned_read_bytes(
+            store.indptr,
+            bucket_rows=plan.bucketRows,
+            split_bytes=2 * plan.readBytes,
+            dtype=store.dtype,
+            read_ahead=True,
+        )
+
+        def staging(batch_size: int) -> int:
+            rows = min(max(1, int(batch_size)), self.nCells)
+            return (rows + 1) * 3 * np.dtype(np.int64).itemsize + reading
+
+        return staging
+
     def _release_shuffled_rows(self) -> None:
         """Remove the shuffled cells of an import, once written or given up."""
         if self._shuffledRows is not None:
             self._shuffledRows.close()
         self._shuffledRows = None
+        self._shuffledPlanned = None
 
     def producer_staging_bytes(
         self,
@@ -433,6 +473,16 @@ class CrReader(ABC):
     def cell_names(self) -> list[str]:
         """Returns a list of names of the cells in the dataset."""
         return self._read_dataset("cell_names")
+
+    def _cell_names_source(self) -> tuple[np.ndarray, int]:
+        """Return the selected cells' names, which a cell table's write reads a block of rows at a time, and the bytes that the import holds for them.
+
+        A reader that keeps an array of them returns it, which its arrays
+        count, and no bytes; this reader makes a new array of them, which
+        the import holds until the table is written.
+        """
+        names = np.asarray(self.cell_names())
+        return names, int(names.nbytes)
 
     def get_cell_columns(self) -> Iterator[tuple[str, np.ndarray]]:
         """Yield optional cell metadata columns supplied by the reader."""
@@ -727,6 +777,27 @@ class CrH5Reader(CrReader):
         if self.validBarcodeIdx is not None:
             vals = vals[self.validBarcodeIdx]
         return list(vals)
+
+    def _cell_names_source(self) -> tuple[np.ndarray, int]:
+        """Return the selected barcodes as the file holds them, bytes of one width, and the bytes that reading them holds.
+
+        Every barcode of the file is read, and a reader that keeps some of
+        them copies those, so the import counts both until the table is
+        written. Barcodes of variable length, which the file holds as
+        objects, are decoded into a new array instead.
+        """
+        dataset = self.grp[self.grpNames["cell_names"]]
+        if np.dtype(dataset.dtype).kind != "S":
+            return super()._cell_names_source()
+        selected = self.validBarcodeIdx
+        assert selected is not None
+        barcodes = np.asarray(dataset[:])
+        # The selected barcodes are increasing, so as many are all of them.
+        if selected.size == barcodes.size:
+            return barcodes, int(barcodes.nbytes)
+        return barcodes[selected], int(barcodes.nbytes) + int(
+            selected.size * barcodes.itemsize
+        )
 
     def get_feature_columns(self) -> Iterator[tuple[str, np.ndarray]]:
         yield from super().get_feature_columns()

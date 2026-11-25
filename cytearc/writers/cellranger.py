@@ -93,10 +93,12 @@ class CrToZarr:
             room for the shuffled cells.
         MemoryBudgetError: If ``mem_budget`` cannot hold the shuffle of the
             cells beside the reader's arrays, when ``shuffle_cells`` is True,
-            or the sorting of a feature-major Matrix Market file's entries
-            into rows of cells. Each is refused before it starts and before
-            the destination exists, naming the budget that holds it; the
-            sorting also names a smaller ``lines_in_mem`` when one fits.
+            the sorting of a feature-major Matrix Market file's entries into
+            rows of cells, or the write of the cell table's IDs and names, a
+            block of the reader's names at a time. Each is refused before it
+            starts and before the destination exists, naming the budget that
+            holds it; the sorting also names a smaller ``lines_in_mem`` when
+            one fits.
 
     Attributes:
         cr: A CrReader object, containing the Cellranger data.
@@ -221,6 +223,7 @@ class CrToZarr:
         # The scan and its spill run beside the reader's arrays, and a
         # shuffled import's order of the cells and its inverse.
         arrays = self._reader_resident_bytes()
+        self._spillBeside = held + arrays
         # The cells on local disk before the scan; cells there after a
         # failure are this import's, which no later import may read.
         rows_before = getattr(self.cr, "_shuffledRows", None)
@@ -269,21 +272,23 @@ class CrToZarr:
             if not self.shuffleCells:
                 self._admit_reader_preparation(self._count_import_resident_bytes())
             self.policy = self._fit_count_layout(storage_dtypes, layout_request)
+            # The reader's names of the cells, which the cell table reads a
+            # block at a time in the order of the cells.
+            cell_names, names_bytes = self.cr._cell_names_source()
+            self._admit_cell_table(cell_names, names_bytes)
             # The destination must be empty, or with overwrite an unprepared store.
             self.z = create_destination(
                 zarr_loc, overwrite=overwrite, storage_options=storage_options
             )
             # The import writes the new store on its threads.
             register_store_threads(self.z.store, self.resources.workers)
-            cell_names = np.array(self.cr.cell_names())
-            if self._cellOrder is not None:
-                cell_names = cell_names[self._cellOrder]
             cell_group = create_cell_data(
                 root=self.z,
                 workspace=self.workspace,
                 ids=cell_names,
                 names=cell_names,
                 profile=self.profile,
+                order=self._cellOrder,
             )
             del cell_names
             if self._cellOrder is not None:
@@ -388,6 +393,46 @@ class CrToZarr:
             + (0 if self._cellOrder is None else int(self._cellOrder.nbytes))
         )
 
+    def _admit_cell_table(self, cell_names: np.ndarray, names_bytes: int) -> None:
+        """Refuse a budget that cannot write the cell table's IDs and names beside what the import holds.
+
+        The table reads the reader's names of the cells a block at a time,
+        in a shuffled import's order, beside the reader's arrays, the order
+        and the ``names_bytes`` that the import holds for the names.
+
+        Raises:
+            MemoryBudgetError: Naming the budget that holds the write beside
+                them, before the destination exists.
+        """
+        from ..storage.schema import cell_table_write_bytes
+        from ..utils.memory_budget import MemoryLedger
+
+        order = 0 if self._cellOrder is None else int(self._cellOrder.nbytes)
+        arrays = self._reader_resident_bytes()
+        beside = []
+        if order:
+            beside.append(f"the {order} bytes of its cell order")
+        if arrays:
+            beside.append(f"the {arrays} bytes of the reader's arrays")
+        if names_bytes:
+            beside.append(f"the {names_bytes} bytes of the cells' names read for it")
+        item = "the cell table's IDs and names"
+        if beside:
+            item += " beside " + ", ".join(beside[:-1])
+            item += f"{' and ' if len(beside) > 1 else ''}{beside[-1]}"
+        MemoryLedger(
+            int(self.resources.memoryBytes),
+            f"Importing the counts of {self.cr.nCells} cells",
+        ).refuse_beyond(
+            item,
+            order
+            + arrays
+            + names_bytes
+            + cell_table_write_bytes(
+                cell_names, cell_names, self.resources.workers, order=self._cellOrder
+            ),
+        )
+
     def _admit_reader_preparation(self, held: int) -> None:
         """Refuse a budget that cannot hold the reader's sorting of its entries into rows.
 
@@ -471,22 +516,47 @@ class CrToZarr:
         resident, staging_bytes, projection_bytes = self._count_import_requirements(
             storage_dtypes.values()
         )
+        budget = int(self.resources.memoryBytes)
+        shuffled = self._shuffledStore is not None
+
+        def admit_counts(specs: Any, resources: Any) -> object:
+            staging = staging_bytes
+            within = int(resources.memoryBytes)
+            if shuffled and within != budget:
+                # A shuffled import's counts write reads the buckets that its
+                # spill sized from the budget, so each other budget is checked
+                # with the buckets of a spill within what it leaves beside
+                # what the import then holds.
+                try:
+                    staging = self.cr._shuffled_staging_within(
+                        within - self._spillBeside
+                    )
+                except MemoryBudgetError as error:
+                    raise memory_refusal(
+                        f"Importing the counts of {self.cr.nCells} cells",
+                        f"{error.item} beside the {self._spillBeside} bytes that "
+                        "the import holds",
+                        self._spillBeside + error.needed_bytes,
+                        within,
+                    ) from error
+            return sparse_counts_admission(
+                nRows=self.cr.nCells,
+                maxWindowNnz=self.cr.max_window_nnz,
+                sourceDtype=self.cr.matrix_dtype,
+                residentBytes=resident,
+                producerStagingBytes=staging,
+                extraProducerBytes=projection_bytes,
+                alignedBatches=True,
+            )(specs, resources)
+
         widths = self._assay_widths()
         return fit_count_layout(
             {name: (widths[name], dtype) for name, dtype in storage_dtypes.items()},
             nCells=self.cr.nCells,
             profile=self.profile,
-            memoryBytes=self.resources.memoryBytes,
+            memoryBytes=budget,
             transposed=counts_t_assays(tuple(storage_dtypes), self.assayTypes),
-            admitCounts=sparse_counts_admission(
-                nRows=self.cr.nCells,
-                maxWindowNnz=self.cr.max_window_nnz,
-                sourceDtype=self.cr.matrix_dtype,
-                residentBytes=resident,
-                producerStagingBytes=staging_bytes,
-                extraProducerBytes=projection_bytes,
-                alignedBatches=True,
-            ),
+            admitCounts=admit_counts,
             requested=requested,
             countsTResidentBytes=self._counts_t_resident_bytes(),
         )

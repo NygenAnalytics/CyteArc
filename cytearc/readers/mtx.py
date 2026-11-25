@@ -2210,18 +2210,21 @@ class MtxReader(CrReader):
                 engine.producer_staging_bytes(rows, lines)
             )
 
-        def planned(budget: int) -> RowSpillPlan:
-            return row_spill_plan(
-                destinations,
-                (self.nCells, self.nFeatures),
-                engine.matrixDtype,
-                entries=int(pointers[-1]),
-                longest=longest,
-                maxBytes=budget,
-                least=lambda plan: held(plan, 1),
-            )
+        def planner(rows: np.ndarray) -> Callable[[int], RowSpillPlan]:
+            def planned(budget: int) -> RowSpillPlan:
+                return row_spill_plan(
+                    rows,
+                    (self.nCells, self.nFeatures),
+                    engine.matrixDtype,
+                    entries=int(pointers[-1]),
+                    longest=longest,
+                    maxBytes=budget,
+                    least=lambda plan: held(plan, 1),
+                )
 
-        plan = admitted_spill_plan(planned, maxBytes)
+            return planned
+
+        plan = admitted_spill_plan(planner(destinations), maxBytes)
         # Batches start at the cells of a million counts on average and
         # halve until their widest window fits.
         window = scan_window_values(longest)
@@ -2264,6 +2267,9 @@ class MtxReader(CrReader):
                 dense=False,
                 temp_dir=engine.tempDir,
             )
+            # The buckets of other budgets, which the counts write's checks
+            # plan, do not depend on the cells' destinations, which are let go.
+            self._shuffledPlanned = planner(np.empty(0, dtype=np.int64))
         finally:
             batches.close()
 
@@ -2317,6 +2323,11 @@ class MtxReader(CrReader):
         if self._shuffledRows is not None:
             return self._shuffled_staging_bytes(batch_size)
         return self._engine.producer_staging_bytes(batch_size, lines_in_mem)
+
+    def _cell_names_source(self) -> tuple[np.ndarray, int]:
+        """Return the kept cells' barcodes, the array of Python strings that the reader keeps and its arrays count, with no bytes beside."""
+        names: np.ndarray = self._engine._cellNames
+        return names, 0
 
     def get_cell_columns(self) -> Iterator[tuple[str, np.ndarray]]:
         yield from self._engine.cell_columns()

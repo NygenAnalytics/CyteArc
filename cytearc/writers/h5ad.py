@@ -1146,8 +1146,10 @@ class H5adToZarr:
                 for name, decision in self.values.items()
                 if decision.kind in ("log_normalized", "log2_normalized")
             }
-            # A layout that does not fit fails here, before the destination exists.
+            # A layout that does not fit fails here, before the destination
+            # exists, and so does the cell table's write.
             self.policy = self._fit_count_layout(layout_request)
+            self._check_cell_table_write()
             # The destination must be empty, or with overwrite an unprepared store.
             self.z = create_destination(
                 zarr_loc, overwrite=overwrite, storage_options=storage_options
@@ -1211,6 +1213,34 @@ class H5adToZarr:
             f"{error.item} beside the {int(held)} bytes of its {held_items}",
             int(held) + error.needed_bytes,
             int(self.resources.memoryBytes),
+        )
+
+    def _check_cell_table_write(self) -> None:
+        """Refuse a budget that cannot write the cell table's IDs and names beside what the import holds.
+
+        The table reads the cell IDs that the reader keeps a block at a time,
+        in a shuffled import's order, beside the IDs, names, order and
+        reader's rows that :meth:`_resident_bytes` counts.
+
+        Raises:
+            MemoryBudgetError: Naming the budget that holds the write, before
+                the destination exists.
+        """
+        from ..storage.schema import cell_table_write_bytes
+        from ..utils.memory_budget import MemoryLedger
+
+        held = self._resident_bytes()
+        ids = self.h5ad._cell_identifiers()[1]
+        MemoryLedger(
+            int(self.resources.memoryBytes),
+            f"Importing {quoted_value(str(self.h5ad.h5adFn))}",
+        ).refuse_beyond(
+            f"the cell table's IDs and names beside the {held} bytes that the "
+            "import holds",
+            held
+            + cell_table_write_bytes(
+                ids, ids, self.resources.workers, order=self._cellOrder
+            ),
         )
 
     def _kept_bytes(self) -> int:
@@ -1406,15 +1436,16 @@ class H5adToZarr:
         from ._store import keyed_metadata_columns, write_membership_column
 
         order = self._cellOrder
-        ids = self.h5ad.cell_ids()
-        if order is not None:
-            ids = ids[order]
+        # The cell table reads the IDs that the reader keeps a block at a
+        # time, in a shuffled import's order.
+        ids = self.h5ad._cell_identifiers()[1]
         g = create_cell_data(
             root=self.z,
             workspace=self.workspace,
             ids=ids,
             names=ids,
             profile=self.profile,
+            order=order,
         )
         del ids
         if order is not None:

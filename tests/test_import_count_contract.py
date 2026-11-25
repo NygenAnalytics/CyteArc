@@ -1254,12 +1254,21 @@ def test_sparse_writer_refuses_a_matrix_larger_than_mem_budget(tmp_path):
 
     matrix = _sparse(_large_values(200, 50), "float32")
     held = sparse_matrix_bytes(matrix)
+    # The import checks its cell IDs first, c0 to c199, beside the matrix
+    # and its copy of them, NumPy text of 4 bytes a character of c199: a
+    # copy of the text and a mark each. A budget below the matrix is refused
+    # there, before anything is written, naming the budget that holds all.
+    ids = 200 * 4 * 4
+    needed = held + ids + ids + 200
     destination = tmp_path / "counts.zarr"
-    with pytest.raises(
-        MemoryError,
-        match=f"holds {held} bytes, but mem_budget is {held // 2} bytes",
-    ):
+    with pytest.raises(MemoryError) as refused:
         _writer("sparse", matrix, str(destination), mem_budget=held // 2, nthreads=1)
+    assert str(refused.value) == (
+        f"Importing the sparse matrix holds about {needed} bytes for checking the "
+        f"cell IDs, an array of {ids} bytes, beside the {held} bytes of the matrix, "
+        f"more than the memory budget of {held // 2} bytes. Raise mem_budget to at "
+        f"least {needed} bytes."
+    )
     assert not destination.exists()
 
 
@@ -1412,7 +1421,10 @@ _LAYOUT_CASES = {
     "cellranger": ("int32", (2_000, 400), 16 * 1024**2, 128 * 1024),
     "mtx": ("integer", (2_000, 400), 16 * 1024**2, 128 * 1024),
     "csv": ("integer", (2_000, 400), 16 * 1024**2, 128 * 1024),
-    "sparse": ("float32", (2_000, 400), 16 * 1024**2, 1_740_000),
+    # The in-memory import checks its cell IDs before the layout, beside the
+    # matrix and the IDs, which needs 1,752,956 bytes; count shards of one
+    # row fit from 1,787,466.
+    "sparse": ("float32", (2_000, 400), 16 * 1024**2, 1_770_000),
     "seurat": ("real", (600, 200), 2 * 1024**2, 40 * 1024),
     "subset": (None, (2_000, 400), 16 * 1024**2, 128 * 1024),
     "repack": (None, (2_000, 400), 16 * 1024**2, 128 * 1024),

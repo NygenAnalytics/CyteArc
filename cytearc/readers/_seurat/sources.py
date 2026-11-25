@@ -19,7 +19,11 @@ from .errors import MatrixSourceError, ResourceLimitError
 from .values import decode_text_values, read_window
 from .._sparse import ROW_BYTES, SparseRowStore
 from ...utils.arrays import cumulative_nnz, has_duplicates
-from ...utils.memory_budget import MemoryBudgetError, refusal_words
+from ...utils.memory_budget import (
+    MemoryBudgetError,
+    least_admitted_budget,
+    refusal_words,
+)
 
 
 type MatrixBlock = NDArray[Any] | coo_matrix | csr_matrix
@@ -161,11 +165,30 @@ def release_temporary_storage(source: MatrixSource) -> None:
             current._transposeDirectory = None
 
 
-def prepare_matrix_sources(source: MatrixSource, max_bytes: int | None = None) -> None:
+def prepare_matrix_sources(
+    source: MatrixSource,
+    max_bytes: int | None = None,
+    *,
+    subject: str = "a Seurat source",
+) -> None:
     """Prepare every source of ``source`` to be read within ``max_bytes``.
 
     ``max_bytes`` caps the block limit of each source at what the sources'
-    resident data leave of it.
+    resident data leave of it. The read of one cell of every source is
+    checked before any is prepared, beside the row pointers that each
+    source before it that converts its cells keeps beside the resident
+    data, and again before each is prepared. A refusal of one cell names the
+    least budget at which
+    every source still to be prepared reads one cell, since the block limit
+    that the budget sets grows with it, and with it the read of one cell
+    that a source converting its cells estimates.
+
+    Args:
+        source: The matrix, whose sources are prepared in turn.
+        max_bytes: The memory available beside nothing else, or None to
+            prepare within each source's own limits.
+        subject: What a refusal of one cell's read names, such as
+            ``"assay 'ADT'"``.
 
     Raises:
         MemoryBudgetError: If the sources' resident data, preparing one cell,
@@ -174,9 +197,13 @@ def prepare_matrix_sources(source: MatrixSource, max_bytes: int | None = None) -
         ResourceLimitError: If a block passes a limit that the source's
             ``SourceLimits`` set.
     """
-    for current in _matrix_sources(source):
-        if not isinstance(current, BaseMatrixSource):
-            continue
+    sources = [
+        current
+        for current in _matrix_sources(source)
+        if isinstance(current, BaseMatrixSource)
+    ]
+    item = f"preparing one cell of {subject}"
+    for index, current in enumerate(sources):
         limits = current._limits
         try:
             if max_bytes is None:
@@ -192,20 +219,13 @@ def prepare_matrix_sources(source: MatrixSource, max_bytes: int | None = None) -
                     budget_bytes=int(max_bytes),
                     item="the resident data of the Seurat sources",
                 )
+            _admit_one_cell_of_each(
+                sources[index:], source.resident_bytes, int(max_bytes), item
+            )
             current._limits = replace(
                 limits, maxBlockBytes=min(limits.maxBlockBytes, available)
             )
             try:
-                estimate = current.estimate_read_memory(0, min(1, current.n_cells))
-                if estimate.blockBytes > available:
-                    needed = source.resident_bytes + estimate.blockBytes
-                    raise MemoryBudgetError(
-                        "Seurat source preparation exceeds mem_budget. It needs "
-                        f"at least {needed} bytes.",
-                        needed_bytes=needed,
-                        budget_bytes=int(max_bytes),
-                        item="preparing one cell of a Seurat source",
-                    )
                 current._prepare_for_read()
             except ResourceLimitError as error:
                 refusal = _budget_block_refusal(
@@ -216,6 +236,85 @@ def prepare_matrix_sources(source: MatrixSource, max_bytes: int | None = None) -
                 raise refusal from error
         finally:
             current._limits = limits
+
+
+def _admit_one_cell_of_each(
+    sources: Sequence["BaseMatrixSource"], resident: int, max_bytes: int, item: str
+) -> None:
+    """Check that ``max_bytes`` reads one cell of each of ``sources``, naming the least budget that does.
+
+    Each source reads beside the ``resident`` bytes and the row pointers
+    of the sources before it that convert their cells, as they are
+    prepared in turn.
+
+    Raises:
+        MemoryBudgetError: Naming the least budget at which every source
+            reads one cell beside them, found from the need of the first
+            that refuses at ``max_bytes``.
+    """
+
+    def admit(budget: int) -> None:
+        held = int(resident)
+        for current in sources:
+            _admit_one_cell(current, held, budget)
+            # A source that converts its cells keeps their row pointers
+            # beside the resident data as the sources after it prepare.
+            if current._converts_cells():
+                held += (current.n_cells + 1) * np.dtype(np.int64).itemsize
+
+    try:
+        admit(max_bytes)
+    except MemoryBudgetError as error:
+        needed = least_admitted_budget(admit, error)
+        raise MemoryBudgetError(
+            f"Seurat source preparation exceeds mem_budget. It needs at least {needed} bytes.",
+            needed_bytes=needed,
+            budget_bytes=max_bytes,
+            item=item,
+        ) from error
+
+
+def _admit_one_cell(source: "BaseMatrixSource", resident: int, max_bytes: int) -> None:
+    """Check that ``max_bytes`` reads one cell of ``source`` beside the ``resident`` bytes of the sources.
+
+    The budget caps the source's block limit at what the resident data
+    leave of it, and the read of one cell, which a source that converts its
+    cells first estimates from that limit, must fit there. The check
+    estimates and reads nothing, and leaves the source's limits as they
+    were.
+
+    Raises:
+        MemoryBudgetError: Naming what the resident data and the read of one
+            cell hold at ``max_bytes``, or the budget that a block the
+            budget's limit refuses needs.
+        ResourceLimitError: If a block passes a limit that the source's
+            ``SourceLimits`` set.
+    """
+    limits = source._limits
+    available = int(max_bytes) - int(resident)
+    source._limits = replace(
+        limits, maxBlockBytes=min(limits.maxBlockBytes, max(0, available))
+    )
+    try:
+        estimate = source.estimate_read_memory(0, min(1, source.n_cells))
+    except ResourceLimitError as error:
+        # A block that the budget's limit refuses, as preparing it would.
+        refusal = _budget_block_refusal(
+            error, int(max_bytes), available, limits.maxBlockBytes
+        )
+        if refusal is None:
+            raise
+        raise refusal from error
+    finally:
+        source._limits = limits
+    if estimate.blockBytes > available:
+        needed = int(resident) + estimate.blockBytes
+        raise MemoryBudgetError(
+            f"Seurat source preparation exceeds mem_budget. It needs at least {needed} bytes.",
+            needed_bytes=needed,
+            budget_bytes=int(max_bytes),
+            item="preparing one cell",
+        )
 
 
 def _budget_block_refusal(
@@ -638,6 +737,10 @@ class BaseMatrixSource(ABC):
     def _prepare_for_read(self) -> None:
         pass
 
+    def _converts_cells(self) -> bool:
+        """Return whether preparing the source converts its cells into a row store, whose row pointers it then keeps."""
+        return False
+
     def _prepare_row_store(
         self,
         chunks: Callable[[int], Iterator[coo_matrix]],
@@ -787,8 +890,11 @@ class CompressedMatrixSource(BaseMatrixSource):
             source_bytes=(self.n_features + 1) * _INDEX_BYTES,
         ).read(start, stop)
 
+    def _converts_cells(self) -> bool:
+        return self._rowStore is None and not self._cellsCompressed and self.n_cells > 0
+
     def _prepare_for_read(self) -> None:
-        if not self._cellsCompressed and self.n_cells:
+        if self._converts_cells():
             self._prepare_row_store(
                 self._feature_chunks,
                 entries=self.nnz,
@@ -1191,6 +1297,14 @@ class TransposeMatrixSource(BaseMatrixSource):
         """Return the values that the source stores, when it records them."""
         nnz = getattr(self.source, "nnz", None)
         return None if nnz is None else int(nnz)
+
+    def _converts_cells(self) -> bool:
+        return (
+            self._rowStore is None
+            and self.is_sparse
+            and self.n_cells > 0
+            and self.n_features > 0
+        )
 
     def _prepare_for_read(self) -> None:
         if not self.n_cells or not self.n_features:

@@ -1676,6 +1676,12 @@ def test_ragged_rows_are_stored_as_they_are_without_column_indices(tmp_path):
         frame = data[start : start + fields[11]]
         assert fields[11] < values.size // 5
         assert numcodecs.blosc.cbuffer_complib(frame) == "Zstd"
+        # An assembled bucket of sparse rows holds an eight-byte column index
+        # beside each of its byte values, and the row pointers.
+        nnz = int(np.count_nonzero(values))
+        assert sparse.read_bytes(read_ahead=True) - sparse.read_bytes() == (
+            nnz * (1 + 8) + 501 * 8
+        )
     finally:
         sparse.close()
 
