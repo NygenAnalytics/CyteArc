@@ -135,6 +135,27 @@ def test_a_wide_text_column_write_holds_one_encoded_chunk_a_write_thread(
             2 * 807_274,
             2 * 800_000,
         ),
+        # 200,000 values of two characters, one blank, are two chunks of
+        # 100,000 rows: the copy of the column is made beside a copy of the
+        # present values and a mark a row, more than Zarr's buffer of a
+        # chunk, 807,274 bytes at most, beside the copy.
+        (
+            _astral_text(200_000, 2),
+            np.arange(200_000) == 0,
+            1,
+            1_600_000 + 1_600_000 + 200_000,
+            1_600_000 + 1_599_992 + 200_000,
+        ),
+        # Text of one character, one blank: the present values' width is
+        # measured with their int64 lengths, 8 bytes each, which outweigh
+        # the text itself, 4 bytes a value, beside the present values.
+        (
+            _astral_text(200_000, 1),
+            np.arange(200_000) == 0,
+            1,
+            800_000 + 8 * 200_000,
+            799_996 + 8 * 199_999,
+        ),
         # 250,000 flags in chunks of 100,000 rows, of 100,000 bytes, whose
         # buffer takes at most 101,805, beside the filled last chunk.
         (
@@ -145,7 +166,14 @@ def test_a_wide_text_column_write_holds_one_encoded_chunk_a_write_thread(
             2 * 100_000,
         ),
     ],
-    ids=["text-one-blank", "float", "narrow-two-threads", "flags"],
+    ids=[
+        "text-one-blank",
+        "float",
+        "narrow-two-threads",
+        "narrow-text-one-blank",
+        "letters-one-blank",
+        "flags",
+    ],
 )
 def test_a_column_write_holds_what_its_size_helper_charges(
     values: np.ndarray, missing: np.ndarray, threads: int, expected: int, least: int

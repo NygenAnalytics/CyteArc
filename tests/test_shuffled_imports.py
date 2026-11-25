@@ -1167,8 +1167,16 @@ def test_a_shuffled_import_names_the_least_budget_that_writes_its_count_layout(
     assert _no_temporary_files(tmp_path)
 
 
+def _uneven_counts() -> np.ndarray:
+    """3,000 cells of one value of 2,000 genes each, but every 500th, which holds all 2,000."""
+    counts = np.zeros((3000, 2000), dtype=np.int64)
+    counts[np.arange(3000), np.arange(3000) % 2000] = 1
+    counts[::500] = 2
+    return counts
+
+
 @pytest.mark.slow
-@pytest.mark.parametrize("kind", ["10x", "mtx", "tapestri"])
+@pytest.mark.parametrize("kind", ["10x", "10x-uneven", "mtx", "tapestri"])
 def test_a_spills_reads_at_another_budget_are_those_of_a_spill_planned_there(
     tmp_path, kind
 ) -> None:
@@ -1176,11 +1184,19 @@ def test_a_spills_reads_at_another_budget_are_those_of_a_spill_planned_there(
 
     # A store of a spill planned at each budget, as the counts write reads
     # it, against what the reader of a spill at the first budget names for
-    # that budget from its own row pointers alone.
+    # that budget from its own row pointers alone. Uneven cells leave some
+    # buckets of a budget too large to read, which the store splits.
     make, n_cells = {
         "10x": (
             lambda: CrH5Reader(
                 str(_write_10x(tmp_path / "m.h5", _counts(3000))),
+                temp_dir=str(tmp_path),
+            ),
+            3000,
+        ),
+        "10x-uneven": (
+            lambda: CrH5Reader(
+                str(_write_10x(tmp_path / "u.h5", _uneven_counts())),
                 temp_dir=str(tmp_path),
             ),
             3000,
@@ -1220,12 +1236,17 @@ def test_a_spills_reads_at_another_budget_are_those_of_a_spill_planned_there(
         spill(budgets[0])
         named = [reader._shuffled_staging_within(budget)(17) for budget in budgets]
         made = []
+        split = []
         for budget in budgets:
             spill(budget)
             made.append(reader._shuffled_staging_bytes(17))
+            planned_buckets = -(-n_cells // reader._shuffledPlanned(budget).bucketRows)
+            split.append(reader._shuffledRows.bucket_starts.size - 1 > planned_buckets)
         # The budgets size buckets of more and more cells.
         assert len(set(made)) > 1
         assert named == made
+        # The uneven cells' spills split buckets; the others' need not.
+        assert any(split) == (kind == "10x-uneven")
     finally:
         reader.close()
     assert _no_temporary_files(tmp_path)

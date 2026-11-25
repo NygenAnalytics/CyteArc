@@ -244,7 +244,8 @@ def metadata_column_write_bytes(
     holds what :func:`~cytearc.storage.arrays.column_write_bytes` counts. A
     column with missing rows is copied first with a placeholder in each,
     text from a copy of its present values, which the write finds with a
-    mark a row, and Zarr writes the copy beside it.
+    mark a row and whose width it measures with the int64 length of each,
+    and Zarr writes the copy beside it.
 
     Args:
         n_rows: The rows of the column.
@@ -260,7 +261,7 @@ def metadata_column_write_bytes(
     if not missing:
         return write
     column = int(n_rows) * int(itemsize)
-    return column + max(column + int(n_rows), write)
+    return column + max(column + int(n_rows), 8 * int(n_rows), write)
 
 
 def write_categorical_column(

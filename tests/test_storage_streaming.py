@@ -432,3 +432,33 @@ def test_a_cell_table_of_bytes_holds_no_more_than_its_size_helper_charges(
 
     held = traced_charge(write).held
     assert least <= held <= expected + 128 * 1024
+
+
+def test_a_cell_table_hands_zarr_one_chunk_for_each_write_thread_at_a_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cytearc.storage.async_execution import register_store_threads
+    from cytearc.storage.schema import create_cell_data
+
+    # 250,000 IDs of up to 8 characters, and their flags, are chunks of
+    # 100,000 rows; two write threads take two chunks at a time, the last
+    # block the half chunk left, the IDs and names one block after another
+    # from one read of the IDs.
+    writes: list[tuple[str, int, int]] = []
+    setitem = zarr.Array.__setitem__
+
+    def recorded(array: zarr.Array, selection: object, value: object) -> None:
+        assert isinstance(selection, slice)
+        writes.append((array.basename, int(selection.start), int(selection.stop)))
+        setitem(array, selection, value)
+
+    monkeypatch.setattr(zarr.Array, "__setitem__", recorded)
+    store = MemoryStore()
+    register_store_threads(store, 2)
+    ids = np.array([f"c{row}" for row in range(250_000)])
+    create_cell_data(zarr.open_group(store=store, mode="w"), None, ids, ids)
+    blocks = [(0, 200_000), (200_000, 250_000)]
+    assert writes == [
+        *((name, start, stop) for start, stop in blocks for name in ("ids", "names")),
+        *(("I", start, stop) for start, stop in blocks),
+    ]
