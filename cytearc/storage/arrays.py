@@ -179,15 +179,29 @@ def text_array(values: np.ndarray) -> np.ndarray:
     Raises:
         UnicodeDecodeError: If a byte string is not valid UTF-8.
     """
+    return text_array_and_python(values)[0]
+
+
+def text_array_and_python(values: np.ndarray) -> tuple[np.ndarray, bool]:
+    """Return values as :func:`text_array` makes them text, and whether it made a Python string of each value first.
+
+    Unicode text, ASCII byte strings, and objects that are all Python
+    strings or all ASCII byte strings convert in whole-array NumPy
+    operations; byte strings that are not ASCII are decoded one at a time,
+    and other values are made text one at a time.
+
+    Raises:
+        UnicodeDecodeError: If a byte string is not valid UTF-8.
+    """
     kind = values.dtype.kind
     if kind == "U":
         width = int(np.strings.str_len(values).max(initial=0))
-        return values.astype(np.dtype((np.str_, max(1, width))))
+        return values.astype(np.dtype((np.str_, max(1, width)))), False
     if kind == "S":
         if _is_ascii(values):
             width = int(np.strings.str_len(values).max(initial=0))
-            return _ascii_text(values, max(1, width))
-        return _decoded_text(values.flat, values.shape)
+            return _ascii_text(values, max(1, width)), False
+        return _decoded_text(values.flat, values.shape), True
     if kind == "O":
         # Each distinct type is checked once rather than each value. Only the
         # exact types qualify: str() of a subclass, such as np.str_, can drop
@@ -196,39 +210,16 @@ def text_array(values: np.ndarray) -> np.ndarray:
         # widens values that are all empty.
         kinds = set(map(type, values.flat))
         if kinds <= {str}:
-            return values.astype(str)
+            return values.astype(str), False
         if kinds <= {bytes, np.bytes_}:
             # Trailing NULs count toward the width, as they count toward the
             # length of the ASCII text.
             raw = values.astype(np.bytes_)
             if _is_ascii(raw):
-                return _ascii_text(raw, raw.dtype.itemsize)
-            return _decoded_text(values.flat, values.shape)
-    return np.asarray([text_value(value) for value in values.flat], dtype=str).reshape(
-        values.shape
-    )
-
-
-def text_needs_python(values: np.ndarray) -> bool:
-    """Return whether :func:`text_array` makes ``values`` text through a Python string of each.
-
-    Unicode text, ASCII byte strings, and objects that are all Python
-    strings or all ASCII byte strings convert in whole-array NumPy
-    operations; byte strings that are not ASCII and objects of other kinds
-    are made Python strings first.
-    """
-    kind = values.dtype.kind
-    if kind == "U":
-        return False
-    if kind == "S":
-        return not _is_ascii(values)
-    if kind == "O":
-        kinds = set(map(type, values.flat))
-        if kinds <= {str}:
-            return False
-        if kinds <= {bytes, np.bytes_}:
-            return not all(bytes(value).isascii() for value in values.flat)
-    return True
+                return _ascii_text(raw, raw.dtype.itemsize), False
+            return _decoded_text(values.flat, values.shape), True
+    text = np.asarray([text_value(value) for value in values.flat], dtype=str)
+    return text.reshape(values.shape), True
 
 
 def _holds_bytes_or_none(values: np.ndarray) -> bool:
@@ -240,14 +231,25 @@ def _holds_bytes_or_none(values: np.ndarray) -> bool:
     )
 
 
+def decodes_metadata_text(values: np.ndarray) -> bool:
+    """Return whether :func:`encode_metadata_values` makes ``values`` text with :func:`text_array`: byte strings, and objects that hold a byte string or None."""
+    return values.dtype.kind == "S" or (
+        values.dtype.hasobject and _holds_bytes_or_none(values)
+    )
+
+
 def _decode_metadata_values(data: Any) -> np.ndarray:
     """Decode UTF-8 byte strings and missing values, keeping the array shape."""
     values = np.asarray(data)
-    if values.dtype.kind == "S" or (
-        values.dtype.hasobject and _holds_bytes_or_none(values)
-    ):
-        return text_array(values)
-    return values
+    return text_array(values) if decodes_metadata_text(values) else values
+
+
+def invalid_utf8_refusal(name: str) -> ValueError:
+    """Return the error that refuses column ``name`` for holding text that is not valid UTF-8."""
+    return ValueError(
+        f"Column {name!r} holds text that is not valid UTF-8; pass str values "
+        "or UTF-8 encoded bytes"
+    )
 
 
 def _text_width(block: Any) -> int:
@@ -311,10 +313,7 @@ def encode_metadata_values(
     try:
         values = _decode_metadata_values(raw)
     except UnicodeDecodeError as exc:
-        raise ValueError(
-            f"Column {name!r} holds text that is not valid UTF-8; pass str values "
-            "or UTF-8 encoded bytes"
-        ) from exc
+        raise invalid_utf8_refusal(name) from exc
     # Text is stored at its decoded width, whatever the source S or O dtype.
     if (
         dtype is None

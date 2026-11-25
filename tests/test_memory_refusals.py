@@ -929,7 +929,8 @@ def test_a_sparse_matrix_import_refuses_a_budget_of_one_byte_at_its_first_step(
     held = matrix_bytes + 30 * 4 * 3
     check = 30 * 12 + 30
     assert (refusal.item, refusal.needed_bytes) == (
-        f"checking the cell IDs beside the {held} bytes of the matrix and the cell IDs",
+        f"checking the cell IDs, an array of {30 * 4 * 3} bytes, beside the "
+        f"{matrix_bytes} bytes of the matrix",
         held + check,
     )
 
@@ -1096,7 +1097,8 @@ def test_an_in_memory_import_names_the_budget_that_checks_its_ids(
     held = 1_200 * 4 + 1_200 * 4 + 401 * 4 + 400 * 160
     check = 400 * 160 + 400
     item = (
-        f"checking the cell IDs beside the {held} bytes of the matrix and the cell IDs"
+        f"checking the cell IDs, an array of {400 * 160} bytes, beside the "
+        f"{held - 400 * 160} bytes of the matrix"
     )
     refusal = named_budget_runs(at_budget, held + check - 1, item=item)
     assert refusal.needed_bytes == held + check

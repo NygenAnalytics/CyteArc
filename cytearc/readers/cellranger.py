@@ -468,14 +468,15 @@ class CrReader(ABC):
         """Returns a list of names of the cells in the dataset."""
         return self._read_dataset("cell_names")
 
-    def _cell_names_source(self) -> Any:
-        """Return the selected cells' names, as a cell table's write reads them a block of rows at a time.
+    def _cell_names_source(self) -> tuple[np.ndarray, int]:
+        """Return the selected cells' names, which a cell table's write reads a block of rows at a time, and the bytes that the import holds for them.
 
-        This is an array that the reader keeps, or a source that reads them
-        from the file, so the write holds no copy of every name; a reader
-        that keeps neither returns them as a new array.
+        A reader that keeps an array of them returns it, which its arrays
+        count, and no bytes; this reader makes a new array of them, which
+        the import holds until the table is written.
         """
-        return np.asarray(self.cell_names())
+        names = np.asarray(self.cell_names())
+        return names, int(names.nbytes)
 
     def get_cell_columns(self) -> Iterator[tuple[str, np.ndarray]]:
         """Yield optional cell metadata columns supplied by the reader."""
@@ -771,21 +772,25 @@ class CrH5Reader(CrReader):
             vals = vals[self.validBarcodeIdx]
         return list(vals)
 
-    def _cell_names_source(self) -> Any:
-        """Return the selected barcodes as a source that reads them from the file a block at a time.
+    def _cell_names_source(self) -> tuple[np.ndarray, int]:
+        """Return the selected barcodes as the file holds them, bytes of one width, and the bytes that reading them holds.
 
-        Barcodes of variable length, which the file holds as objects, are
-        read whole into a new array instead.
+        Every barcode of the file is read, and a reader that keeps some of
+        them copies those, so the import counts both until the table is
+        written. Barcodes of variable length, which the file holds as
+        objects, are decoded into a new array instead.
         """
         dataset = self.grp[self.grpNames["cell_names"]]
         if np.dtype(dataset.dtype).kind != "S":
             return super()._cell_names_source()
-        assert self.validBarcodeIdx is not None
-        return _FileBarcodes(
-            dataset,
-            self.validBarcodeIdx,
-            f"{_H5_VALUES['cell_names']} must be UTF-8 text",
-            self._dataset_place("cell_names"),
+        selected = self.validBarcodeIdx
+        assert selected is not None
+        barcodes = np.asarray(dataset[:])
+        # The selected barcodes are increasing, so as many are all of them.
+        if selected.size == barcodes.size:
+            return barcodes, int(barcodes.nbytes)
+        return barcodes[selected], int(barcodes.nbytes) + int(
+            selected.size * barcodes.itemsize
         )
 
     def get_feature_columns(self) -> Iterator[tuple[str, np.ndarray]]:
@@ -930,105 +935,6 @@ class CrH5Reader(CrReader):
         """Closes file connection and removes any shuffled cells."""
         self._release_shuffled_rows()
         self.h5obj.close()
-
-
-# The barcodes that a read takes from the file at once, at most.
-_BARCODE_SLAB_ROWS = 65_536
-
-
-class _FileBarcodes:
-    """The barcodes of a 10x HDF5 file's selected cells, read from the file a block at a time.
-
-    Indexing by positions among the selected cells, an array or a slice,
-    reads those barcodes from the file in the file's order, a slab of it at
-    a time, and returns them in the positions' order as text as wide as the
-    longest selected barcode. A cell table's write reads them a block of
-    rows at a time, so no copy of every barcode is held. Construction
-    measures the barcodes, a slab at a time.
-
-    Attributes:
-        shape: The selected cells, as an array's shape.
-        dtype: Text as wide as the longest selected barcode.
-        rowReadBytes: The most that reading one barcode of a block holds,
-            with the text it returns, at any step of the read: its file row,
-            its place in the read and the file row in order, as int64; then
-            its bytes as the file holds them, beside the slab of the file
-            that they come from, with an index and the bytes of each barcode
-            taken from it; then its text as decoded; and last its text put
-            in order. Barcodes that are not ASCII are decoded through Python
-            bytes and strings, which are counted at the widest kind of
-            character.
-    """
-
-    def __init__(
-        self, dataset: h5py.Dataset, rows: np.ndarray, expectation: str, place: str
-    ) -> None:
-        self._dataset = dataset
-        self._rows = np.asarray(rows).astype(np.int64, copy=False)
-        self._expectation = expectation
-        self._place = place
-        self.shape = (int(self._rows.size),)
-        width = 0
-        self._ascii = True
-        for start in range(0, self.shape[0], _BARCODE_SLAB_ROWS):
-            raw = self._read_sorted(self._rows[start : start + _BARCODE_SLAB_ROWS])
-            if _is_ascii(raw):
-                width = max(width, int(np.strings.str_len(raw).max(initial=0)))
-            else:
-                self._ascii = False
-                texts = utf8_texts(raw, expectation, place)
-                width = max(width, max(map(len, texts), default=0))
-        self.dtype = np.dtype(f"U{max(1, width)}")
-        stored = self.dtype.itemsize
-        raw_bytes = int(np.dtype(dataset.dtype).itemsize)
-        # The place in the read, the bytes and the decoded text; bytes that
-        # are not ASCII become a Python bytes object, 33 bytes and their own,
-        # and a string, 60 bytes and four a character at most, each with a
-        # reference of 8.
-        decoding = 8 + raw_bytes + stored + (0 if self._ascii else 109 + 5 * raw_bytes)
-        self.rowReadBytes = max(24 + 3 * raw_bytes, decoding, 8 + 2 * stored)
-
-    def __len__(self) -> int:
-        return self.shape[0]
-
-    def _read_sorted(self, ordered: np.ndarray) -> np.ndarray:
-        """Return the barcodes of increasing file rows ``ordered``, reading the file a slab of at most as many rows at a time."""
-        raw = np.empty(ordered.size, dtype=self._dataset.dtype)
-        slab_rows = min(_BARCODE_SLAB_ROWS, int(ordered.size))
-        first = 0
-        while first < ordered.size:
-            start = int(ordered[first])
-            stop = start + slab_rows
-            last = int(np.searchsorted(ordered, stop, side="left"))
-            slab = self._dataset[start : min(stop, self._dataset.shape[0])]
-            raw[first:last] = slab[ordered[first:last] - start]
-            del slab
-            first = last
-        return raw
-
-    def __getitem__(self, positions: np.ndarray | slice) -> np.ndarray:
-        file_rows = self._rows[positions]
-        sorter = np.argsort(file_rows, kind="stable")
-        ordered = file_rows[sorter]
-        del file_rows
-        raw = self._read_sorted(ordered)
-        del ordered
-        text = (
-            raw.astype(self.dtype)
-            if self._ascii
-            else np.asarray(
-                utf8_texts(raw, self._expectation, self._place), dtype=self.dtype
-            )
-        )
-        del raw
-        placed = np.empty(text.shape, dtype=self.dtype)
-        placed[sorter] = text
-        return placed
-
-
-def _is_ascii(values: np.ndarray) -> bool:
-    """Return whether fixed-width bytes hold only ASCII characters."""
-    return int(np.ascontiguousarray(values).view(np.uint8).max(initial=0)) < 0x80
 
 
 def _selected_barcodes(

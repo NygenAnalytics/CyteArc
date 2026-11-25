@@ -17,6 +17,7 @@ from zarr.storage import LocalStore, MemoryStore
 
 from cytearc import DataStore
 from cytearc.readers import CSVReader, H5adReader
+from cytearc.readers.cellranger import CrReader
 from cytearc.readers._rds._types import RType
 from cytearc.readers.seurat import SeuratReader
 from cytearc.storage.artifacts import artifact_group
@@ -846,6 +847,9 @@ class _CountsReader:
 
     def cell_names(self) -> list[str]:
         return [f"c{index}" for index in range(self.nCells)]
+
+    # A cell table's write reads the names that the reader makes.
+    _cell_names_source = CrReader._cell_names_source
 
     def feature_ids(self, assay_name: str) -> list[str]:
         return [f"f{index}" for index in range(self.nFeatures)]

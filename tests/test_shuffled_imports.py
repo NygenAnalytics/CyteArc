@@ -1040,9 +1040,10 @@ def test_a_budget_without_room_for_the_shuffle_is_refused_before_it_runs(
     assert (refusal.needed_bytes, refusal.budget_bytes) == (needed, needed - 1)
     if kind.startswith("sparse"):
         matrices = "matrix" if kind == "sparse" else "matrices"
+        ids = 4 * len(f"cell-{_N_CELLS - 1}") * _N_CELLS
         assert refusal.item == (
-            f"checking the cell IDs beside the {held} bytes of the {matrices} and "
-            "the cell IDs"
+            f"checking the cell IDs, an array of {ids} bytes, beside the "
+            f"{held - ids} bytes of the {matrices}"
         )
     else:
         assert str(refusal) == shuffle_refusal(n_cells, held, needed - 1)
@@ -1495,60 +1496,54 @@ def _replace_barcodes(path: Path, barcodes: Any, **options: Any) -> None:
         h5["matrix"].create_dataset("barcodes", data=barcodes, **options)
 
 
-@pytest.mark.parametrize("slab_rows", [65_536, 7], ids=["one-slab", "slabs-of-7"])
 @pytest.mark.parametrize("cutoff", [False, True], ids=["filtered", "cutoff"])
-def test_a_10x_reader_reads_its_barcodes_a_block_at_a_time_in_any_order(
-    tmp_path, monkeypatch, cutoff, slab_rows
+def test_a_10x_reader_gives_its_kept_barcodes_as_the_file_holds_them(
+    tmp_path, cutoff
 ) -> None:
-    import cytearc.readers.cellranger as cellranger
+    from tests.memory_helpers import traced_charge
 
-    # Slabs of 7 rows make a read of scattered barcodes jump between them.
-    monkeypatch.setattr(cellranger, "_BARCODE_SLAB_ROWS", slab_rows)
     counts = _counts()
     path = _write_10x(tmp_path / "matrix.h5", counts)
     reader = CrH5Reader(str(path), is_filtered=not cutoff, filtering_cutoff=_CUTOFF)
     try:
-        source = reader._cell_names_source()
-        kept = _kept(counts, cutoff=cutoff)
-        expected = np.array([f"BC-{row}" for row in kept])
-        # Text as wide as the longest kept barcode.
-        assert (len(source), source.shape, source.dtype) == (
-            kept.size,
-            (kept.size,),
-            expected.dtype,
-        )
-        order = np.random.default_rng(3).permutation(kept.size)
-        np.testing.assert_array_equal(source[order], expected[order])
-        np.testing.assert_array_equal(source[5:40], expected[5:40])
-        np.testing.assert_array_equal(
-            source[order[::-1][:9]], expected[order[::-1][:9]]
-        )
-        assert source[order[:0]].shape == (0,)
+        read = traced_charge(lambda _ledger: reader._cell_names_source()).held
+        names, held = reader._cell_names_source()
     finally:
         reader.close()
+    kept = _kept(counts, cutoff=cutoff)
+    # Bytes of the file's width, six for BC-156, of the kept barcodes.
+    np.testing.assert_array_equal(
+        names, np.array([f"BC-{row}".encode() for row in kept], dtype="S6")
+    )
+    # Every barcode of the file is read, and a cutoff's kept ones copied
+    # beside them.
+    assert held == 6 * _N_CELLS + (6 * kept.size if cutoff else 0)
+    # Within the few kilobytes of the objects of h5py's read.
+    assert 6 * _N_CELLS <= read <= held + 16 * 1024
 
 
-def test_a_10x_reader_decodes_barcodes_that_are_not_ascii(tmp_path) -> None:
+def test_a_10x_import_stores_barcodes_that_are_not_ascii_as_text(tmp_path) -> None:
     counts = _counts()
     path = _write_10x(tmp_path / "matrix.h5", counts)
     texts = [f"BC-é{row}" for row in range(_N_CELLS)]
     _replace_barcodes(path, np.array([text.encode() for text in texts]))
     reader = CrH5Reader(str(path))
     try:
-        source = reader._cell_names_source()
-        # Text of 7 characters at the longest, BC-é156, in 8 bytes of UTF-8.
-        assert source.dtype == np.dtype("U7")
-        order = np.random.default_rng(4).permutation(_N_CELLS)
-        np.testing.assert_array_equal(source[order], np.array(texts)[order])
-        # A barcode's read holds its place, its 8 bytes and its text, 28
-        # bytes, beside a Python bytes object and a string of it, 33 and 60
-        # bytes at most with four a character, each with a reference of 8.
-        assert source.rowReadBytes == 8 + 8 + 28 + (33 + 8 + 8) + (60 + 4 * 8 + 8)
+        names, held = reader._cell_names_source()
     finally:
         reader.close()
+    # The file's bytes, 8 for BC-é156, which the cell table decodes.
+    assert (names.dtype, held) == (np.dtype("S8"), 8 * _N_CELLS)
+    run = _cr_import(lambda: CrH5Reader(str(path), temp_dir=str(tmp_path)))
+    run(tmp_path / "store.zarr", {"shuffle_cells": True})
+    table = zarr.open_group(str(tmp_path / "store.zarr"), mode="r")["cellData"]
+    order = table["sourceRow"][:]
+    assert table["ids"].dtype == np.dtype("U7")
+    assert table["ids"][:].tolist() == [texts[row] for row in order]
+    assert table["names"][:].tolist() == [texts[row] for row in order]
 
 
-def test_a_10x_reader_of_barcodes_of_variable_length_reads_them_whole(
+def test_a_10x_reader_of_barcodes_of_variable_length_decodes_them_into_a_new_array(
     tmp_path,
 ) -> None:
     counts = _counts()
@@ -1557,42 +1552,12 @@ def test_a_10x_reader_of_barcodes_of_variable_length_reads_them_whole(
     _replace_barcodes(path, texts, dtype=h5py.string_dtype())
     reader = CrH5Reader(str(path))
     try:
-        source = reader._cell_names_source()
-        assert isinstance(source, np.ndarray)
-        np.testing.assert_array_equal(source, np.array(texts))
+        names, held = reader._cell_names_source()
     finally:
         reader.close()
-
-
-def test_a_10x_barcode_read_holds_what_its_source_states(tmp_path) -> None:
-    from tests.memory_helpers import traced_charge
-
-    # 60,000 barcodes of 16 bases and -1, 18 bytes each as the file holds
-    # them and 72 as text; a read of 20,000 scattered ones holds their text
-    # twice, as decoded and as put in order, beside their place in the
-    # read, 8 bytes each: more than their bytes beside their file rows and
-    # places, and the slab of the file that each comes from.
-    n_barcodes, n_read = 60_000, 20_000
-    counts = np.zeros((n_barcodes, 2), dtype=np.int64)
-    counts[:, 0] = 1
-    path = _write_10x(tmp_path / "matrix.h5", counts)
-    bases = np.frombuffer(b"ACGT", dtype="S1")
-    codes = np.random.default_rng(2).integers(0, 4, size=(n_barcodes, 16))
-    barcodes = np.char.add(bases[codes].view("S16").ravel(), b"-1")
-    _replace_barcodes(path, barcodes, compression="gzip", chunks=(4_096,))
-    reader = CrH5Reader(str(path))
-    try:
-        source = reader._cell_names_source()
-        assert source.rowReadBytes == 8 + 2 * 72
-        positions = np.random.default_rng(3).permutation(n_barcodes)[:n_read]
-        read = traced_charge(lambda _ledger: source[positions]).held
-        np.testing.assert_array_equal(
-            source[positions], barcodes[positions].astype("U18")
-        )
-    finally:
-        reader.close()
-    # Within the few kilobytes of the objects of h5py's reads.
-    assert 2 * 72 * n_read <= read <= n_read * source.rowReadBytes + 64 * 1024
+    np.testing.assert_array_equal(names, np.array(texts))
+    # Text of 4 bytes a character of BC-156, which the import holds.
+    assert held == names.nbytes == 4 * 6 * _N_CELLS
 
 
 def _recorded_checks(monkeypatch) -> list[tuple[str, int]]:
@@ -1651,18 +1616,22 @@ def test_an_import_charges_its_cell_table_write_beside_what_it_holds(
     # The shuffled cells' row pointers, 8 bytes a cell and one.
     pointers = 8 * (n_cells + 1) if shuffle_cells else 0
     if kind.startswith("10x"):
-        # The file's barcodes are read a block at a time: a barcode holds its
-        # place in the read, 8 bytes, and its text twice, as decoded and as
-        # put in order, more than its bytes and its file row and place in
-        # the read and in the file's slab; the stored text is kept as Zarr
-        # writes it.
-        table = max(n_cells * (8 + 2 * stored), write + n_cells * stored)
+        # The import reads every barcode of the file, bytes of six characters
+        # at the longest, beside a copy of a cutoff's kept ones. A block of
+        # them, gathered in a shuffled import's order, becomes text twice, as
+        # made and as stored, and the stored text is kept as Zarr writes it.
+        gather = 6 if shuffle_cells else 0
+        table = max(n_cells * (gather + 2 * stored), write + n_cells * stored)
+        names = 6 * _N_CELLS + (6 * n_cells if kind.endswith("cutoff") else 0)
         arrays = _held_before_the_shuffle(kind) + pointers
         item = "the cell table's IDs and names beside " + (
-            f"the {order} bytes of its cell order and " if shuffle_cells else ""
+            f"the {order} bytes of its cell order, " if shuffle_cells else ""
         )
-        item += f"the {arrays} bytes of the reader's arrays"
-        held = order + arrays
+        item += (
+            f"the {arrays} bytes of the reader's arrays and the {names} bytes of "
+            "the cells' names read for it"
+        )
+        held = order + arrays + names
     elif kind.startswith("mtx"):
         # The reader's barcodes are Python strings: a gathered block holds a
         # reference to each and its text twice, as made and as stored.
@@ -1756,24 +1725,32 @@ def test_an_import_of_wide_ids_names_the_budget_that_writes_its_cell_table(
         # pointers and the cumulative values, 8 bytes each, and a shuffle's
         # row pointers of the shuffled cells beside its order, 8 bytes a cell.
         arrays = 8 * _N_CELLS + 2 * 8 * (_N_CELLS + 1)
+        # The import reads the file's barcodes, bytes of 1,999 characters at
+        # the longest.
+        names = _N_CELLS * 1_999
         if shuffle_cells:
             arrays += 8 * (_N_CELLS + 1)
             item = (
                 f"the cell table's IDs and names beside the {8 * _N_CELLS} bytes "
-                f"of its cell order and the {arrays} bytes of the reader's arrays"
+                f"of its cell order, the {arrays} bytes of the reader's arrays "
+                f"and the {names} bytes of the cells' names read for it"
             )
-            held = 8 * _N_CELLS + arrays
+            held = 8 * _N_CELLS + arrays + names
         else:
             item = (
                 "the cell table's IDs and names beside the "
-                f"{arrays} bytes of the reader's arrays"
+                f"{arrays} bytes of the reader's arrays and the {names} bytes of "
+                "the cells' names read for it"
             )
-            held = arrays
-        # The stored text that Zarr writes beside the chunk's buffer holds
-        # more than reading a barcode from the file, which holds its text
-        # twice, as decoded and put in order, and its place in the read.
-        assert _N_CELLS * (8 + 2 * _WIDE_STORED) < _encoded(chunk) + chunk
-        table = _encoded(chunk) + chunk
+            held = arrays + names
+        # The barcodes, gathered in a shuffled import's order, become text
+        # twice, as made and as stored, which outweighs the stored text that
+        # Zarr writes beside the chunk's buffer; in the file's order Zarr's
+        # write outweighs the two copies.
+        gather = 1_999 if shuffle_cells else 0
+        made = _N_CELLS * (gather + 2 * _WIDE_STORED)
+        assert (made > _encoded(chunk) + chunk) == shuffle_cells
+        table = max(made, _encoded(chunk) + chunk)
     else:
         # The reader's IDs and a shuffle's order, the shuffled rows' pointers
         # and its gathered IDs, which the file's order lends to Zarr instead.

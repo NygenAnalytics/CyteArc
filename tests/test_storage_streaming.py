@@ -234,6 +234,23 @@ _CELL_ID_KINDS = {
     "numbers": np.arange(300_000, dtype=np.int64),
     "empty": np.array([], dtype="U3"),
     "empty-objects": np.array([], dtype=object),
+    # Short bytes in a wider dtype are as wide as the longest.
+    "padded-bytes": np.array([f"c{row}".encode() for row in range(1_000)], dtype="S20"),
+    # Python strings count their trailing NULs toward the width, U3; text
+    # made from bytes or beside None does not, U2 and U1.
+    "objects-with-trailing-nul": np.array(["ab\x00", "c"] * 500, dtype=object),
+    "bytes-objects-with-trailing-nul": np.array([b"ab\x00", b"c"] * 500, dtype=object),
+    "utf8-bytes-objects-with-trailing-nul": np.array(
+        ["é\x00".encode(), b"c"] * 500, dtype=object
+    ),
+    "objects-with-none-and-trailing-nul": np.array(
+        ["ab\x00", None] * 500, dtype=object
+    ),
+    # A None in the last block makes the first block's text without its
+    # trailing NUL, U2, as a whole write of the column makes it.
+    "trailing-nul-blocks-before-none": np.array(
+        ["ab\x00"] + ["x"] * 250_000 + [None], dtype=object
+    ),
 }
 
 
@@ -243,6 +260,7 @@ _CELL_ID_KINDS = {
 def test_a_cell_table_written_a_block_at_a_time_stores_what_a_whole_write_stored(
     kind: str, ordered: bool, threads: int
 ) -> None:
+    from cytearc.storage.arrays import text_value
     from cytearc.storage.async_execution import register_store_threads
     from cytearc.storage.schema import create_cell_data
 
@@ -261,11 +279,12 @@ def test_a_cell_table_written_a_block_at_a_time_stores_what_a_whole_write_stored
     assert sorted(block_store._store_dict) == sorted(whole_store._store_dict)
     for key, value in whole_store._store_dict.items():
         assert block_store._store_dict[key].to_bytes() == value.to_bytes(), key
-    # Text is stored decoded, row r holding the ID of the order's row r.
+    # Text is stored decoded without trailing NULs, row r holding the ID of
+    # the order's row r.
     if len(ids) and kind != "numbers":
         row = len(ids) - 1
         source = ids[row if order is None else order[row]]
-        expected = source.decode() if isinstance(source, bytes) else str(source)
+        expected = text_value(source).rstrip("\x00")
         assert blocks["ids"][row] == expected == blocks["names"][row]
     assert blocks["I"][:].all()
 
@@ -287,6 +306,36 @@ def test_a_cell_table_reads_names_apart_from_ids_and_refuses_misaligned_ones() -
             create_cell_data(root, "w2", ids, ids, order=order)
     # Nothing was written for the refused tables.
     assert "w1" not in root and "w2" not in root
+
+
+@pytest.mark.parametrize(
+    ("ids", "names", "column"),
+    [
+        (np.array([b"a", b"\xff"]), None, "ids"),
+        (np.array(["a", b"\xff"], dtype=object), None, "ids"),
+        (np.array(["a", "b"]), np.array([b"x", b"\xc3"]), "names"),
+    ],
+    ids=["bytes", "objects", "names"],
+)
+def test_a_cell_table_refuses_text_that_is_not_utf8_naming_its_column(
+    ids: np.ndarray, names: np.ndarray | None, column: str
+) -> None:
+    from cytearc.storage.schema import cell_table_write_bytes, create_cell_data
+
+    names = ids if names is None else names
+    message = (
+        f"Column '{column}' holds text that is not valid UTF-8; pass str values "
+        "or UTF-8 encoded bytes"
+    )
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    for refused in (
+        lambda: cell_table_write_bytes(ids, names, 1),
+        lambda: create_cell_data(root, None, ids, names),
+    ):
+        with pytest.raises(ValueError) as caught:
+            refused()
+        assert str(caught.value) == message
+        assert isinstance(caught.value.__cause__, UnicodeDecodeError)
 
 
 def _astral_ids(n_rows: int, width: int) -> np.ndarray:

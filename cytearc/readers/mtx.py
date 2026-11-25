@@ -2319,10 +2319,10 @@ class MtxReader(CrReader):
             return self._shuffled_staging_bytes(batch_size)
         return self._engine.producer_staging_bytes(batch_size, lines_in_mem)
 
-    def _cell_names_source(self) -> np.ndarray:
-        """Return the kept cells' barcodes, the array of Python strings that the reader keeps."""
+    def _cell_names_source(self) -> tuple[np.ndarray, int]:
+        """Return the kept cells' barcodes, the array of Python strings that the reader keeps and its arrays count, with no bytes beside."""
         names: np.ndarray = self._engine._cellNames
-        return names
+        return names, 0
 
     def get_cell_columns(self) -> Iterator[tuple[str, np.ndarray]]:
         yield from self._engine.cell_columns()

@@ -273,15 +273,9 @@ class CrToZarr:
                 self._admit_reader_preparation(self._count_import_resident_bytes())
             self.policy = self._fit_count_layout(storage_dtypes, layout_request)
             # The reader's names of the cells, which the cell table reads a
-            # block at a time in the order of the cells; a reader without a
-            # source of them gives them as a list.
-            names_source = getattr(self.cr, "_cell_names_source", None)
-            cell_names = (
-                names_source()
-                if callable(names_source)
-                else np.asarray(self.cr.cell_names())
-            )
-            self._admit_cell_table(cell_names)
+            # block at a time in the order of the cells.
+            cell_names, names_bytes = self.cr._cell_names_source()
+            self._admit_cell_table(cell_names, names_bytes)
             # The destination must be empty, or with overwrite an unprepared store.
             self.z = create_destination(
                 zarr_loc, overwrite=overwrite, storage_options=storage_options
@@ -399,12 +393,12 @@ class CrToZarr:
             + (0 if self._cellOrder is None else int(self._cellOrder.nbytes))
         )
 
-    def _admit_cell_table(self, cell_names: Any) -> None:
+    def _admit_cell_table(self, cell_names: np.ndarray, names_bytes: int) -> None:
         """Refuse a budget that cannot write the cell table's IDs and names beside what the import holds.
 
         The table reads the reader's names of the cells a block at a time,
-        in a shuffled import's order, beside the reader's arrays and the
-        order.
+        in a shuffled import's order, beside the reader's arrays, the order
+        and the ``names_bytes`` that the import holds for the names.
 
         Raises:
             MemoryBudgetError: Naming the budget that holds the write beside
@@ -420,9 +414,12 @@ class CrToZarr:
             beside.append(f"the {order} bytes of its cell order")
         if arrays:
             beside.append(f"the {arrays} bytes of the reader's arrays")
+        if names_bytes:
+            beside.append(f"the {names_bytes} bytes of the cells' names read for it")
         item = "the cell table's IDs and names"
         if beside:
-            item += f" beside {' and '.join(beside)}"
+            item += " beside " + ", ".join(beside[:-1])
+            item += f"{' and ' if len(beside) > 1 else ''}{beside[-1]}"
         MemoryLedger(
             int(self.resources.memoryBytes),
             f"Importing the counts of {self.cr.nCells} cells",
@@ -430,6 +427,7 @@ class CrToZarr:
             item,
             order
             + arrays
+            + names_bytes
             + cell_table_write_bytes(
                 cell_names, cell_names, self.resources.workers, order=self._cellOrder
             ),
@@ -519,21 +517,28 @@ class CrToZarr:
             storage_dtypes.values()
         )
         budget = int(self.resources.memoryBytes)
-        # A shuffled import's counts write reads the buckets that its spill
-        # sized from the budget, so the fit checks each other budget with the
-        # buckets that a spill within it would make.
-        staging_within = (
-            getattr(self.cr, "_shuffled_staging_within", None)
-            if self._shuffledStore is not None
-            else None
-        )
+        shuffled = self._shuffledStore is not None
 
         def admit_counts(specs: Any, resources: Any) -> object:
             staging = staging_bytes
-            if callable(staging_within) and int(resources.memoryBytes) != budget:
-                staging = self._staging_within(
-                    staging_within, int(resources.memoryBytes)
-                )
+            within = int(resources.memoryBytes)
+            if shuffled and within != budget:
+                # A shuffled import's counts write reads the buckets that its
+                # spill sized from the budget, so each other budget is checked
+                # with the buckets of a spill within what it leaves beside
+                # what the import then holds.
+                try:
+                    staging = self.cr._shuffled_staging_within(
+                        within - self._spillBeside
+                    )
+                except MemoryBudgetError as error:
+                    raise memory_refusal(
+                        f"Importing the counts of {self.cr.nCells} cells",
+                        f"{error.item} beside the {self._spillBeside} bytes that "
+                        "the import holds",
+                        self._spillBeside + error.needed_bytes,
+                        within,
+                    ) from error
             return sparse_counts_admission(
                 nRows=self.cr.nCells,
                 maxWindowNnz=self.cr.max_window_nnz,
@@ -555,26 +560,6 @@ class CrToZarr:
             requested=requested,
             countsTResidentBytes=self._counts_t_resident_bytes(),
         )
-
-    def _staging_within(
-        self, staging_within: Callable[[int], Callable[[int], int]], budget: int
-    ) -> Callable[[int], int]:
-        """Return the staging of the counts write that a shuffled import of ``budget`` would read, its spill planned within what the budget leaves.
-
-        Raises:
-            MemoryBudgetError: If ``budget`` cannot hold the spill beside what
-                the import holds then, naming the budget that holds both.
-        """
-        try:
-            return staging_within(budget - self._spillBeside)
-        except MemoryBudgetError as error:
-            raise memory_refusal(
-                f"Importing the counts of {self.cr.nCells} cells",
-                f"{error.item} beside the {self._spillBeside} bytes that the "
-                "import holds",
-                self._spillBeside + error.needed_bytes,
-                budget,
-            ) from error
 
     def _write_reader_metadata(
         self,

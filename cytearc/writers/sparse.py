@@ -291,10 +291,11 @@ class SparseToZarr:
             integer.
         FileExistsError: If ``zarr_loc`` is not empty and may not be replaced.
         MemoryBudgetError: If ``mem_budget`` cannot hold the check of the
-            cell or feature IDs, which holds their text as Python strings and
-            twice as NumPy text, the shuffle of the cells when
-            ``shuffle_cells`` is True, or the write of the cell table's IDs
-            and names, a block at a time, each beside the matrices and the
+            cell or feature IDs, which checks a copy of their NumPy text and
+            first makes IDs that are not unicode text Python strings and then
+            NumPy text, the shuffle of the cells when ``shuffle_cells`` is
+            True, or the write of the cell table's IDs and names, a block at
+            a time, each beside the matrices and the import's array of the
             cell IDs. Each is refused before it runs and before the
             destination exists, naming the budget that holds it.
 
@@ -398,30 +399,37 @@ class SparseToZarr:
                     "ERROR: Number of feature ids are not same as number of "
                     f"features in the matrix{where}"
                 )
-        # Checking the IDs holds their text as Python strings and twice as
-        # NumPy text, beside the matrices and the import's copy of the cell
-        # IDs; a budget that cannot hold that fails before the check runs.
+        # Checking the IDs holds a copy of their NumPy text, and first makes
+        # IDs that are not unicode text Python strings and then NumPy text,
+        # beside the matrices and the import's array of the cell IDs; a
+        # budget that cannot hold that fails before the check runs.
         doing = f"Importing the sparse {'matrix' if single else 'matrices'}"
         matrices = sum(sparse_matrix_bytes(assay.matrix) for assay in assays)
-        held_ids = matrices + int(cell_ids.nbytes)
-        beside = (
-            f"beside the {held_ids} bytes of the "
-            f"{'matrix' if single else 'matrices'} and the cell IDs"
+        id_bytes = int(cell_ids.nbytes)
+        held_ids = matrices + id_bytes
+        of_matrices = (
+            f"the {matrices} bytes of the {'matrix' if single else 'matrices'}"
         )
-        checks = [("Cell IDs", "the cell IDs", cell_ids)] + [
+        checks = [
+            (
+                "Cell IDs",
+                f"checking the cell IDs, an array of {id_bytes} bytes, beside "
+                f"{of_matrices}",
+                cell_ids,
+            )
+        ] + [
             (
                 "Feature IDs" if single else f"Feature IDs of assay {assay.name!r}",
-                "the feature IDs"
-                if single
-                else f"the feature IDs of assay {assay.name!r}",
+                "checking the feature IDs"
+                + ("" if single else f" of assay {assay.name!r}")
+                + f" beside {of_matrices} and the {id_bytes} bytes of the cell IDs",
                 assay.feature_ids,
             )
             for assay in assays
         ]
         for label, item, identifiers in checks:
             MemoryLedger(int(self.resources.memoryBytes), doing).refuse_beyond(
-                f"checking {item} {beside}",
-                held_ids + _identifier_check_bytes(identifiers),
+                item, held_ids + _identifier_check_bytes(identifiers)
             )
             _identifiers(identifiers, label)
         # A destination that would be refused fails before the passes over

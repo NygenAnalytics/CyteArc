@@ -724,62 +724,69 @@ def _create_empty_columns(
             column[:] = True
 
 
-def _cell_text_source(values: Any) -> Any:
-    """Return cell IDs or names as an array, or as the source of a file's text that they are."""
-    if isinstance(values, np.ndarray) or (
-        hasattr(values, "dtype")
-        and hasattr(values, "shape")
-        and hasattr(values, "rowReadBytes")
-    ):
-        return values
-    return np.asarray(values)
+def _stored_cell_dtype(
+    values: np.ndarray, threads: int, *, name: str
+) -> tuple[np.dtype[Any], bool]:
+    """Return the dtype that a cell table stores ``values`` in, as :func:`encode_metadata_values` gives the whole column, and whether making a block of them text takes Python strings.
 
+    Unicode text keeps its width, and numbers their dtype. Objects that hold
+    no byte string or None are as wide as the longest text of one, made in
+    turn. Byte strings, and objects that hold one or None, are made text a
+    block at a time, as :func:`~cytearc.storage.arrays.text_array_and_python`
+    makes them, and are as wide as the longest text without its trailing
+    NULs, one character at least.
 
-def _stored_cell_dtype(values: Any, block_rows: int) -> tuple[np.dtype[Any], bool]:
-    """Return the dtype that a cell table stores ``values`` in, as :func:`encode_metadata_values` gives it, and whether making them text takes Python strings.
-
-    Unicode text keeps its width, and numbers their dtype. Byte strings
-    and objects are as wide as their longest text, at least one character,
-    measured a block of rows at a time, as :func:`~cytearc.storage.arrays.text_needs_python`
-    finds how they become text: ASCII bytes and Python strings by their
-    lengths, and other values by their text, one at a time.
+    Raises:
+        ValueError: If byte strings are not valid UTF-8, naming the column
+            ``name``.
     """
-    from .arrays import _text_width, text_needs_python
+    from .arrays import (
+        _text_width,
+        decodes_metadata_text,
+        invalid_utf8_refusal,
+        text_array_and_python,
+        text_value,
+    )
 
     dtype: np.dtype[Any] = np.dtype(values.dtype)
     if dtype.kind not in "SO":
         return dtype, False
+    if not decodes_metadata_text(values):
+        return np.dtype(f"U{max(1, _text_width(values))}"), False
+    n_rows = len(values)
     width, python = 0, False
-    for start in range(0, len(values), block_rows):
-        block = np.asarray(values[start : start + block_rows])
-        if text_needs_python(block):
-            python = True
-            block_width = _text_width(block)
-        elif block.dtype.kind == "S":
-            block_width = int(np.strings.str_len(block).max(initial=0))
-        else:
-            block_width = max(map(len, block.flat), default=0)
-        width = max(width, block_width)
+    try:
+        # Decoding adds no characters, so blocks of text as wide as the bytes,
+        # or as each value's text, are no longer than the write's blocks.
+        widest = (
+            dtype.itemsize
+            if dtype.kind == "S"
+            else max((len(text_value(value)) for value in values.flat), default=0)
+        )
+        rows = column_write_rows(column_chunk_rows(n_rows, 4 * max(1, widest)), threads)
+        for start in range(0, n_rows, rows):
+            text, made = text_array_and_python(values[start : start + rows])
+            python = python or made
+            width = max(width, _text_width(text))
+            del text
+    except UnicodeDecodeError as exc:
+        raise invalid_utf8_refusal(name) from exc
     return np.dtype(f"U{max(1, width)}"), python
 
 
 def _cell_text_block_bytes(
-    values: Any, dtype: np.dtype[Any], *, gathered: bool, python: bool
+    values: np.ndarray, dtype: np.dtype[Any], *, gathered: bool, python: bool
 ) -> tuple[int, int]:
     """Return what one row of ``values`` holds in a block of a cell table's write: as it is read and made the stored text, and as it is written.
 
-    A source of a file's text states what reading a row holds, and returns
-    the stored text. An array gathered in an order copies its rows, and one
-    in place lends them. Byte strings and objects become text of their
-    block's width, measured with the length of each, and then of the
-    column's, two copies at once; with ``python`` they are made Python
-    strings first, each with a reference and up to 60 bytes and four a
-    character, beside objects' bytes as NumPy bytes. Only the stored text is
-    kept while Zarr writes it.
+    An array gathered in an order copies its rows, and one in place lends
+    them. Byte strings and objects become text of their block's width,
+    measured with the length of each, and then of the column's, two copies
+    at once; with ``python`` they are made Python strings first, each with
+    a reference and up to 60 bytes and four a character, beside objects'
+    bytes as NumPy bytes. Only the stored text is kept while Zarr writes
+    it.
     """
-    read = getattr(values, "rowReadBytes", None)
-    if read is not None and not isinstance(values, np.ndarray):
-        return int(read), dtype.itemsize
     source = np.dtype(values.dtype)
     gather = source.itemsize if gathered else 0
     if source.kind not in "SO":
@@ -795,9 +802,8 @@ def _cell_column_phases(
     """Return each text source of a cell table with its stored dtype, whether its text takes Python strings, its chunk rows and its block rows."""
     phases = []
     for names, values in columns:
-        # A first, rough block measures the text, then the stored width
-        # sets the chunk.
-        dtype, python = _stored_cell_dtype(values, column_write_rows(1 << 16, threads))
+        # The stored width sets the chunk.
+        dtype, python = _stored_cell_dtype(values, threads, name=names[0])
         rows = column_chunk_rows(n_rows, max(1, dtype.itemsize))
         phases.append(
             (names, values, dtype, python, rows, column_write_rows(rows, threads))
@@ -808,10 +814,10 @@ def _cell_column_phases(
 def _cell_columns(ids: Any, names: Any) -> list[tuple[tuple[str, ...], Any]]:
     """Return the text columns of a cell table by source: names that are the IDs are read once for both."""
     same = names is ids
-    ids = _cell_text_source(ids)
+    ids = np.asarray(ids)
     if same:
         return [(("ids", "names"), ids)]
-    names = _cell_text_source(names)
+    names = np.asarray(names)
     if len(names) != len(ids):
         raise ValueError(
             f"A cell table needs one name for each of its {len(ids)} cells; "
@@ -851,6 +857,9 @@ def cell_table_write_bytes(
         threads: The threads that the store encodes on, such as the
             ``nthreads`` that a writer registers for it.
         order: The order of the cells that the table stores, or None.
+
+    Raises:
+        ValueError: As :func:`create_cell_data` refuses its arguments.
     """
     from .arrays import column_write_bytes
 
@@ -899,8 +908,7 @@ def create_cell_data(
         root: The store's root group.
         workspace: The workspace of the table, or None for the root's.
         ids: Each cell's ID: an array, or values that ``np.asarray`` makes
-            one, or a source of a file's text that has ``shape``, ``dtype``
-            and ``rowReadBytes`` and returns the text of an array of its rows.
+            one.
         names: Each cell's name, of the same kinds.
         profile: Zarr encoding profile. When None, chosen from the store.
         order: Row ``r`` of the table holds ``ids[order[r]]`` and
@@ -911,8 +919,9 @@ def create_cell_data(
         The table's group.
 
     Raises:
-        ValueError: If ``names`` and ``ids`` differ in length, or ``order``
-            is not one integer row for each cell.
+        ValueError: If ``names`` and ``ids`` differ in length, ``order``
+            is not one integer row for each cell, or byte strings are not
+            valid UTF-8, naming the column.
     """
     from .async_execution import store_codec_threads
 

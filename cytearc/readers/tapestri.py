@@ -603,9 +603,9 @@ class TapestriReader(CrReader):
             + (self.nCells + 1) * np.dtype(np.int64).itemsize
         )
 
-    def _cell_names_source(self) -> np.ndarray:
-        """Return the cells' IDs, the array of Python strings that the reader keeps."""
-        return self._cells.ids
+    def _cell_names_source(self) -> tuple[np.ndarray, int]:
+        """Return the cells' IDs, the array of Python strings that the reader keeps and its arrays count, with no bytes beside."""
+        return self._cells.ids, 0
 
     def get_cell_columns(self) -> Iterator[tuple[str, np.ndarray]]:
         """Each cell's sample and, with DNA variants, its ``filtered`` flag."""

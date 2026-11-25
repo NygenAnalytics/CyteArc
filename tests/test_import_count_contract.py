@@ -1265,7 +1265,7 @@ def test_sparse_writer_refuses_a_matrix_larger_than_mem_budget(tmp_path):
         _writer("sparse", matrix, str(destination), mem_budget=held // 2, nthreads=1)
     assert str(refused.value) == (
         f"Importing the sparse matrix holds about {needed} bytes for checking the "
-        f"cell IDs beside the {held + ids} bytes of the matrix and the cell IDs, "
+        f"cell IDs, an array of {ids} bytes, beside the {held} bytes of the matrix, "
         f"more than the memory budget of {held // 2} bytes. Raise mem_budget to at "
         f"least {needed} bytes."
     )
