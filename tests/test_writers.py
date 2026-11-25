@@ -1640,15 +1640,14 @@ def test_dense_h5ad_reader_processes_are_charged_their_batch_and_a_band_of_every
 
 
 def test_a_dense_h5ad_reader_process_holds_no_more_than_its_charge(tmp_path):
-    import gc
     import threading
-    import tracemalloc
     from multiprocessing.reduction import ForkingPickler
 
     from cytearc.readers import H5adReader
     from cytearc.storage.layout import array_shard_rows
     from cytearc.writers import H5adToZarr
     from cytearc.writers import h5ad as h5ad_writer
+    from tests.memory_helpers import traced_charge
 
     n_cells, n_feats = 20_000, 64
     rng = np.random.default_rng(6)
@@ -1683,11 +1682,11 @@ def test_a_dense_h5ad_reader_process_holds_no_more_than_its_charge(tmp_path):
         # rows that cross every band boundary.
         assert counts.dtype == np.uint8 and array_shard_rows(counts) == 5_000
         charge = writer._dense_producer_bytes(300) + 5_000 * n_feats
-        gc.collect()
-        tracemalloc.start()
-        try:
-            before, _ = tracemalloc.get_traced_memory()
-            h5ad_writer._read_dense_h5ad_process_window(
+        # The window runs once untraced first, so that the traced run makes no
+        # first call: under coverage, a first call allocates coverage's records
+        # inside the trace, which an import's reader process does not hold.
+        held = traced_charge(
+            lambda _ledger: h5ad_writer._read_dense_h5ad_process_window(
                 reader._clone_kwargs(),
                 300,
                 0,
@@ -1698,16 +1697,14 @@ def test_a_dense_h5ad_reader_process_holds_no_more_than_its_charge(tmp_path):
                 threading.Event(),
                 {},
             )
-            _, peak = tracemalloc.get_traced_memory()
-        finally:
-            tracemalloc.stop()
+        ).held
     finally:
         reader.close()
 
     # The process holds its batch and the band it fills, which its admission
     # charges, beside a few kilobytes of the objects of its reader; the band
     # of 320,000 bytes that it sent last is freed before it makes the next.
-    assert peak - before <= charge + 64 * 1024
+    assert held <= charge + 64 * 1024
 
 
 @pytest.mark.parametrize("encoding", ["csr", "dense"])

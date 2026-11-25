@@ -126,12 +126,16 @@ def traced_charge(call: Callable[[Any], Any], runs: int = 1) -> TracedCharge:
     """Run ``call(ledger)`` once untraced, then ``runs`` times traced after a full collection each, against a :func:`recording_ledger`, and return the run that held the least.
 
     The untraced run warms what a first call allocates once, such as
-    imports and Zarr's objects. A traced run can also hold a block that the
-    call does not make for itself: the interpreter's table of interned
-    strings resizes when it fills, as pathlib's interning of the paths that
-    Zarr's local store reads fills it, which one of five traced reads of
-    1,000 bands held as a block of 3.84 MB. The least of a few runs leaves
-    such a block out.
+    imports, Zarr's objects and coverage's records. Coverage, measuring
+    through ``sys.monitoring`` as CI's Python 3.14 job does, records each
+    function at its first call in a dict whose table doubles when it fills;
+    a traced dense reader process whose pipe end's first call filled it held
+    the new table, 1.31 MB, beside its own 0.45 MB. A traced run can also
+    hold a block that the call does not make for itself: the interpreter's
+    table of interned strings resizes when it fills, as pathlib's interning
+    of the paths that Zarr's local store reads fills it, which one of five
+    traced reads of 1,000 bands held as a block of 3.84 MB. The least of a
+    few runs leaves such a block out.
     """
     import gc
     import tracemalloc
@@ -348,13 +352,20 @@ class TracedPipeEnd:
     keeps a view of the buffer, which ``Connection.send_bytes`` writes to the
     pipe from the buffer itself. ``held`` records for each send the most that
     tracemalloc saw allocated beside what was allocated before it; tracing
-    must be on.
+    must be on. Make it before tracing starts: it sends a message and a
+    buffer untraced as it is made, and drops them, so that no traced send
+    makes a first call, which under coverage allocates records inside the
+    trace, as :func:`traced_charge` describes.
     """
 
     def __init__(self) -> None:
         self.sent: list[tuple[str, Any]] = []
         self.held: list[int] = []
         self.closed = False
+        self.send(None)
+        self.send_bytes(b"")
+        self.sent.clear()
+        self.held.clear()
 
     def _traced(self, form: str, send: Callable[[], Any]) -> None:
         import tracemalloc

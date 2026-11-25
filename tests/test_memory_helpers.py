@@ -1,8 +1,8 @@
-"""The helper that reads the budget a memory refusal names."""
+"""The helpers that read the budget a memory refusal names and trace what a call or a pipe end holds."""
 
 import pytest
 
-from tests.memory_helpers import named_budget
+from tests.memory_helpers import TracedPipeEnd, named_budget, traced_charge
 
 
 def test_named_budget_reads_the_budget_that_a_refusal_closes_with() -> None:
@@ -47,3 +47,58 @@ def test_named_budget_refuses_a_refusal_that_names_no_budget_it_holds(
 ) -> None:
     with pytest.raises(AssertionError):
         named_budget(MemoryError(message))
+
+
+def test_traced_charge_leaves_out_what_only_a_first_call_allocates() -> None:
+    kept: list[bytearray] = []
+
+    def call(_ledger: object) -> None:
+        # The first call keeps 4 MB, as a cache or coverage's record of a
+        # function would; every call holds 1 MB while it runs.
+        if not kept:
+            kept.append(bytearray(4_000_000))
+        held = bytearray(1_000_000)
+        del held
+
+    traced = traced_charge(call)
+
+    assert len(kept) == 1
+    assert 1_000_000 <= traced.held < 2_000_000
+
+
+def test_a_traced_pipe_end_makes_no_first_call_in_a_traced_send() -> None:
+    import sys
+    import tracemalloc
+
+    # A monitoring tool of its own sees each function that starts to run.
+    monitoring = sys.monitoring
+    tool = next(tool for tool in range(6) if monitoring.get_tool(tool) is None)
+    started: list[object] = []
+    monitoring.use_tool_id(tool, "functions that a traced pipe end runs")
+    try:
+        monitoring.register_callback(
+            tool,
+            monitoring.events.PY_START,
+            lambda code, _offset: started.append(code),
+        )
+        monitoring.set_events(tool, monitoring.events.PY_START)
+        pipe = TracedPipeEnd()
+        made = set(started)
+        tracemalloc.start()
+        try:
+            started.clear()
+            pipe.send(("band", [8]))
+            pipe.send_bytes(bytes(8))
+            sent = set(started)
+        finally:
+            tracemalloc.stop()
+            monitoring.set_events(tool, 0)
+    finally:
+        monitoring.register_callback(tool, monitoring.events.PY_START, None)
+        monitoring.free_tool_id(tool)
+
+    # Every function that the traced sends ran had run as the pipe end was
+    # made, and only the traced sends were recorded.
+    assert sent and sent <= made
+    assert [form for form, _value in pipe.sent] == ["pickled", "bytes"]
+    assert len(pipe.held) == 2
