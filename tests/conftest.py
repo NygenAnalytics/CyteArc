@@ -21,9 +21,15 @@ import signal
 import sys
 
 import pytest
+import tqdm
 from threadpoolctl import threadpool_limits
 
 from cytearc.utils import configure_output, logger, set_verbosity
+
+# tqdm's monitor thread wakes every 10 seconds in a process that has shown a
+# progress bar, and what it allocates, coverage's records of its first calls
+# among it, lands in whatever memory trace a test has open on another thread.
+tqdm.tqdm.monitor_interval = 0
 
 
 def _lock_numba_cache_files() -> None:
