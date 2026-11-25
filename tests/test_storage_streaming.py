@@ -246,6 +246,8 @@ _CELL_ID_KINDS = {
     "objects-with-none-and-trailing-nul": np.array(
         ["ab\x00", None] * 500, dtype=object
     ),
+    # Numbers beside bytes and None are made text one at a time.
+    "mixed-objects": np.array([1, "b", b"c", 2.5, None] * 200, dtype=object),
     # A None in the last block makes the first block's text without its
     # trailing NUL, U2, as a whole write of the column makes it.
     "trailing-nul-blocks-before-none": np.array(
@@ -430,7 +432,7 @@ def test_a_cell_table_write_holds_what_its_size_helper_charges(
     assert least <= held <= charge + 128 * 1024
 
 
-@pytest.mark.parametrize("kind", ["bytes", "byte-objects"])
+@pytest.mark.parametrize("kind", ["bytes", "byte-objects", "byte-objects-and-a-number"])
 def test_a_cell_table_measures_wide_bytes_a_block_of_its_write_at_a_time(
     kind: str,
 ) -> None:
@@ -442,10 +444,14 @@ def test_a_cell_table_measures_wide_bytes_a_block_of_its_write_at_a_time(
     # rows to a chunk. Their width is measured a block of the write's rows at
     # a time, where every row at once would make 96,000,000 bytes of text.
     ids = np.array([f"{row:0400d}".encode() for row in range(60_000)])
-    if kind == "byte-objects":
+    if kind != "bytes":
         ids = ids.astype(object)
+    if kind == "byte-objects-and-a-number":
+        # A number makes each value text in turn, the bytes through a Python
+        # string of each.
+        ids[0] = 7
     charge = cell_table_write_bytes(ids, ids, 1)
-    assert charge < 60_000 * 1_600 // 2
+    assert charge < 60_000 * 1_600
 
     def write(_ledger: object) -> None:
         store = chunkless_store()

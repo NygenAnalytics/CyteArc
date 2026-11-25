@@ -756,13 +756,14 @@ def _stored_cell_dtype(
     n_rows = len(values)
     width, python = 0, False
     try:
-        # Decoding adds no characters, so blocks of text as wide as the bytes,
-        # or as each value's text, are no longer than the write's blocks.
-        widest = (
-            dtype.itemsize
-            if dtype.kind == "S"
-            else max((len(text_value(value)) for value in values.flat), default=0)
-        )
+        # Decoding adds no characters, so text as wide as the longest value's
+        # bytes, characters or text sets blocks no longer than the write's.
+        if dtype.kind == "S":
+            widest = dtype.itemsize
+        elif set(map(type, values.flat)) <= {str, bytes, np.bytes_, type(None)}:
+            widest = max(map(len, filter(None, values.flat)), default=0)
+        else:
+            widest = max((len(text_value(value)) for value in values.flat), default=0)
         rows = column_write_rows(column_chunk_rows(n_rows, 4 * max(1, widest)), threads)
         for start in range(0, n_rows, rows):
             text, made = text_array_and_python(values[start : start + rows])
