@@ -2061,7 +2061,11 @@ def test_remote_source_credentials_are_runtime_only(
         cls, url, *, storage_options=None, read_only=False, allowed_exceptions=()
     ):
         assert url == uri
-        if storage_options != credentials:
+        # Besides the caller's credentials, the store asks for a file system
+        # of its own.
+        options = dict(storage_options or {})
+        options.pop("skip_instance_cache", None)
+        if options != credentials:
             raise PermissionError("source credentials required")
         return from_url(str(tmp_path / "a.zarr"), read_only=read_only)
 
