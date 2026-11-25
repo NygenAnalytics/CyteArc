@@ -275,13 +275,11 @@ def _read_file(
 
     The read is one GET of the file's resolver URL, with the ``Range`` that
     asks for the bytes, as a read-only store reads a listed key, and a 404
-    reads as a missing file. A read of no bytes only looks the file up. A
-    bucket or repository that does not exist holds no file.
+    reads as a missing file. A read of no bytes only looks the file up. The
+    store has found the bucket or repository of ``path``, whose answer ``fs``
+    keeps, so resolving ``path`` sends no request.
     """
-    try:
-        resolved = fs.resolve_path(path)
-    except FileNotFoundError:
-        return None
+    resolved = fs.resolve_path(path)
     asked: str | None
     match byte_range:
         case None:
@@ -416,8 +414,14 @@ class HfReadStore(FsspecStore):
     condition, nor do the commits that Hugging Face's file system makes to a
     repository, so another process can write the key in between.
 
-    Each attempt at a request of the store, a read, a lookup or a page of a
-    listing, is given ``request_timeout`` seconds, 60 by default. An attempt
+    A store looks its bucket or repository up once, with the first request
+    that needs it, and shares the lookup with its read-only views: the
+    requests that start before the answer arrives wait for it, and ``close``
+    stops it. A bucket or repository that does not exist holds no keys.
+
+    Each attempt at a request of the store, the lookup of its bucket or
+    repository, a read, a lookup of a key or a page of a listing, is given
+    ``request_timeout`` seconds, 60 by default. An attempt
     that times out, loses its connection, or meets a 408 or 5xx response is
     retried with exponential backoff until ``retry_timeout`` seconds, 180 by
     default, after the request began, each attempt cut to the time left; the
@@ -449,6 +453,10 @@ class HfReadStore(FsspecStore):
         self._location = self.fs.unstrip_protocol(self.path)
         self._metadata = _SharedFetches[bytes | None]()
         self._listing = _SharedFetches[_StoreListing]()
+        # The bucket or repository path that the store's path names, or None
+        # when it does not exist, which one lookup answers for the store and
+        # its read-only views.
+        self._resolution = _SharedFetches[_Resolved | None]()
         # Whether the store reads through one listing, as a store opened
         # read-only does; Zarr's read-only views of a writable store do not.
         self._listed = self.read_only
@@ -498,6 +506,8 @@ class HfReadStore(FsspecStore):
         store._listed = read_only and self._listed
         if store._listed:
             store._listing = self._listing
+        # A view reads through the store's file system, which keeps the answer.
+        store._resolution = self._resolution
         return store
 
     def _hf_fs(self) -> HfFileSystem | None:
@@ -512,6 +522,23 @@ class HfReadStore(FsspecStore):
     async def _store_listing(self, fs: HfFileSystem) -> _StoreListing:
         return await self._listing.get(
             "", functools.partial(self._list_store, fs, f"Listing {self._location}")
+        )
+
+    async def _resolve(self, fs: HfFileSystem) -> _Resolved | None:
+        """Return the bucket or repository path that the store names, or None if it does not exist.
+
+        One lookup answers the store and its read-only views: the first request
+        that needs it sends it, and the requests that start before its answer
+        wait for it. Hugging Face's file system keeps the answer, so the paths
+        in the store resolve after it without a request.
+        """
+        kind = "bucket" if self.path.startswith("buckets/") else "repository"
+        look_up = functools.partial(asyncio.to_thread, _resolved_path, fs, self.path)
+        return await self._resolution.get(
+            "",
+            functools.partial(
+                self._request, f"Looking up the {kind} of {self._location}", look_up
+            ),
         )
 
     async def _tree_pages(
@@ -565,9 +592,7 @@ class HfReadStore(FsspecStore):
         a repository is looked up when no folder has its name. A bucket,
         repository, revision or path that does not exist lists as empty.
         """
-        resolved = await self._request(
-            request, functools.partial(asyncio.to_thread, _resolved_path, fs, self.path)
-        )
+        resolved = await self._resolve(fs)
         if resolved is None:
             return _StoreListing({}, lambda key: "")
         root = resolved.path
@@ -612,19 +637,18 @@ class HfReadStore(FsspecStore):
         )
 
     async def _list_folder(
-        self, fs: HfFileSystem, request: str, path: str
+        self, fs: HfFileSystem, request: str, prefix: str
     ) -> list[str]:
-        """Return the names of the files and folders in the folder at ``path``, listed now.
+        """Return the names of the files and folders in the store's folder ``prefix``, listed now.
 
-        ``request`` names the listing. A folder that does not exist lists as
-        empty.
+        ``request`` names the listing. A folder that does not exist, like a
+        store whose bucket or repository does not exist, lists as empty.
         """
-        resolved = await self._request(
-            request, functools.partial(asyncio.to_thread, _resolved_path, fs, path)
-        )
+        resolved = await self._resolve(fs)
         if resolved is None:
             return []
-        folder = resolved.path
+        within = prefix.rstrip("/")
+        folder = _within(resolved.path, within) if within else resolved.path
         start = f"{folder}/" if folder else ""
         names: list[str] = []
         try:
@@ -762,6 +786,8 @@ class HfReadStore(FsspecStore):
                 request, lambda: read(key, prototype, byte_range)
             )
         path = _dereference_path(self.path, key)
+        if await self._resolve(files) is None:
+            return None
         data = await self._request(
             request,
             lambda: asyncio.to_thread(
@@ -809,6 +835,8 @@ class HfReadStore(FsspecStore):
             return key in (await self._store_listing(fs)).sizes
         path = _dereference_path(self.path, key)
         files = self._hf_fs()
+        if files is not None and await self._resolve(files) is None:
+            return False
 
         async def look_up() -> bool:
             # Hugging Face's exists answers False for any OSError, and the
@@ -843,6 +871,8 @@ class HfReadStore(FsspecStore):
             getsize = super().getsize
             return await self._request(request, lambda: getsize(key))
         path = _dereference_path(self.path, key)
+        if await self._resolve(files) is None:
+            raise FileNotFoundError(key)
         entry = await self._request(
             request,
             lambda: asyncio.to_thread(_file_entry, files, path, self.request_timeout),
@@ -854,6 +884,7 @@ class HfReadStore(FsspecStore):
     def close(self) -> None:
         self._metadata.clear()
         self._listing.clear()
+        self._resolution.clear()
         super().close()
 
     def _forget_listings(self) -> None:
@@ -928,8 +959,7 @@ class HfReadStore(FsspecStore):
         request = f"Listing {prefix!r} in {self._location}"
         files = self._hf_fs()
         if files is not None:
-            folder = _dereference_path(self.path, prefix)
-            for name in await self._list_folder(files, request, folder):
+            for name in await self._list_folder(files, request, prefix):
                 yield name
             return
         listing = super().list_dir

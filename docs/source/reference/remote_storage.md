@@ -145,7 +145,7 @@ After opening a writable store, use the same analysis calls as for local data.
 
 ## Time limits of Hugging Face stores
 
-CyteArc reads an `hf://` URI, such as a [CyteBase dataset](../tutorials/cytebase_datasets.md), from Hugging Face. `storage_options` takes the options of Hugging Face's file system, such as `"token": False` for anonymous reads, and two time limits in seconds that bound each request of the store, whether it reads a key, looks a key up or lists a page of keys:
+CyteArc reads an `hf://` URI, such as a [CyteBase dataset](../tutorials/cytebase_datasets.md), from Hugging Face. `storage_options` takes the options of Hugging Face's file system, such as `"token": False` for anonymous reads, and two time limits in seconds that bound each request of the store, whether it looks its bucket or repository up, reads a key, looks a key up or lists a page of keys:
 
 | Option | Default | Limit |
 |---|---|---|
@@ -158,7 +158,7 @@ A store opened read-only lists its objects once, the first time it needs them, w
 
 A writable store keeps no listing. It reads each key with one request to Hugging Face's file resolver for the bytes it needs, looks a key up or reads its size with one request for that key however many files share its folder, and lists keys with a listing made when asked, so it sees a key that another process wrote or deleted meanwhile. It reads a key as missing only when Hugging Face reports it missing: when Zarr creates an array or a group, a failed lookup of a parent group raises, instead of letting Zarr replace the parent's metadata and attributes with an empty group. Hugging Face notes that a bucket's listing of one folder, from which the store names a group's members, is not strongly consistent. A writable store cannot create a file only where none exists in one step, since neither a bucket's uploads nor the commits that Hugging Face's file system makes to a repository take such a condition. The first writable open of a fresh import holds a claim while it prepares the store ([preparation](../developers/zarr_internals.md#preparation)). On an `hf://` store, that claim refuses a process that opens the store after the claim is written, but not one that opens it at the same moment. The open warns of that, so open a fresh import on Hugging Face from one process until it is prepared.
 
-Hugging Face limits the API and resolver requests of each account, and of each network address for anonymous requests, over 5-minute windows ([Hub rate limits](https://huggingface.co/docs/hub/rate-limits)). Anonymous readers on one address share its limits, so pass a token in `storage_options`, or log in to Hugging Face, to read under your own account's limits. A store keeps whether its bucket or repository exists, as its first request found, so after you log in, or once a missing bucket is created, open the store again to reach it.
+Hugging Face limits the API and resolver requests of each account, and of each network address for anonymous requests, over 5-minute windows ([Hub rate limits](https://huggingface.co/docs/hub/rate-limits)). Anonymous readers on one address share its limits, so pass a token in `storage_options`, or log in to Hugging Face, to read under your own account's limits. A store looks its bucket or repository up once, with its first request, and keeps the answer, so after you log in, or once a missing bucket is created, open the store again to reach it.
 
 On a slow connection, give the reads more time:
 

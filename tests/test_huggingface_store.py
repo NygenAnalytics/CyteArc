@@ -885,12 +885,15 @@ def test_a_writable_store_sends_its_requests_on_the_host_threads(
         ["0", "1"],
     )
     # The requests wait on the network, so they run on the host's four threads.
-    # Each listing looks its folder up and then asks for its one page.
+    # The store looks its bucket or repository up once, before its first
+    # request, and each listing then asks for its one page.
     assert requests == [
+        ("_resolved_path", 4),
         ("_file_entry", 4),
         ("_read_file", 4),
         ("_file_entry", 4),
-        *[("_resolved_path", 4), ("_tree_page", 4)] * 2,
+        ("_tree_page", 4),
+        ("_tree_page", 4),
     ]
 
 
@@ -926,7 +929,14 @@ def test_read_store_raises_when_a_request_stalls(
         store.close()
     # The next attempt would wait 2 s first, past the 1 s that the request has.
     assert time.monotonic() - started < 1.5
-    request = f"Listing {LOOPBACK_URI}" if read_only else _REQUESTS[call]
+    # The store looks its bucket up before its first listing or read.
+    request = (
+        f"Looking up the bucket of {LOOPBACK_URI}"
+        if stalled == "bucket"
+        else f"Listing {LOOPBACK_URI}"
+        if read_only
+        else _REQUESTS[call]
+    )
     assert str(raised.value).startswith(
         f"{request} did not succeed within 1 s: 1 attempt failed, the last "
         "with no answer within 0.25 s. To wait longer, pass more seconds in "
@@ -1495,9 +1505,10 @@ def test_read_store_retries_a_refused_connection(monkeypatch):
         store.close()
     assert sleeps == [2.0, 4.0]
     assert isinstance(raised.value.__cause__, httpx2.ConnectError)
-    # A read-only store lists itself before it reads, so the listing fails.
+    # A store looks its bucket up before it lists itself or reads, so the
+    # lookup fails.
     assert str(raised.value).startswith(
-        f"Listing {LOOPBACK_URI} did not succeed within 5 s: "
+        f"Looking up the bucket of {LOOPBACK_URI} did not succeed within 5 s: "
         "3 attempts failed, the last with ConnectError: "
     )
 
@@ -1698,6 +1709,148 @@ def test_a_store_looks_up_a_bucket_or_repository_that_an_earlier_store_found_mis
     # The later store asked again, with the token it holds now.
     tokens = [token for kind, token in loopback_hub.authorizations if kind == missing]
     assert tokens == [None, "Bearer hf_login" if logged_in else None]
+
+
+def _hold_lookups(monkeypatch, seconds=0.2):
+    """Hold each lookup of a bucket or repository for ``seconds`` before it is sent.
+
+    Reads that start together then all start before the first answer arrives.
+    """
+    for name in ("bucket_info", "repo_info"):
+        send = getattr(HfApi, name)
+
+        def held(*args, send=send, **kwargs):
+            time.sleep(seconds)
+            return send(*args, **kwargs)
+
+        monkeypatch.setattr(HfApi, name, held)
+
+
+@pytest.mark.parametrize(
+    ("lookup", "uri"), [("bucket", LOOPBACK_URI), ("repository", REPOSITORY_URI)]
+)
+@pytest.mark.parametrize("read_only", [True, False])
+def test_reads_that_start_together_look_the_bucket_or_repository_up_once(
+    loopback_hub, monkeypatch, lookup, uri, read_only
+):
+    store = _loopback_store(loopback_hub, read_only=read_only, uri=uri)
+    _hold_lookups(monkeypatch)
+
+    async def read_together():
+        return await asyncio.gather(
+            store.get("zarr.json", _PROTOTYPE),
+            store.get("c/0/0", _PROTOTYPE),
+            store.exists("c/1/1"),
+            store.getsize("c/0/1"),
+            _names(store.list_dir("c")),
+            _names(store.list_prefix("c/1")),
+        )
+
+    try:
+        document, chunk, found, size, names, keys = sync(
+            read_together(), timeout=GUARD_SECONDS
+        )
+    finally:
+        store.close()
+    published = loopback_hub.root / "data.zarr"
+    assert document.to_bytes() == (published / "zarr.json").read_bytes()
+    assert chunk.to_bytes() == (published / "c/0/0").read_bytes()
+    assert found and size == (published / "c/0/1").stat().st_size
+    assert sorted(names) == ["0", "1"]
+    assert sorted(keys) == ["c/1/0", "c/1/1"]
+    assert [kind for kind, _ in loopback_hub.requests].count(lookup) == 1
+
+
+def test_a_store_and_its_read_only_view_look_the_bucket_up_once(
+    loopback_hub, monkeypatch
+):
+    store = _loopback_store(loopback_hub, read_only=False)
+    view = store.with_read_only(True)
+    _hold_lookups(monkeypatch)
+
+    async def read_together():
+        return await asyncio.gather(
+            store.exists("c/1/1"), view.get("c/0/0", _PROTOTYPE)
+        )
+
+    try:
+        found, chunk = sync(read_together(), timeout=GUARD_SECONDS)
+    finally:
+        view.close()
+        store.close()
+    published = loopback_hub.root / "data.zarr"
+    assert found and chunk.to_bytes() == (published / "c/0/0").read_bytes()
+    assert [kind for kind, _ in loopback_hub.requests].count("bucket") == 1
+
+
+def test_reads_that_wait_for_a_refused_lookup_raise_it_and_the_next_read_asks_again(
+    loopback_hub, monkeypatch
+):
+    store = _loopback_store(loopback_hub, read_only=False)
+    loopback_hub.plan["bucket"] = [403]
+    _hold_lookups(monkeypatch)
+
+    async def read_together():
+        return await asyncio.gather(
+            store.exists("c/1/1"),
+            store.get("c/0/0", _PROTOTYPE),
+            return_exceptions=True,
+        )
+
+    try:
+        refused = sync(read_together(), timeout=GUARD_SECONDS)
+        lookups_together = [kind for kind, _ in loopback_hub.requests].count("bucket")
+        found = sync(store.exists("c/1/1"), timeout=GUARD_SECONDS)
+    finally:
+        store.close()
+    # Both reads waited for the one lookup and raise its refusal, which the
+    # store does not keep as an answer.
+    assert [error.response.status_code for error in refused] == [403, 403]
+    assert lookups_together == 1
+    assert found
+    assert [kind for kind, _ in loopback_hub.requests].count("bucket") == 2
+
+
+def test_closing_a_store_stops_the_lookup_of_its_bucket_in_flight(loopback_hub):
+    # Zarr's sync leaves its coroutine running when its caller stops waiting,
+    # as an interrupt does, and the store's lookup goes on until it is closed.
+    store = _loopback_store(
+        loopback_hub, read_only=False, request_timeout=1, retry_timeout=10
+    )
+    loopback_hub.plan["bucket"] = ["stall"]
+    reading = asyncio.run_coroutine_threadsafe(store.exists("zarr.json"), _get_loop())
+    try:
+        asked = _recorded_requests(loopback_hub, "bucket", at_least=1)
+    finally:
+        store.close()
+    # The read raises, rather than wait for the stalled lookup to time out and
+    # look the bucket up again.
+    with pytest.raises(concurrent.futures.CancelledError):
+        reading.result(timeout=GUARD_SECONDS)
+    assert asked == 1
+
+
+@pytest.mark.parametrize("read_only", [True, False])
+def test_a_store_names_the_lookup_of_its_repository_in_the_error_that_ends_it(
+    loopback_hub, read_only
+):
+    store = _loopback_store(
+        loopback_hub,
+        read_only=read_only,
+        uri=REPOSITORY_URI,
+        request_timeout=0.25,
+        retry_timeout=1,
+    )
+    loopback_hub.plan["repository"] = ["stall"]
+    try:
+        with pytest.raises(TimeoutError) as raised:
+            sync(store.exists("zarr.json"), timeout=GUARD_SECONDS)
+    finally:
+        store.close()
+    assert str(raised.value).startswith(
+        f"Looking up the repository of {REPOSITORY_URI} did not succeed within 1 s: "
+        "1 attempt failed, the last with no answer within 0.25 s."
+    )
 
 
 def test_read_store_lists_and_reads_a_dataset_repository(loopback_hub):
@@ -2481,12 +2634,14 @@ def test_writable_store_retries_the_lookup_of_a_key_that_a_repository_tree_misse
     assert [kind for kind, _ in loopback_hub.requests].count("paths-info") == 2
 
 
+@pytest.mark.parametrize("prefix", ["c/1", "c/1/"])
 def test_writable_store_lists_a_folder_without_the_folders_that_share_its_name(
-    loopback_hub, monkeypatch
+    loopback_hub, monkeypatch, prefix
 ):
     # huggingface_hub notes that a bucket matches a listed prefix as text, so
     # that listing "logs" also names "logs_existing/...". The loopback hub
-    # lists a folder's own entries, so the page is the Hub's answer.
+    # lists a folder's own entries, so the page is the Hub's answer. A prefix
+    # names the same folder with or without its trailing slash.
     store = _loopback_store(loopback_hub, read_only=False, request_timeout=7)
     asked = []
 
@@ -2501,7 +2656,7 @@ def test_writable_store_lists_a_folder_without_the_folders_that_share_its_name(
 
     monkeypatch.setattr(huggingface, "_tree_page", page)
     try:
-        names = sync(_names(store.list_dir("c/1")), timeout=GUARD_SECONDS)
+        names = sync(_names(store.list_dir(prefix)), timeout=GUARD_SECONDS)
     finally:
         store.close()
     assert names == ["0", "1"]
