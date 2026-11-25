@@ -2713,3 +2713,21 @@ def test_offline_requests_build_their_headers_without_the_agent_registry(
     assert "hf_hub/" in headers["user-agent"]
     assert "agent/" not in headers["user-agent"]
     assert not missing.exists()
+
+
+@pytest.fixture
+def earlier_tests_file_system(monkeypatch):
+    """A Hugging Face file system that an earlier test left in the instance cache."""
+    # Only this fixture's file system is cached when the hub starts.
+    monkeypatch.setattr(huggingface.HfFileSystem, "_cache", {})
+    return huggingface.HfFileSystem(endpoint="http://127.0.0.1:9", token=False)
+
+
+def test_a_hub_test_is_handed_no_file_system_that_an_earlier_test_made(
+    earlier_tests_file_system, loopback_hub
+):
+    # A file system opened with the endpoint of an earlier test's hub, as a
+    # test whose hub got that hub's port opens one.
+    opened = huggingface.HfFileSystem(endpoint="http://127.0.0.1:9", token=False)
+
+    assert opened is not earlier_tests_file_system

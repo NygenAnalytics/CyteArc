@@ -574,11 +574,21 @@ class _LoopbackHandler(BaseHTTPRequestHandler):
 def loopback_hub(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> Iterator[LoopbackHub]:
-    """A running ``LoopbackHub`` that serves ``tmp_path / "bucket"``."""
-    from huggingface_hub import constants
+    """A running ``LoopbackHub`` that serves ``tmp_path / "bucket"``.
+
+    The test gets Hugging Face file systems of its own: it is handed none
+    that an earlier test made, and none that it makes is handed to a later
+    test.
+    """
+    from huggingface_hub import HfFileSystem, constants
 
     # Requests to the hub must not depend on the environment's offline mode.
     monkeypatch.setattr(constants, "HF_HUB_OFFLINE", False)
+    # Hugging Face's file system class keeps one instance for each thread and
+    # set of options, endpoint and token included, and each instance keeps
+    # whether each bucket and repository exists. A hub can get the port, and
+    # so the endpoint, of an earlier test's hub.
+    monkeypatch.setattr(HfFileSystem, "_cache", {})
     root = tmp_path / "bucket"
     root.mkdir()
     hub = LoopbackHub(root)
