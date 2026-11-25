@@ -275,11 +275,13 @@ def _read_file(
 
     The read is one GET of the file's resolver URL, with the ``Range`` that
     asks for the bytes, as a read-only store reads a listed key, and a 404
-    reads as a missing file. A read of no bytes only looks the file up. The
-    store has found the bucket or repository of ``path``, whose answer ``fs``
-    keeps, so resolving ``path`` sends no request.
+    reads as a missing file. A read of no bytes only looks the file up. A
+    bucket or repository that does not exist holds no file.
     """
-    resolved = fs.resolve_path(path)
+    try:
+        resolved = fs.resolve_path(path)
+    except FileNotFoundError:
+        return None
     asked: str | None
     match byte_range:
         case None:
@@ -786,8 +788,9 @@ class HfReadStore(FsspecStore):
                 request, lambda: read(key, prototype, byte_range)
             )
         path = _dereference_path(self.path, key)
-        if await self._resolve(files) is None:
-            return None
+        # The reads that start together wait for one lookup, after which a
+        # missing bucket or repository reads as a missing file without one.
+        await self._resolve(files)
         data = await self._request(
             request,
             lambda: asyncio.to_thread(
@@ -835,8 +838,8 @@ class HfReadStore(FsspecStore):
             return key in (await self._store_listing(fs)).sizes
         path = _dereference_path(self.path, key)
         files = self._hf_fs()
-        if files is not None and await self._resolve(files) is None:
-            return False
+        if files is not None:
+            await self._resolve(files)
 
         async def look_up() -> bool:
             # Hugging Face's exists answers False for any OSError, and the
@@ -871,8 +874,7 @@ class HfReadStore(FsspecStore):
             getsize = super().getsize
             return await self._request(request, lambda: getsize(key))
         path = _dereference_path(self.path, key)
-        if await self._resolve(files) is None:
-            raise FileNotFoundError(key)
+        await self._resolve(files)
         entry = await self._request(
             request,
             lambda: asyncio.to_thread(_file_entry, files, path, self.request_timeout),

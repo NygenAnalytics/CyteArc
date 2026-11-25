@@ -1694,21 +1694,37 @@ def test_a_store_looks_up_a_bucket_or_repository_that_an_earlier_store_found_mis
     # Without a token in its options, a store sends the token of the login.
     options = {"token": None} if logged_in else {}
     earlier = _loopback_store(loopback_hub, read_only=read_only, uri=uri, **options)
+    later = None
+    # The earlier store stays open, as the store of a DataStore does.
     try:
         found_before = sync(earlier.exists("zarr.json"), timeout=GUARD_SECONDS)
-    finally:
-        earlier.close()
-    if logged_in:
-        monkeypatch.setenv("HF_TOKEN", "hf_login")
-    later = _loopback_store(loopback_hub, read_only=read_only, uri=uri, **options)
-    try:
+        if logged_in:
+            monkeypatch.setenv("HF_TOKEN", "hf_login")
+        later = _loopback_store(loopback_hub, read_only=read_only, uri=uri, **options)
         found_after = sync(later.exists("zarr.json"), timeout=GUARD_SECONDS)
     finally:
-        later.close()
+        earlier.close()
+        if later is not None:
+            later.close()
     assert (found_before, found_after) == (False, True)
     # The later store asked again, with the token it holds now.
     tokens = [token for kind, token in loopback_hub.authorizations if kind == missing]
     assert tokens == [None, "Bearer hf_login" if logged_in else None]
+
+
+def test_stores_whose_caller_asks_to_share_a_file_system_share_one(loopback_hub):
+    # A store opens a file system of its own unless the caller passes fsspec's
+    # skip_instance_cache=False, which hands stores of one set of options one.
+    own = [_loopback_store(loopback_hub) for _ in range(2)]
+    shared = [
+        _loopback_store(loopback_hub, skip_instance_cache=False) for _ in range(2)
+    ]
+    try:
+        assert own[0].fs.sync_fs is not own[1].fs.sync_fs
+        assert shared[0].fs.sync_fs is shared[1].fs.sync_fs
+    finally:
+        for store in (*own, *shared):
+            store.close()
 
 
 def _hold_lookups(monkeypatch, seconds=0.2):
