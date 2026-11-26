@@ -806,8 +806,6 @@ class CompressedMatrixSource(BaseMatrixSource):
     Otherwise the entries are transposed once into a disk-backed row store.
     """
 
-    _decodeWorkingBytes = 0
-
     def __init__(
         self,
         shape: Sequence[int],
@@ -867,9 +865,7 @@ class CompressedMatrixSource(BaseMatrixSource):
         output = (data_stop - data_start) * (
             self.dtype.itemsize + _INDEX_BYTES
         ) + pointers.nbytes
-        return MemoryEstimate(
-            self.resident_bytes, output + self._decodeWorkingBytes, output
-        )
+        return MemoryEstimate(self.resident_bytes, output, output)
 
     def read_cells(self, start: int, stop: int) -> csr_matrix:
         start, stop = self._window(start, stop)

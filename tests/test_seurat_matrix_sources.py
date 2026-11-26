@@ -2053,7 +2053,8 @@ def test_fragment_metadata_is_validated_before_reads(tmp_path: Path) -> None:
         (SourceLimits(maxCells=2), "maxCells=2"),
         (SourceLimits(maxNnz=6), "maxNnz=6"),
         (SourceLimits(maxMetadataBytes=64), "maxMetadataBytes=64"),
-        (SourceLimits(maxBlockBytes=1024), "maxBlockBytes=1024"),
+        # Below four records of 128 bytes, the least block that decoding takes.
+        (SourceLimits(maxBlockBytes=256), "maxBlockBytes=256"),
     ],
 )
 def test_fragment_sources_enforce_resource_limits_at_inspection(

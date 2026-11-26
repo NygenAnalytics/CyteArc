@@ -4,7 +4,8 @@ An operation creates one :class:`MemoryLedger` with its budget and charges it
 before each step allocates: an estimate of what the step keeps, and of the
 transient peak of what it builds and lets go. The estimates count the arrays
 that grow with the data, such as blocks, coordinates, graphs and per-cell IDs
-and labels. They leave out the interpreter, the objects and buffers of the
+and labels, and ``READ_ALLOWANCE_BYTES`` for each read of stored arrays in
+flight. They leave out the interpreter, the other objects and buffers of the
 libraries, and other allocations that do not grow with the data, so a step can
 hold a little more than its charge. The ledger refuses a charge that would pass
 the budget with a :class:`MemoryBudgetError` that names the step, the bytes
@@ -25,6 +26,7 @@ from typing import Any
 import numpy as np
 
 __all__ = [
+    "READ_ALLOWANCE_BYTES",
     "MemoryBudgetError",
     "MemoryLedger",
     "fixed_text_bytes",
@@ -37,6 +39,17 @@ __all__ = [
     "refusal_words",
     "sort_bytes",
 ]
+
+
+#: What one read of stored arrays in flight holds beside the arrays that grow
+#: with the data: the objects of Zarr's read and of the chunks it decodes,
+#: NumPy's buffers of a read that takes values by index arrays, and the
+#: buffer of a file read in part, as a read of part of a shard is, which
+#: Python sizes by the block of the file system. On a local file system, a
+#: read held at most 50 KB of these on Python 3.13 and 97 KB on Python 3.14,
+#: whose buffer of a file read in part is larger; a file system with larger
+#: blocks gives each read a larger buffer.
+READ_ALLOWANCE_BYTES = 128 * 1024
 
 
 class MemoryBudgetError(MemoryError):

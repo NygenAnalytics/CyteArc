@@ -91,9 +91,6 @@ _MERGE_TEXT_BYTES = 48
 # Merging begins once at least this many rows wait, so that small imports
 # merge once.
 _MIN_MERGE_ROWS = 250_000
-# Bytes that each held chunk takes beside its rows: its eight arrays and its
-# record.
-_PART_BYTES = 1_300
 # The waiting chunks merge once this many wait, so that the chunks of few rows
 # that a small budget reads hold little beside their rows.
 _MAX_WAITING_PARTS = 256
@@ -263,10 +260,9 @@ class BarcodeCounter:
 
     @property
     def nbytes(self) -> int:
-        """The bytes that the held rows, their distinct text and chunks take."""
+        """The bytes that the held rows and their distinct text take."""
         held = 0 if self._held is None else self._held.nbytes
-        n_parts = len(self._waiting) + (self._held is not None)
-        return held + self._waiting_bytes + _PART_BYTES * n_parts
+        return held + self._waiting_bytes
 
     @property
     def peak_bytes(self) -> int:

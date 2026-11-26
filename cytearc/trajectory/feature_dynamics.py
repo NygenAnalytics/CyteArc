@@ -153,8 +153,6 @@ _FEATURE_SPACES = ("l2", "ip", "cosine")
 # a tenth of a second on four threads, between which a shutdown request is
 # honored and progress is reported.
 _BLOCK_OPERATIONS = 1 << 30
-# The bytes of the progress bar and the loop over blocks, a few kilobytes.
-_SEARCH_OVERHEAD_BYTES = 1 << 16
 # The candidates beyond the n_neighbors nearest by the distances that BLAS
 # computes, n_neighbors more and at least this many, as
 # perturbation/signature.py's nearest_controls takes them.
@@ -174,13 +172,13 @@ def nearest_feature_profiles_bytes(
     These are the transposed copy of the profiles and one row of distances
     for each thread, or in their place the profiles' squared norms and a
     block of their products, which take no more bytes; the unit profiles of a
-    ``"cosine"`` search; the neighbors it returns; and the progress bar.
+    ``"cosine"`` search; and the neighbors it returns.
     """
     rows = max(0, int(n_profiles))
     copies = (2 if space == "cosine" else 1) * rows * max(0, int(n_bins)) * 8
     scratch = max(1, int(nthreads)) * rows * 8
     neighbors = rows * max(0, int(n_neighbors)) * 8
-    return copies + scratch + neighbors + _SEARCH_OVERHEAD_BYTES
+    return copies + scratch + neighbors
 
 
 @njit(cache=True, nogil=True)

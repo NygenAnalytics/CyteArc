@@ -1312,7 +1312,7 @@ def test_dataset_merge_metadata_layout_is_budget_independent_and_resumable(
         constrained_peak,
     )
     low_path = tmp_path / "low_budget_layout.zarr"
-    low = merger(low_path, memory=100_000)
+    low = merger(low_path, memory=200_000)
     low.plan()
     assert low._metadataPlan is not None
     low_width = low._metadataPlan.blockRows
@@ -3157,13 +3157,13 @@ def test_dataset_merge_charges_a_source_it_reads_its_counts_and_smallest_read():
     # Counts whose summaries count their values read that summary whole, in
     # one chunk as finalize_counts stores it: each cell's count, 8 bytes, a
     # decoded copy of the chunk and an encoded one at its bound, 1/128 more
-    # and 1 KiB, and the objects of Zarr's read, 32 KiB, 4 KiB for the chunk
-    # and 16 KiB for its decode, whatever the number of features.
+    # and 1 KiB, and the allowance of a read of one chunk, 128 KiB and 4 KiB,
+    # whatever the number of features.
     summarized = assay(np.ones((4, 3_000), dtype=np.uint16))
     summary = zarr.open_group(store=MemoryStore(), mode="w").create_array(
         "rowNonzero", data=np.full(4, 3_000, dtype=np.int64), chunks=(4,)
     )
-    expected = 4 * 8 + 4 * 8 + (4 * 8 + 1_024) + 32_768 + 4_096 + 16_384
+    expected = 4 * 8 + 4 * 8 + (4 * 8 + 1_024) + 131_072 + 4_096
     assert merge_writer._row_nnz_load_bytes(summarized, summary) == expected
     # Counts without features or without cells hold no value to read: each
     # cell's count of 0 is all that they hold, within a budget of just it.
@@ -3213,7 +3213,7 @@ def test_dataset_merge_rejects_insufficient_metadata_budget(tmp_path):
         ),
         # Counting fits, but not the counts of one row.
         (
-            250_000,
+            295_000,
             "The merge does not fit mem_budget even with count shards of one row. "
             "Increase mem_budget. Resident data needs about",
         ),

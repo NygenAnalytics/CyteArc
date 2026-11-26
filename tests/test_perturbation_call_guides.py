@@ -1276,8 +1276,8 @@ def test_the_cells_ids_are_charged_as_their_strings_and_values() -> None:
     longest = max(strings, key=len)
     utf8 = [len(value.encode("utf-8")) for value in strings]
     # NEP 55: a 16-byte element for each value and, beyond 15 bytes, its
-    # bytes behind a one-byte size in an arena beside them.
-    elements = 16 * len(strings) + sum(size + 1 for size in utf8 if size > 15)
+    # bytes in an arena beside them.
+    elements = 16 * len(strings) + sum(size for size in utf8 if size > 15)
 
     # Python strings are counted at least by their characters, beside a
     # reference to each.

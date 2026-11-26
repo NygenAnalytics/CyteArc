@@ -48,6 +48,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from ..utils.memory_budget import READ_ALLOWANCE_BYTES
+
 __all__ = [
     "BRANCH_POINT_COLUMNS",
     "MEMBERSHIP_NONE",
@@ -396,15 +398,6 @@ def membership_labels(members: np.ndarray, lineages: Sequence[Any]) -> np.ndarra
     return labels.astype(str)
 
 
-#: What checking a stored membership holds whatever its cells: Zarr's buffers
-#: and the objects of reading its arrays back and validating its record,
-#: measured after a full collection has emptied CPython's free lists.
-_CHECK_OBJECT_BYTES = 240 * 1024
-#: What writing a membership leaves held while it is checked: the objects of
-#: writing its arrays and of the write's transaction.
-_WRITE_OBJECT_BYTES = 64 * 1024
-
-
 def _membership_label_width(lineages: Sequence[Any]) -> int:
     """The characters of the longest label that :func:`membership_labels` can give a cell."""
     return max(
@@ -432,13 +425,12 @@ def stored_membership_bytes(n_cells: int, lineages: Sequence[Any]) -> int:
     with a copy of them and of the labels of cells that follow one lineage,
     beside each cell's lineages, their count and whether the cell follows
     one: three copies of the text and up to 24 bytes a cell and 2 a lineage,
-    beside 240 KiB of Zarr's buffers and the objects of reading the arrays
-    back and validating the record, whatever the cells. Loading the
-    membership keeps the labels and the lineages of each cell.
+    beside the allowance of a read in flight, ``READ_ALLOWANCE_BYTES``.
+    Loading the membership keeps the labels and the lineages of each cell.
     """
     n_cells = int(n_cells)
     text = 4 * _membership_label_width(lineages) * n_cells
-    return 3 * text + n_cells * (24 + 2 * len(lineages)) + _CHECK_OBJECT_BYTES
+    return 3 * text + n_cells * (24 + 2 * len(lineages)) + READ_ALLOWANCE_BYTES
 
 
 def membership_bytes(n_cells: int, lineages: Sequence[Any], n_sinks: int) -> int:
@@ -456,8 +448,7 @@ def membership_bytes(n_cells: int, lineages: Sequence[Any], n_sinks: int) -> int
     are then written, beside each lineage's sink cells and the payload's
     other arrays, up to 20 bytes a cell and 2 a lineage, which holds two
     copies of the text, and checked before the membership is published, as
-    :func:`stored_membership_bytes` states, while 64 KiB of the write's
-    objects stay.
+    :func:`stored_membership_bytes` states.
     """
     n_cells = int(n_cells)
     n_lineages = len(lineages)
@@ -465,7 +456,7 @@ def membership_bytes(n_cells: int, lineages: Sequence[Any], n_sinks: int) -> int
     calling = n_cells * (12 + max(44 * n_lineages, 120))
     labels = 4 * _membership_label_width(lineages) * n_cells
     building = labels + 18 * n_cells
-    written = labels + n_cells * (2 * n_lineages + 20) + _WRITE_OBJECT_BYTES
+    written = labels + n_cells * (2 * n_lineages + 20)
     checking = max(2 * labels, stored_membership_bytes(n_cells, lineages))
     return inputs + max(calling, building, written + checking)
 

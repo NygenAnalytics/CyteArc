@@ -323,7 +323,7 @@ def seed_bytes(n_cells: int, n_rows: int, n_sites: int) -> int:
 
 def kept_seed_bytes(n_rows: int, n_sites: int) -> int:
     """What a component's seeds keep while they are fitted: each seed's cells and starting genotypes."""
-    return N_SEED_CANDIDATES * (n_rows + 2 * n_sites + 8 * MAX_SPLIT_SITES + 512)
+    return N_SEED_CANDIDATES * (n_rows + 2 * n_sites + 8 * MAX_SPLIT_SITES)
 
 
 def pattern_bytes(n_rows: int, n_local: int) -> int:

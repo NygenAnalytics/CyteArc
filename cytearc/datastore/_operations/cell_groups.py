@@ -185,11 +185,7 @@ class CellGroups:
             for limit, width in ((0x7F, 2), (0xFF, 3), (0xFFFF, 5), (0x10FFFF, 8))
             if widest <= limit
         )
-        return (
-            len(self.keys) * (180 + 176 * len(self.key_columns))
-            + width * (characters)
-            + 4096
-        )
+        return len(self.keys) * (180 + 176 * len(self.key_columns)) + width * characters
 
     def fingerprint(self) -> str:
         """Fingerprint each cell's group by its labels.

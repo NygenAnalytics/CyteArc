@@ -1,23 +1,25 @@
 """Stored chunk geometry of a streamed array."""
 
-import functools
 import importlib
-import io
 import math
 import operator
-import os
-import sys
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 import zarr
 
-from ..utils.memory_budget import MemoryLedger, object_array_bytes, python_text_bytes
+from ..utils.memory_budget import (
+    READ_ALLOWANCE_BYTES,
+    MemoryLedger,
+    object_array_bytes,
+    python_text_bytes,
+)
 from .types import array_metadata_shards
 from .validation_scope import store_key, validated_once
 
 __all__ = [
+    "READ_CHUNK_BYTES",
     "ROW_BLOCK_BYTES",
     "ROW_INDEX_BYTES",
     "ROW_KEPT_INDEX_BYTES",
@@ -40,59 +42,10 @@ ROW_KEPT_INDEX_BYTES = 32
 #: sort groups them.
 ROW_BLOCK_BYTES = 512
 
-#: What one Zarr read holds beside its buffers, whatever their size: the
-#: objects of the read of one shard, or of an unsharded read, those of each
-#: chunk it takes, since Zarr makes a task for every chunk before it reads
-#: any, and those of each chunk it decodes at once. A read of one chunk
-#: traced 31 to 45 KB, each further chunk 2.2 to 2.4 KB and each further
-#: decode at once 12.5 KB, on Zarr 3.4 after a full collection had emptied
-#: CPython's free lists, so that each object was allocated anew; reads of
-#: tiny chunks are held between half of these charges and the whole of them.
-#: Once a read returns, what its caller keeps stays held, and CPython keeps
-#: the objects of a few kinds that the read freed on its free lists for
-#: reuse, which only a collection of the oldest generation empties
-#: (https://github.com/python/cpython/blob/v3.13.18/Python/gc.c#L1464-L1468);
-#: no reference cycle holds them. A read of one chunk left up to 23 KB, and
-#: each further chunk up to 2.4 KB more, traced after reads of 1 to 100
-#: chunks, in shards and not, on Python 3.13 to 3.15.
-_READ_OBJECT_BYTES = 32 * 1024
-_READ_CHUNK_OBJECT_BYTES = 4 * 1024
-_READ_DECODE_OBJECT_BYTES = 16 * 1024
-#: What reads in bands leave levels off once the free lists that they fill
-#: are full. On Python 3.13, tuple() of an iterator without a length
-#: allocates ten items and shrinks the tuple to those it got
-#: (https://github.com/python/cpython/blob/v3.13.18/Objects/abstract.c#L2039-L2120),
-#: so each tuple that Zarr builds so, once freed, joins the free list of its
-#: final length without having come from it, until that list holds 2,000
-#: tuples; each length from 1 to 20 items has a list
-#: (https://github.com/python/cpython/blob/v3.13.18/Include/internal/pycore_freelist.h#L16-L18).
-#: A read of a one-dimensional array fills the list of tuples of 1 item,
-#: 96,000 bytes, and what 100 to 4,000 reads of a band of flags left, the
-#: other free lists and the objects that the reads keep among it, levelled
-#: off at 140 to 154 KB on Python 3.13.
-_READ_LEFTOVER_LIMIT_BYTES = 192 * 1024
-#: A read of a band of an array of more axes also fills the lists of tuples
-#: of one item an axis and of one item a chunk that it takes along an axis
-#: of a shard, up to 20 chunks, the longest tuple a list keeps. For arrays of
-#: up to three axes, those lists hold 2,000 tuples of 1, 3 and 20 items, 40
-#: bytes and 8 an item each on Python 3.13. Beside them, the other free lists
-#: that the reads use hold up to 80 lists, 80 dicts and their key tables of
-#: 128 bytes, 100 floats and 255 contexts, and a whole read of 1,000 bands
-#: of 20 chunks left up to 82 KB more once it returned, what a full
-#: collection does not free and the objects of its last band's read, which
-#: 96 KiB covers: it left 715 KB beside its result for rows of 20 chunks and
-#: 734 KB for 1 by 20 chunks of an array of three axes. Python 3.14 builds a
-#: tuple from an iterator at its final length
-#: (https://github.com/python/cpython/pull/127758), so the same reads leave
-#: 30 to 57 KB there, against the same limit.
-_BAND_LEFTOVER_LIMIT_BYTES = (
-    2_000 * ((40 + 8) + (40 + 3 * 8) + (40 + 20 * 8))
-    + 80 * 56
-    + 80 * (64 + 128)
-    + 100 * 24
-    + 255 * 64
-    + 96 * 1024
-)
+#: What a read holds for each chunk or shard that it touches while it runs,
+#: beside ``READ_ALLOWANCE_BYTES`` for each read in flight: Zarr makes a task
+#: for every one of them before it reads any, 2.1 to 2.4 KB each on Zarr 3.4.
+READ_CHUNK_BYTES = 4 * 1024
 
 #: Zarr's orthogonal indexer orders the positions of an index array by chunk
 #: in arrays of int64. While it builds them it holds each position's chunk,
@@ -107,38 +60,17 @@ _BAND_LEFTOVER_LIMIT_BYTES = (
 #: positions, and less for sorted ones.
 _INDEX_BYTES = 40
 _SHARD_INDEX_BYTES = 64
-#: NumPy indexes a chunk by two index arrays at once, as Zarr indexes an
-#: unsharded chunk whose rows and columns are both index arrays, through a
-#: buffer of up to 8,192 elements of each array, 8 bytes each. Zarr takes
-#: the values from a contiguous chunk and places a contiguous copy, which
-#: NumPy does not buffer: taking and placing values of 2, 4 and 8 bytes each
-#: held 133 to 135 KB on NumPy 2.1 and 2.5, the rest within a read's objects.
-_INDEX_BUFFER_ELEMENTS = 8192
-
-#: Python's ``open`` buffers a binary file at its file system's block size,
-#: or at ``io.DEFAULT_BUFFER_SIZE`` where the block size is unknown, as on
-#: Windows, and ``Path.read_bytes`` reads a whole file through it. From
-#: Python 3.14 ``open`` buffers at least ``io.DEFAULT_BUFFER_SIZE``, 128 KiB,
-#: and at most 8 MiB, and ``Path.read_bytes`` reads unbuffered.
-_FILE_BUFFER_LIMIT_BYTES = 8 * 1024 * 1024
-_WHOLE_FILES_UNBUFFERED = sys.version_info >= (3, 14)
 
 #: NumPy keeps each value of variable-width text in a 16-byte element, and a
-#: value of more than 15 bytes in UTF-8 in an arena beside the array, behind
-#: its size, a byte for a value of up to 255 bytes and 8 for a longer one, in
-#: an arena that NumPy grows by a quarter at a time (NEP 55). Zarr's
-#: ``vlen-utf8`` codec stores each value's UTF-8 bytes behind a 4-byte length,
-#: and each chunk behind a 4-byte count.
+#: value of more than 15 bytes in UTF-8 also in an arena beside the array
+#: (NEP 55). Zarr's ``vlen-utf8`` codec stores each value's UTF-8 bytes
+#: behind a 4-byte length.
 _TEXT_ELEMENT_BYTES = 16
 _TEXT_INLINE_BYTES = 15
-_TEXT_SHORT_SIZE_LIMIT = 255
-_TEXT_SHORT_SIZE_BYTES = 1
-_TEXT_SIZE_BYTES = 8
 _TEXT_LENGTH_BYTES = 4
 #: The most bytes of fixed-width text, and the most values, that a measure of
 #: variable-width text casts its values to at once, and the most characters
-#: of a value that it casts: NumPy's cast holds a buffer of up to its buffer
-#: size of values at the width cast to, whatever the values, so a longer
+#: of a value that it casts, so that a part's cast stays small: a longer
 #: value is measured alone, as a Python string.
 _TEXT_MEASURE_BYTES = 1024 * 1024
 _TEXT_MEASURE_VALUES = 65_536
@@ -161,9 +93,9 @@ def _decode_bytes(
     ``arena`` are the values' UTF-8 bytes, characters and arena bytes in all,
     and ``widest`` the widest code point of their characters.
     """
-    stored = _TEXT_LENGTH_BYTES * (values + 1) + utf8
-    copies = utf8 + values if widest > 0x7F else 0
-    kept = _TEXT_ELEMENT_BYTES * values + -(-5 * arena // 4)
+    stored = _TEXT_LENGTH_BYTES * values + utf8
+    copies = utf8 if widest > 0x7F else 0
+    kept = _TEXT_ELEMENT_BYTES * values + arena
     return (
         stored
         + object_array_bytes(values)
@@ -174,15 +106,8 @@ def _decode_bytes(
 
 
 def _arena_bytes(utf8: np.ndarray) -> int:
-    """The bytes of NumPy's arena that values of these UTF-8 lengths take before it grows.
-
-    A value of up to 15 bytes takes none; a longer value takes its bytes
-    behind its size.
-    """
-    sized = np.where(
-        utf8 <= _TEXT_SHORT_SIZE_LIMIT, _TEXT_SHORT_SIZE_BYTES, _TEXT_SIZE_BYTES
-    )
-    return int(np.where(utf8 > _TEXT_INLINE_BYTES, utf8 + sized, 0).sum())
+    """The bytes of NumPy's arena that values of these UTF-8 lengths take: those of each value of more than 15 bytes."""
+    return int(np.where(utf8 > _TEXT_INLINE_BYTES, utf8, 0).sum())
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,7 +118,7 @@ class TextExtent:
     UTF-8 bytes of any value, and ``widest`` the widest code point of any
     value's characters, 0 for none. ``values``, ``characterTotal`` and
     ``arenaBytes`` count every value, its characters, and the bytes that
-    NumPy's arena takes for them before it grows. ``chunkDecodeBytes`` and
+    NumPy's arena takes for them. ``chunkDecodeBytes`` and
     ``chunkStoredBytes`` are the most that decoding one stored chunk holds and
     the most bytes of one chunk as Zarr stores it before it compresses it,
     each chunk counted by its own values. ``measureBytes`` is the most that
@@ -211,19 +136,14 @@ class TextExtent:
     measureBytes: int
 
     def valueBytes(self) -> int:
-        """Return the most bytes that NumPy holds for one value, its element and its arena share."""
+        """Return the most bytes that NumPy holds for one value, its element and its bytes in the arena."""
         if self.utf8Bytes <= _TEXT_INLINE_BYTES:
             return _TEXT_ELEMENT_BYTES
-        size = (
-            _TEXT_SHORT_SIZE_BYTES
-            if self.utf8Bytes <= _TEXT_SHORT_SIZE_LIMIT
-            else _TEXT_SIZE_BYTES
-        )
-        return _TEXT_ELEMENT_BYTES + -(-5 * (self.utf8Bytes + size) // 4)
+        return _TEXT_ELEMENT_BYTES + self.utf8Bytes
 
     def keptBytes(self) -> int:
-        """Return the most bytes that NumPy holds for every value: their elements and their arena."""
-        return _TEXT_ELEMENT_BYTES * self.values + -(-5 * self.arenaBytes // 4)
+        """Return the bytes that NumPy holds for every value: their elements and their arena."""
+        return _TEXT_ELEMENT_BYTES * self.values + self.arenaBytes
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,6 +154,9 @@ class ArrayGeometry:
     chunks: tuple[int, ...]
     shards: tuple[int, ...] | None
     itemsize: int
+    #: What a store that computes the array's chunks or shards holds to make
+    #: one of them, beside the stored chunk, as a composite's
+    #: ``chunk_read_scratch_bytes`` gives it; 0 for a store that reads them.
     readScratchBytes: int = 0
     #: The threads of Zarr's own pool that its opt-in ``FusedCodecPipeline``
     #: reads the array on, ``codec_pipeline.max_workers`` or more, as many
@@ -307,51 +230,6 @@ class ArrayGeometry:
         """Return the bytes of one row: one value of every later axis."""
         return math.prod(self.shape[1:]) * self.itemsize
 
-    def leftoverBytes(self, rows: int) -> int:
-        """Return what a read of ``rows`` rows leaves of its objects once it returns.
-
-        It reads no more bands than it has rows, and they leave what
-        :meth:`bandsLeftoverBytes` counts.
-        """
-        return self.bandsLeftoverBytes(min(max(0, int(rows)), self.bandCount()))
-
-    def bandsLeftoverBytes(self, bands: int) -> int:
-        """Return what the reads of ``bands`` bands of chunks leave of their objects once they return.
-
-        The reads take every chunk of the bands, as :meth:`chunksLeftoverBytes`
-        counts them, up to 192 KiB for a one-dimensional array and up to 743
-        KiB for an array of more axes, whose reads fill more of CPython's free
-        lists of tuples.
-        """
-        limit = (
-            _READ_LEFTOVER_LIMIT_BYTES
-            if len(self.shape) == 1
-            else _BAND_LEFTOVER_LIMIT_BYTES
-        )
-        return self.chunksLeftoverBytes(
-            max(0, int(bands)) * self.bandChunks(), limit=limit
-        )
-
-    def chunksLeftoverBytes(
-        self, chunks: int, *, limit: int = _READ_LEFTOVER_LIMIT_BYTES
-    ) -> int:
-        """Return what reads that took ``chunks`` chunks in all leave of their objects once they return.
-
-        They are counted as :meth:`objectBytes` counts the objects of a read
-        and of each chunk that it takes while it runs, for every chunk,
-        whether one read takes them or a read of each band does, up to
-        ``limit``, where what the reads leave levels off once the free lists
-        that they fill are full: 192 KiB unless given, which reads of
-        one-dimensional arrays stay within.
-        """
-        chunks = max(0, int(chunks))
-        if chunks == 0:
-            return 0
-        return min(
-            max(0, int(limit)),
-            _READ_OBJECT_BYTES + chunks * _READ_CHUNK_OBJECT_BYTES,
-        )
-
     def bandCount(self) -> int:
         """Return the bands of chunks along the first axis."""
         return -(-self.shape[0] // self.axisChunk(0))
@@ -405,25 +283,20 @@ class ArrayGeometry:
         reading = touched_shards if planned is None else min(touched_shards, planned)
         return min(touched, workers), reading
 
-    def objectBytes(self, chunks: int, decodes: int) -> int:
-        """Return the objects that one read of ``chunks`` chunks, ``decodes`` at a time, holds beside its buffers.
+    def readAllowanceBytes(self, chunks: int) -> int:
+        """Return what one read in flight that touches ``chunks`` chunks holds beside its data.
 
-        They are tens of kilobytes a read and a few kilobytes a chunk, which
-        matter only beside chunks of tens of kilobytes.
+        That is ``READ_ALLOWANCE_BYTES`` for the read and ``READ_CHUNK_BYTES``
+        for each chunk it touches, which matter only beside chunks of tens of
+        kilobytes.
         """
-        touched = max(1, int(chunks))
-        decoding = min(touched, max(1, int(decodes)))
-        return (
-            _READ_OBJECT_BYTES
-            + touched * _READ_CHUNK_OBJECT_BYTES
-            + decoding * _READ_DECODE_OBJECT_BYTES
-        )
+        return READ_ALLOWANCE_BYTES + max(1, int(chunks)) * READ_CHUNK_BYTES
 
     def heldDecodeBytes(self, chunks: int, decodes: int) -> int:
         """Return what a read of ``chunks`` chunks, ``decodes`` at a time, holds beside the chunks it decodes at once.
 
-        Every read holds the objects of Zarr's read that :meth:`objectBytes`
-        counts. A thread of a plain thread pool also keeps the last chunk it
+        Every read holds the allowance that :meth:`readAllowanceBytes` counts.
+        A thread of a plain thread pool also keeps the last chunk it
         decoded until it runs again, which on a busy machine can be after the
         read has moved on, so a read on such a pool also holds one previous
         decoded chunk for each decode under way, and no more than the decodes
@@ -434,10 +307,10 @@ class ArrayGeometry:
         """
         touched = max(1, int(chunks))
         decoding = min(touched, max(1, int(decodes)))
-        objects = self.objectBytes(touched, decoding)
+        allowance = self.readAllowanceBytes(touched)
         if not self.poolKeepsDecodedChunk:
-            return objects
-        return objects + min(decoding, touched - decoding) * self.nominalChunkBytes()
+            return allowance
+        return allowance + min(decoding, touched - decoding) * self.nominalChunkBytes()
 
     def wholeReadBytes(self, concurrency: int) -> int:
         """Return what reading the whole array at ``concurrency`` holds while it runs, with the result.
@@ -450,13 +323,7 @@ class ArrayGeometry:
         """
         result = self.rowsBytes(self.shape[0])
         if self.shards is not None:
-            # The reads of the earlier bands leave their objects while the
-            # last one runs.
-            return (
-                result
-                + self.bandReadBytes(self.axisChunk(0), concurrency)
-                + self.bandsLeftoverBytes(self.bandCount() - 1)
-            )
+            return result + self.bandReadBytes(self.axisChunk(0), concurrency)
         n_chunks = max(1, -(-self.shape[0] // self.axisChunk(0)) * self.bandChunks())
         decoding, _ = self.readsAtOnce(n_chunks, concurrency)
         return (
@@ -473,12 +340,13 @@ class ArrayGeometry:
         :meth:`heldDecodeBytes` counts; a sharded array also fills a
         shard-level copy of the rows and holds the stored bytes of every chunk
         of the band it fetched, which cover any previous decoded chunks,
-        beside the objects of Zarr's read.
+        beside the allowance of its read.
         """
         rows_bytes = self.rowsBytes(rows)
         touched = self.bandChunks()
         if self.shards is None:
-            # Each chunk decoded at once is a read of its own scratch.
+            # A store that computes the chunks makes each chunk decoded at
+            # once from scratch of its own.
             decoding, _ = self.readsAtOnce(touched, concurrency)
             band = decoding * (
                 self.storedChunkBytes() + self.readScratchBytes
@@ -489,7 +357,7 @@ class ArrayGeometry:
             rows_bytes
             + touched * self.storedChunkBytes()
             + decoding * self.nominalChunkBytes()
-            + self.objectBytes(touched, decoding)
+            + self.readAllowanceBytes(touched)
         )
         return rows_bytes + band + self.readScratchBytes
 
@@ -510,16 +378,11 @@ class ArrayGeometry:
         index arrays on ``indexedAxes`` of its axes before it places them,
         while a read of slices places a view of the chunk. Every row counts,
         even beyond a chunk's rows, so that the charge of a block shrunk to
-        fewer rows is no less than its share of the charge of more. With
-        index arrays on two axes, NumPy also buffers up to 8,192 elements of
-        each array, charged whole for the same reason.
+        fewer rows is no less than its share of the charge of more.
         """
         if indexedAxes <= 0:
             return 0
-        held = max(0, int(rows)) * max(0, int(columns)) * self.itemsize
-        if indexedAxes > 1:
-            held += _INDEX_BUFFER_ELEMENTS * 2 * np.dtype(np.intp).itemsize
-        return held
+        return max(0, int(rows)) * max(0, int(columns)) * self.itemsize
 
     def readBytes(
         self,
@@ -543,24 +406,24 @@ class ArrayGeometry:
         it decodes at once as stored and decoded, as :meth:`storedChunkBytes`
         counts, since Zarr keeps a chunk's compressed bytes beside it while it
         decodes it. Either read also holds what :meth:`heldDecodeBytes`
-        counts: the objects of Zarr's read, and the previous decoded chunks
-        that a plain pool keeps. ``chunks``
+        counts: the allowance of a read in flight, and the previous decoded
+        chunks that a plain pool keeps. ``chunks``
         counts the inner chunks the read touches in one shard and ``decodes``
-        the chunks Zarr decodes at once, all of them unless given.
-        Storage-provided scratch covers one shard request, including its
-        sequential inner-chunk reads. Independent shard requests each need
-        this allowance. Unsharded reads charge scratch per decode.
+        the chunks Zarr decodes at once, all of them unless given. A store
+        that computes its shards holds ``readScratchBytes`` for each shard
+        request, and one that computes its chunks for each chunk that an
+        unsharded read decodes at once.
         ``gapBytes`` are the stored bytes that a sharded read of part of a
         shard also fetches between the chunks it touches, as
         :func:`~cytearc.storage.partition.coalesced_gap_bytes` counts them.
         ``shards`` counts the shards that a sharded read touches, of which
-        Zarr reads as many at once as :meth:`readsAtOnce` gives: each holds
-        the compressed bytes of the chunks it touches, its decodes, what
-        :meth:`heldDecodeBytes` counts, scratch and gap, while their
-        shard-level copies together hold the selection once. Zarr makes a
-        task for every shard before it reads any, as it does for every chunk
-        of an unsharded read, so the shards it does not read at once hold
-        the objects of a chunk each meanwhile. The chunks that
+        Zarr reads as many at once as :meth:`readsAtOnce` gives: each is a
+        read in flight, which holds the compressed bytes of the chunks it
+        touches, its decodes, what :meth:`heldDecodeBytes` counts, scratch and
+        gap, while their shard-level copies together hold the selection once.
+        Zarr makes a task for every shard before it reads any, as it does for
+        every chunk of an unsharded read, so the shards it does not read at
+        once hold ``READ_CHUNK_BYTES`` each meanwhile. The chunks that
         a read decodes at once, in the array or in each shard, also follow
         :meth:`readsAtOnce`. A read that takes ``indexes`` positions by index
         arrays rather than slices, on any of its axes, also holds Zarr's
@@ -594,7 +457,7 @@ class ArrayGeometry:
             + self.readScratchBytes
             + max(0, int(gapBytes))
         )
-        waiting = (touched_shards - reading) * _READ_CHUNK_OBJECT_BYTES
+        waiting = (touched_shards - reading) * READ_CHUNK_BYTES
         return 2 * result + reading * shard + waiting + indexed
 
     def binOf(self, axis: int, indices: np.ndarray) -> np.ndarray:
@@ -645,14 +508,6 @@ def array_geometry(
     scratch = chunk_read_scratch_bytes(array)
     if scratch < 0:
         raise ValueError(f"Array read scratch cannot be negative, got {scratch}")
-    # A store that computes the array's chunks reads no file. A shard of
-    # several chunks can be read in part, as byte ranges of its file; every
-    # other read takes whole files, chunks or shards of one chunk.
-    if not scratch:
-        ranged = shards is not None and any(
-            shard > chunk for shard, chunk in zip(shards, resolved_chunks, strict=True)
-        )
-        scratch = _file_buffer_bytes(array, ranged=ranged)
     fused_workers, fused_async = _fused_pool(array)
 
     text = (
@@ -714,7 +569,7 @@ def _measured_text_extent(array: Any, ledger: MemoryLedger | None) -> TextExtent
     UTF-8 bytes and the widest character. A stored chunk counts what decoding
     it holds, and its rows beyond the array's edge as empty values, as Zarr
     decodes a whole chunk, with the bound of its compressed bytes and the
-    objects of Zarr's read. Before it reads a stored chunk, the measure
+    allowance of a read in flight. Before it reads a stored chunk, the measure
     charges ``ledger`` what decoding the chunk holds at the least, its values
     as empty strings, beside what the measure keeps for each value; once the
     chunk is measured, it charges what reading the chunk held, from the
@@ -734,9 +589,9 @@ def _measured_text_extent(array: Any, ledger: MemoryLedger | None) -> TextExtent
         else "a measure of variable-width text"
     )
     keeping = _TEXT_MEASURE_VALUE_BYTES * chunk_values
-    objects = _READ_OBJECT_BYTES + _READ_CHUNK_OBJECT_BYTES + _READ_DECODE_OBJECT_BYTES
+    allowance = READ_ALLOWANCE_BYTES + READ_CHUNK_BYTES
     least = keeping + (
-        _decode_bytes(chunk_values, 0, 0, 0, 0) + objects if chunks else 0
+        _decode_bytes(chunk_values, 0, 0, 0, 0) + allowance if chunks else 0
     )
     characters = utf8_most = widest = values = character_total = arena = 0
     chunk_decode = chunk_stored = measure = 0
@@ -752,8 +607,8 @@ def _measured_text_extent(array: Any, ledger: MemoryLedger | None) -> TextExtent
         decode = _decode_bytes(
             chunk_values, utf8_total, chunk_characters, chunk_widest, chunk_arena
         )
-        stored = _TEXT_LENGTH_BYTES * (chunk_values + 1) + utf8_total
-        reading = decode + _encoded_chunk_bound(stored) + objects
+        stored = _TEXT_LENGTH_BYTES * chunk_values + utf8_total
+        reading = decode + _encoded_chunk_bound(stored) + allowance
         held = (reading if chunks else 0) + keeping + part_bytes
         if ledger is not None:
             ledger.peak(item, held)
@@ -789,11 +644,10 @@ def _utf8_lengths(
     ``_TEXT_CAST_CHARACTERS`` characters are cast to fixed-width text in the
     order of their characters, in parts of at most ``_TEXT_MEASURE_VALUES``
     values and ``_TEXT_MEASURE_BYTES`` of code points, four bytes a character
-    of the part's longest value, beside the buffer of NumPy's cast; the code
-    points give a value's UTF-8 bytes, a byte for each character and one more
-    for each from U+0080, from U+0800 and from U+10000. A longer value is
-    encoded alone, as a Python string. Values without characters need
-    neither.
+    of the part's longest value; the code points give a value's UTF-8 bytes,
+    a byte for each character and one more for each from U+0080, from U+0800
+    and from U+10000. A longer value is encoded alone, as a Python string.
+    Values without characters need neither.
     """
     utf8 = lengths.copy()
     order = np.argsort(lengths, kind="stable")
@@ -820,11 +674,10 @@ def _utf8_lengths(
                 np.count_nonzero(points >= limit, axis=1)
                 for limit in (0x80, 0x800, 0x10000)
             )
-        # The part as NumPy keeps it, its code points and the buffer of the
-        # cast that made them, a comparison of them and the counts it gives,
-        # and the fits of the part's values.
-        kept = 16 * part.size + 5 * (int(utf8[positions].sum()) + 8 * part.size) // 4
-        cast = points.nbytes * 5 // 4 + np.getbufsize() * 4 * longest
+        # The part as NumPy keeps it, its code points, a comparison of them
+        # and the counts it gives, and the fits of the part's values.
+        kept = _TEXT_ELEMENT_BYTES * part.size + int(utf8[positions].sum())
+        cast = points.nbytes * 5 // 4
         part_bytes = max(part_bytes, kept + cast + 24 * window.size)
         del part, points, fits
         start = stop
@@ -872,43 +725,6 @@ def _utf8_lengths(
         del strings, encoded, ascii_bytes
         first = stop
     return utf8, widest, part_bytes
-
-
-def _file_buffer_bytes(array: Any, *, ranged: bool) -> int:
-    """Return the buffer that each fetch of ``array``'s stored bytes holds, 0 for a store that reads no file.
-
-    Zarr's local store reads a whole file, a chunk of an unsharded array or a
-    whole shard, through ``Path.read_bytes``, and a byte range of a file,
-    part of a shard of several chunks, through ``open``. Before Python 3.14
-    both buffer the file at its file system's block size, or at
-    ``io.DEFAULT_BUFFER_SIZE`` where that is unknown. From Python 3.14 a
-    whole file is read unbuffered, and a byte range is buffered at the block
-    size, at least ``io.DEFAULT_BUFFER_SIZE``, 128 KiB, and at most 8 MiB, so
-    only an array that is ``ranged``, whose shards hold several chunks, is
-    charged that buffer. Zarr's wrappers of the store are looked through.
-    """
-    store = getattr(array, "store", None)
-    storage: Any = importlib.import_module("zarr.storage")
-    while isinstance(store, storage.WrapperStore):
-        store = store._store
-    if not isinstance(store, storage.LocalStore):
-        return 0
-    block = _block_size(str(store.root))
-    if not _WHOLE_FILES_UNBUFFERED:
-        return block if block > 1 else io.DEFAULT_BUFFER_SIZE
-    if not ranged:
-        return 0
-    return max(min(block, _FILE_BUFFER_LIMIT_BYTES), io.DEFAULT_BUFFER_SIZE)
-
-
-@functools.cache
-def _block_size(root: str) -> int:
-    """Return the block size of the file system that holds ``root``, 0 where the platform reports none, as Windows does not.
-
-    A store's files share its root's file system, so each root is asked once
-    in a process.
-    """
-    return int(getattr(os.stat(root), "st_blksize", 0))
 
 
 def _coalesce_gap_bytes(array: Any) -> int:

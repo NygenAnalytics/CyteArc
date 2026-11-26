@@ -77,9 +77,6 @@ _ADAM_EPSILON = 1e-7
 # An initialization is centered and scaled to this standard deviation, as
 # the reference scales coordinates that it is given.
 _INITIAL_SCALE = 1e-4
-# The headers of a layout's arrays and the objects of its loop, which
-# tracemalloc counts at about 6 KiB beside the arrays.
-_LAYOUT_OBJECT_BYTES = 16 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,8 +204,7 @@ def localmap_peak_bytes(
     blocks for each thread. The peak comes while a list is built: the
     neighbors', the mid-near pairs', or the further pairs' that a third phase
     builds again while it holds their previous list. Every edge counts as a
-    weighted edge, though the copy keeps no edge of weight zero, and 16 KiB
-    covers the headers of the arrays and the objects of the layout's loop.
+    weighted edge, though the copy keeps no edge of weight zero.
 
     Args:
         n_cells: Cells of the graph.
@@ -256,18 +252,14 @@ def localmap_peak_bytes(
     def building(pairs: int, row_offsets: int) -> int:
         return row_offsets + tables + 12 * pairs + 8 * cells
 
-    return (
-        _LAYOUT_OBJECT_BYTES
-        + held
-        + max(
-            building(edges, 0) + neighbor_list,
-            neighbor_list + building(cells * mid_near, offsets) + mid_near_list,
-            neighbor_list
-            + mid_near_list
-            + further_list
-            + building(cells * further, offsets)
-            + further_list,
-        )
+    return held + max(
+        building(edges, 0) + neighbor_list,
+        neighbor_list + building(cells * mid_near, offsets) + mid_near_list,
+        neighbor_list
+        + mid_near_list
+        + further_list
+        + building(cells * further, offsets)
+        + further_list,
     )
 
 

@@ -6,6 +6,7 @@ from numba import prange
 from scipy.sparse import coo_matrix, csr_matrix
 
 from ..utils.arguments import integer_argument
+from ..utils.memory_budget import READ_ALLOWANCE_BYTES
 from ..utils.numba import enable_dispatcher_cache, import_umap, njit
 from ..utils.progress import iter_progress
 
@@ -25,13 +26,6 @@ class GraphLoadMemory:
     maxEntries: int
 
 
-#: What loading a graph holds beside its arrays, whatever their size:
-#: Zarr's buffers and the objects that reading the stored arrays and checking
-#: the graph's records keep, measured after a full collection has emptied
-#: CPython's free lists, so that each object is allocated anew.
-_READ_OBJECT_BYTES = 64 * 1024
-
-
 def _sparse_index_bytes(n_cells: int, n_entries: int) -> int:
     """Return the itemsize of SciPy's index dtype for such a sparse matrix."""
     return 4 if max(n_cells, n_entries) <= np.iinfo(np.int32).max else 8
@@ -49,10 +43,9 @@ def graph_load_memory(
 ) -> GraphLoadMemory:
     """Estimate the bytes of loading a stored graph of ``n_edges`` directed edges.
 
-    A load reads the stored edge pairs and weights, builds a COO matrix whose
-    coordinates are copies in SciPy's index dtype, and converts it to CSR,
-    beside 64 KiB of Zarr's buffers and the objects that reading the arrays
-    and checking the graph's records keep.
+    A load reads the stored edge pairs and weights, one read in flight that
+    holds ``READ_ALLOWANCE_BYTES`` beside them, builds a COO matrix whose
+    coordinates are copies in SciPy's index dtype, and converts it to CSR.
     ``keep_nearest`` first keeps each cell's nearest edges with
     :func:`take_nearest_per_row`, which holds, beside the stored arrays, each
     edge's source cell, its row's start and its rank in the row as ``intp``,
@@ -93,7 +86,7 @@ def graph_load_memory(
     pointer_bytes = (cells + 1) * index_bytes
     directed_bytes = edges * entry_bytes + pointer_bytes
     # The stored pairs and weights, the COO coordinates, and the CSR matrix,
-    # beside Zarr's buffers and the objects of the load.
+    # beside the allowance of the read.
     loading = edges * (2 * edge_bytes + weight_bytes + 2 * index_bytes) + directed_bytes
     if keep_nearest:
         stored = edges * (2 * edge_bytes + weight_bytes)
@@ -106,14 +99,14 @@ def graph_load_memory(
             stored + 4 * intp * edges + 2 * intp * cells,
             2 * stored + (3 * intp + 1) * edges + 2 * intp * cells,
         )
-    loading += _READ_OBJECT_BYTES
+    loading += READ_ALLOWANCE_BYTES
     if not symmetric:
         return GraphLoadMemory(
             peakBytes=loading,
             heldBytes=directed_bytes,
             maxEntries=edges,
         )
-    union = 7 * edges * entry_bytes + 5 * pointer_bytes + _READ_OBJECT_BYTES
+    union = 7 * edges * entry_bytes + 5 * pointer_bytes
     union_bytes = 2 * edges * entry_bytes + pointer_bytes
     if not upper_only:
         return GraphLoadMemory(

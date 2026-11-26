@@ -452,24 +452,27 @@ def test_the_graph_load_estimate_pins_its_terms() -> None:
     # loads an entry as an int32 index and a float32 weight, 8 bytes, beside
     # 101 int32 row pointers, 404 bytes, so the directed matrix takes 4,404.
     # Loading holds the stored arrays, 12 bytes an edge, and the COO
-    # coordinates, 8, beside it and 64 KiB of Zarr's buffers and objects.
+    # coordinates, 8, beside it and the allowance of a read, 128 KiB.
     directed = graph_load_memory(100, 500, symmetric=False)
     assert directed == GraphLoadMemory(
-        peakBytes=500 * 20 + 4_404 + 65_536, heldBytes=4_404, maxEntries=500
+        peakBytes=500 * 20 + 4_404 + 131_072, heldBytes=4_404, maxEntries=500
     )
     # The fuzzy union holds seven matrices' entries and five sets of
-    # pointers while it forms, beside the same 64 KiB, and keeps 1,000
-    # entries.
-    union = graph_load_memory(100, 500, symmetric=True)
+    # pointers while it forms, and keeps twice the entries. Of 5,000 edges
+    # it outgrows the load, 5,000 * 20 + 40,404 + 131,072 bytes.
+    union = graph_load_memory(100, 5_000, symmetric=True)
     assert union == GraphLoadMemory(
-        peakBytes=7 * 500 * 8 + 5 * 404 + 65_536,
-        heldBytes=1_000 * 8 + 404,
-        maxEntries=1_000,
+        peakBytes=7 * 5_000 * 8 + 5 * 404,
+        heldBytes=10_000 * 8 + 404,
+        maxEntries=10_000,
     )
+    assert 7 * 5_000 * 8 + 5 * 404 > 5_000 * 20 + 40_404 + 131_072
+    # Of 500 edges the load decides.
+    assert graph_load_memory(100, 500, symmetric=True).peakBytes == (directed.peakBytes)
     # Keeping each cell's nearest edges first holds the stored arrays twice,
     # three int64 values and a flag an edge, and two int64 values a cell.
     nearest = graph_load_memory(100, 500, symmetric=False, keep_nearest=True)
-    assert nearest.peakBytes == 2 * 6_000 + 25 * 500 + 16 * 100 + 65_536
+    assert nearest.peakBytes == 2 * 6_000 + 25 * 500 + 16 * 100 + 131_072
 
 
 # Graph-loading flags and initialization references

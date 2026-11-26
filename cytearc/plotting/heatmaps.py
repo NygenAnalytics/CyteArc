@@ -680,12 +680,6 @@ def marker_heatmap(
     return result
 
 
-#: What drawing a pseudotime heatmap holds whatever its size: matplotlib's
-#: figure, its four axes, the colorbar and their text, measured after a full
-#: collection has emptied CPython's free lists.
-_HEATMAP_FIGURE_BYTES = 1536 * 1024
-
-
 def pseudotime_heatmap_bytes(
     n_features: int, n_bins: int, label_bytes: int, n_cells: int
 ) -> int:
@@ -698,15 +692,15 @@ def pseudotime_heatmap_bytes(
     module, in the order drawn, as matplotlib keeps the image, and as the
     matrix table; rendering the figure normalizes them once more, which a
     call with ``show=False`` does not do. It copies the names and IDs three
-    times and makes a Python string of each name twice, holds four values
-    for each of the pseudotime's ``n_cells`` cells, and matplotlib's figure
-    objects.
+    times and makes a Python string of each name twice, and holds four
+    values for each of the pseudotime's ``n_cells`` cells. Matplotlib's
+    figure, whatever its size, is left out.
     """
     n_features, label_bytes = int(n_features), int(label_bytes)
     kept = n_features * (24 + label_bytes)
     profiles = 4 * 8 * n_features * int(n_bins)
     labels = n_features * (3 * label_bytes + 2 * (STRING_BYTES + label_bytes))
-    return kept + profiles + labels + 32 * int(n_cells) + _HEATMAP_FIGURE_BYTES
+    return kept + profiles + labels + 32 * int(n_cells)
 
 
 def _prepare_pseudotime_heatmap(

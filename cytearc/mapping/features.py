@@ -561,7 +561,7 @@ class AlignedFeatureStream:
             arrays.append(self._cell_sources)
             for pair in self._source_features.values():
                 arrays.extend(pair)
-        return sum(array.nbytes for array in arrays) + np.dtype(np.float64).itemsize
+        return sum(array.nbytes for array in arrays)
 
     def _read_parts(self, rows: int) -> tuple[int, int]:
         """Return what the read of a block of ``rows`` query cells holds beside its values, per decode and per cell.

@@ -785,8 +785,9 @@ def test_specificity_charges_a_block_of_scores_that_follows_the_budget_not_the_c
     np.testing.assert_allclose(
         scores.to_numpy(), default.to_numpy(), rtol=0, atol=1e-12
     )
-    # Its budget holds less than the cells' float32 scores.
-    assert ledger.budget < 400 * per_row
+    # Its budget holds less than the cells' float32 scores beside the
+    # allowance of a read of one chunk.
+    assert ledger.budget < 400 * per_row + 135_168
 
 
 def test_connection_specificity_charges_a_block_of_scores_and_their_deviations(

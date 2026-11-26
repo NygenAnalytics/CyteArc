@@ -724,9 +724,9 @@ def test_a_pseudotime_of_some_cells_charges_the_subgraph_before_reading_the_grap
         ss_vec=pd.Series(np.r_[-1.0, np.zeros(8), 1.0], index=ids[:10]),
     )
     reads = _count_calls(monkeypatch, store, "_store_to_sparse")
-    # The 48 KiB of Zarr's buffers and the load's objects, which outweigh
-    # so small a graph, are set aside, so the bytes that grow with it decide.
-    monkeypatch.setattr("cytearc.neighbors.graph._READ_OBJECT_BYTES", 0)
+    # The allowance of the load's read, which outweighs so small a graph, is
+    # set aside, so the bytes that grow with it decide.
+    monkeypatch.setattr("cytearc.neighbors.graph.READ_ALLOWANCE_BYTES", 0)
     # SciPy loads an entry as an int32 index and a float32 weight, 8 bytes,
     # beside 13 int32 row pointers, 52 bytes, so the union keeps
     # 2 * 11 * 8 + 52 = 228 bytes, and forming it holds 7 * 11 * 8 + 5 * 52 =

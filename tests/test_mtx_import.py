@@ -1399,10 +1399,10 @@ def test_mtx_import_fits_the_parse_buffer_that_it_reads(tmp_path):
     store = MemoryStore()
     try:
         # The default buffer of 100,000 lines parses the file's 10,000 entries
-        # in one chunk, which needs about 5.8 MiB, so the import is refused
-        # before the destination exists.
+        # in one chunk, about 2.7 MB, which the producer holds beside a band of
+        # source rows, so the import is refused before the destination exists.
         destination = tmp_path / "default.zarr"
-        with pytest.raises(MemoryError, match="count shards of one row"):
+        with pytest.raises(MemoryError, match="buffers a band of source rows"):
             MtxToZarr(
                 reader,
                 str(destination),

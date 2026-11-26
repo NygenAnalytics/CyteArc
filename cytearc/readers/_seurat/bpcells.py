@@ -727,8 +727,6 @@ class _StoredBP128Array:
 
 
 class BPCellsMatrixSource(CompressedMatrixSource):
-    _decodeWorkingBytes = 128 * np.dtype(np.uint32).itemsize
-
     def __init__(
         self,
         store: _BPArrayStore,
