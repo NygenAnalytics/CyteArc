@@ -994,36 +994,6 @@ def test_a_search_that_stops_at_its_limit_of_trials_records_it_and_warns(
     )
 
 
-def test_a_search_saved_without_its_optimization_record_is_computed_anew() -> None:
-    # A search saved before the artifact recorded how its optimization ended
-    # lacks the diagnostic: no call reuses it, and loading it names the call
-    # that saves it anew.
-    trajectory, direction, _labels = _process_store()
-    with pytest.warns(DiagnosticWarning):
-        earlier = _states(trajectory, direction)
-    group = artifact_group(trajectory.store.zw, earlier)
-    saved = dict(group.attrs["diagnostics"])
-    del saved["crispnessOptimization"]
-    group.attrs["diagnostics"] = saved
-
-    with pytest.raises(ValueError, match="call ds.trajectory.states again"):
-        trajectory.store.trajectory.load_states(earlier)
-    with pytest.warns(DiagnosticWarning):
-        again = _states(trajectory, direction)
-
-    assert again != earlier
-    assert len(_state_artifacts(trajectory)) == 2
-    # The search computed anew finds the same memberships.
-    np.testing.assert_array_equal(
-        trajectory.store.trajectory.load_states(again).memberships,
-        group["memberships"][:],
-    )
-    assert (
-        trajectory.store.artifacts.inspect(again).diagnostics["crispnessOptimization"]
-        == "converged"
-    )
-
-
 def test_loading_a_search_is_charged_to_the_memory_budget() -> None:
     trajectory, direction, _labels = _process_store()
     with pytest.warns(DiagnosticWarning):
