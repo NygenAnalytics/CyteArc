@@ -1,0 +1,42 @@
+{
+  "attributes": {
+    "artifact_id": "bd59d3a49b2004b589d865e3ec55b2782f3013dcc5843a4611ddb973b360af9f",
+    "kind": "normalized",
+    "provenance": {
+      "operation": "run_normalization",
+      "parameters": {
+        "normalization_method": {
+          "external_hook": true,
+          "identity": "cytearc.assay.norm_tf_idf:selected-cell-df:total-count-tf"
+        },
+        "size_factor": null,
+        "log_transform": false,
+        "renormalize_subset": false
+      },
+      "inputs": {
+        "cell_selection": {
+          "type": "artifact",
+          "scope": "datastore",
+          "kind": "cell_selection",
+          "artifact_id": "cb5d61c9658933cef87804046a9fda5f7eb3c6f7c658e8961cc6c4f27619925c"
+        },
+        "feature_selection": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "feature_selection",
+          "artifact_id": "59175134081bc6779c9aa6abf8125cf2836761fdee8fa6e2627b482d92eb687a",
+          "assay": "ATAC"
+        },
+        "dataset_fingerprint": "d197c99a62014879555ed8548a218b4e42d6ab2755cb4cc597ad026d6160da7a"
+      }
+    },
+    "execution_options": {
+      "invalidate_cache": false
+    },
+    "created_at_ns": 1795720171861580000,
+    "cytearc_version": "1.4.0",
+    "complete": true
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

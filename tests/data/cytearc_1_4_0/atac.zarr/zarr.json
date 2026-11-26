@@ -1,0 +1,10 @@
+{
+  "attributes": {
+    "assayTypes": {
+      "ATAC": "ATAC"
+    },
+    "defaultAssay": "ATAC"
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

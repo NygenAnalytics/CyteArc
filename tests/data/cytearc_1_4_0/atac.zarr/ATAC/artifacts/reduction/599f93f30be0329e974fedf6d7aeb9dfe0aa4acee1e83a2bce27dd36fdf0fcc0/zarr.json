@@ -1,0 +1,43 @@
+{
+  "attributes": {
+    "artifact_id": "599f93f30be0329e974fedf6d7aeb9dfe0aa4acee1e83a2bce27dd36fdf0fcc0",
+    "kind": "reduction",
+    "provenance": {
+      "operation": "run_lsi",
+      "parameters": {
+        "dims": 10,
+        "skip_first": true,
+        "rand_state": 4466,
+        "solver": "streaming",
+        "n_iter": 5,
+        "n_oversamples": 10
+      },
+      "inputs": {
+        "normalized": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "normalized",
+          "artifact_id": "bd59d3a49b2004b589d865e3ec55b2782f3013dcc5843a4611ddb973b360af9f",
+          "assay": "ATAC"
+        },
+        "feature_scaling": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "feature_scaling",
+          "artifact_id": "a66d81c4f4a5d53d71da0b33bd9b754c452ed945422c6a93cf45f4479b0afc14",
+          "assay": "ATAC"
+        }
+      }
+    },
+    "execution_options": {
+      "batch_size": 174,
+      "invalidate_cache": false,
+      "local_cache": "auto"
+    },
+    "created_at_ns": 1795720171914432000,
+    "cytearc_version": "1.4.0",
+    "complete": true
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

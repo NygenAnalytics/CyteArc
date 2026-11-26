@@ -1,0 +1,32 @@
+{
+  "attributes": {
+    "artifact_id": "270bf6cc61f5dd424c1f2583bfdd29ced5355cb978260831f96113a85b4859e5",
+    "kind": "metadata_snapshot",
+    "provenance": {
+      "operation": "snapshot_run_metadata",
+      "parameters": {
+        "axis": "cell",
+        "assay": null,
+        "ordered_columns": [
+          "names",
+          "ATAC_nCounts",
+          "ATAC_nFeatures"
+        ]
+      },
+      "inputs": {
+        "ordered_row_ids_fingerprint": "9d002ca4083c27796dd0665940fe87d84a845f82b99c85539fb9a5dd285c6740",
+        "column_fingerprints": {
+          "names": "9d002ca4083c27796dd0665940fe87d84a845f82b99c85539fb9a5dd285c6740",
+          "ATAC_nCounts": "58eb4254b3de919338d268c5eca724d1d26ae3337c3b5ecdf9a5b3733349b79f",
+          "ATAC_nFeatures": "47d7cb6ed953e1af6f7fd652d83f369f7699ab323d79ca59860b785cffc43242"
+        }
+      }
+    },
+    "execution_options": {},
+    "created_at_ns": 1795720171720540000,
+    "cytearc_version": "1.4.0",
+    "complete": true
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

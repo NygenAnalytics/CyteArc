@@ -1,0 +1,36 @@
+{
+  "attributes": {
+    "artifact_id": "faa8fd56af7153324c96f3e2195d39f7d25cdeddab80d35d2d1d4efa27791a5f",
+    "kind": "metadata_snapshot",
+    "provenance": {
+      "operation": "snapshot_run_metadata",
+      "parameters": {
+        "axis": "cell",
+        "assay": null,
+        "ordered_columns": [
+          "names",
+          "RNA_nCounts",
+          "RNA_nFeatures",
+          "RNA_percentMito",
+          "RNA_percentRibo"
+        ]
+      },
+      "inputs": {
+        "ordered_row_ids_fingerprint": "7a1f35aa6ec45537c2360f48ef8f677be8152c6087645f9702eaaf74bda37f5b",
+        "column_fingerprints": {
+          "names": "7a1f35aa6ec45537c2360f48ef8f677be8152c6087645f9702eaaf74bda37f5b",
+          "RNA_nCounts": "51274fa2498aae3a587f963af35653e796ecc45bd17fd334729fc0c9af58ea0d",
+          "RNA_nFeatures": "be3a3f57670c43280a52890080020928a16ba4078a53ff0c6e528d52d4acd79f",
+          "RNA_percentMito": "a30afc66da0b5bcd2ccd876f49b6709a1092a14db6f42b6d2ddec822363c7515",
+          "RNA_percentRibo": "7324b2376e631b8c5e84308f4d20cca9eea9f57a7ec1485a4078bc74d3aeaf7c"
+        }
+      }
+    },
+    "execution_options": {},
+    "created_at_ns": 1795720168037194000,
+    "cytearc_version": "1.4.0",
+    "complete": true
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

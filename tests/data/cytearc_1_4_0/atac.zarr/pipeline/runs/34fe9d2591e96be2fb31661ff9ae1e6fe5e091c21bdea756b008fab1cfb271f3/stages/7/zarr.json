@@ -1,0 +1,89 @@
+{
+  "attributes": {
+    "stage": "neighbors",
+    "ordinal": 7,
+    "startedAtNs": 1795720171971433000,
+    "finishedAtNs": 1795720172005554000,
+    "status": "completed",
+    "complete": true,
+    "outputs": [
+      {
+        "outputKey": "neighbors",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "neighbors",
+          "artifact_id": "6e32f446c86dd3f0e589d5b5a184387f8a3f076b6e61428ed791943436b799d9",
+          "assay": "ATAC"
+        },
+        "reused": false
+      }
+    ],
+    "plans": [
+      {
+        "operation": "query_neighbors",
+        "ref": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "neighbors",
+          "artifact_id": "6e32f446c86dd3f0e589d5b5a184387f8a3f076b6e61428ed791943436b799d9",
+          "assay": "ATAC"
+        },
+        "disposition": "created"
+      }
+    ],
+    "metrics": {
+      "wallSeconds": 0.036306916968896985,
+      "rssBaselineBytes": null,
+      "rssPeakBytes": null,
+      "rssIncrementalPeakBytes": null,
+      "sampleIntervalSeconds": 0.1,
+      "sampleCount": 0,
+      "samplingErrorCount": 0,
+      "rssUnavailableReason": "process-tree RSS requires the Linux /proc filesystem",
+      "cpuSeconds": 0.039049999999999585,
+      "threadsPeak": null,
+      "rssHighWaterStartBytes": 879951872,
+      "rssHighWaterEndBytes": 880033792,
+      "networkRxBytes": null,
+      "networkTxBytes": null,
+      "resources": {
+        "workers": 2,
+        "memoryBudgetBytes": 2147483648,
+        "cpusAvailable": 8,
+        "cpuQuotaCores": null,
+        "memoryLimitBytes": 17179869184
+      },
+      "trace": {
+        "seconds": [
+          0.0,
+          0.03
+        ],
+        "cpuSeconds": [
+          0.0,
+          0.039
+        ],
+        "rssBytes": null,
+        "threads": null,
+        "networkRxBytes": null,
+        "networkTxBytes": null
+      },
+      "unavailable": {
+        "threadsPeak": "OS thread counts require the Linux /proc filesystem",
+        "networkRxBytes": "network counters require the Linux /proc filesystem",
+        "networkTxBytes": "network counters require the Linux /proc filesystem"
+      }
+    },
+    "error": null,
+    "interruption": null,
+    "summary": {
+      "cells": 174,
+      "k": 11,
+      "selfHitRate": 100.0
+    },
+    "warnings": [],
+    "outputLists": []
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

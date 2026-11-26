@@ -1,0 +1,31 @@
+{
+  "attributes": {
+    "artifact_id": "59175134081bc6779c9aa6abf8125cf2836761fdee8fa6e2627b482d92eb687a",
+    "kind": "feature_selection",
+    "provenance": {
+      "operation": "select_prevalent_peaks",
+      "parameters": {
+        "top_n": 200
+      },
+      "inputs": {
+        "feature_summary": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "feature_summary",
+          "artifact_id": "4cee10d66811ff72f07043e8b7180d02c8c8f1b71e1a491b616dec18268a23c6",
+          "assay": "ATAC"
+        }
+      }
+    },
+    "execution_options": {
+      "invalidate_cache": false
+    },
+    "created_at_ns": 1795720171833271000,
+    "cytearc_version": "1.4.0",
+    "complete": true,
+    "ordered_feature_ids_fingerprint": "44a6d42fb7eaeb08471e52d99e657da47d85a5befb23dfd355e3d48ef6af687f",
+    "payload_fingerprint": "a6ac9ffb6172437a44fdbd18ffffdb140dad2c0d4f3895cfadac2c922e811244"
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

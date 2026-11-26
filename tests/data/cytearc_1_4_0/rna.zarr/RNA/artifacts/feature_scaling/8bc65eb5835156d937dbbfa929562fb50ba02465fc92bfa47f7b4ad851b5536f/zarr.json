@@ -1,0 +1,31 @@
+{
+  "attributes": {
+    "artifact_id": "8bc65eb5835156d937dbbfa929562fb50ba02465fc92bfa47f7b4ad851b5536f",
+    "kind": "feature_scaling",
+    "provenance": {
+      "operation": "calculate_feature_scaling",
+      "parameters": {
+        "enabled": true
+      },
+      "inputs": {
+        "normalized": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "normalized",
+          "artifact_id": "3573f9ddb91a9421aa510d261bc8a2b34eddb010cb2eb3bd5e9f4878cc401368",
+          "assay": "RNA"
+        }
+      }
+    },
+    "execution_options": {
+      "batch_size": 175,
+      "invalidate_cache": false,
+      "local_cache": "auto"
+    },
+    "created_at_ns": 1795720168573546000,
+    "cytearc_version": "1.4.0",
+    "complete": true
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

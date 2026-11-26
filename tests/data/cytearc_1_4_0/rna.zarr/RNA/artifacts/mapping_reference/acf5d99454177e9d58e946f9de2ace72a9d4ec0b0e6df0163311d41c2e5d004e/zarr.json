@@ -1,0 +1,72 @@
+{
+  "attributes": {
+    "artifact_id": "acf5d99454177e9d58e946f9de2ace72a9d4ec0b0e6df0163311d41c2e5d004e",
+    "kind": "mapping_reference",
+    "provenance": {
+      "operation": "build_mapping_reference",
+      "parameters": {
+        "method": "pca"
+      },
+      "inputs": {
+        "reduction": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "reduction",
+          "artifact_id": "bd6cb726cc209891c096d9ff0050ee23fa3130f488bb12f3b3e1baa307cf41de",
+          "assay": "RNA"
+        },
+        "ann_index": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "ann_index",
+          "artifact_id": "aad6bfe9870fab0ffb7a331e4077c8a54c99e10ea222580b09c8268044493d9d",
+          "assay": "RNA"
+        },
+        "neighbors": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "neighbors",
+          "artifact_id": "e0db29df565c7df6b09b20ca5e86753cab3f696dfd4052c776de7804d4e3d454",
+          "assay": "RNA"
+        },
+        "cell_selection": {
+          "type": "artifact",
+          "scope": "datastore",
+          "kind": "cell_selection",
+          "artifact_id": "26fe72eafb5a078ff48fe49c95f5b8d59a3d872f2d3fb7b5fedd01877dfd6999"
+        },
+        "feature_selection": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "feature_selection",
+          "artifact_id": "2c723e910ab9e4453fd1719e4d323c51f397daa3d6835346db585b4f6b5d7774",
+          "assay": "RNA"
+        }
+      }
+    },
+    "execution_options": {},
+    "created_at_ns": 1795720169650123000,
+    "cytearc_version": "1.4.0",
+    "complete": true,
+    "reference_metadata": {
+      "method": "pca",
+      "assay": "RNA",
+      "selected_cell_count": 175,
+      "ann_metric": "l2",
+      "normalization_parameters": {
+        "normalization_method": {
+          "external_hook": true,
+          "module": "cytearc.assay",
+          "qualname": "norm_lib_size"
+        },
+        "size_factor": 1000.0,
+        "log_transform": true,
+        "renormalize_subset": true
+      },
+      "dataset_fingerprint": "e17310f277d4dc70fc194df1d7a964ea9c7a62a72f9c1e49e46b6ea6b5efd175"
+    },
+    "payload_fingerprint": "4d25b46ebeab5d81c8d8d3cb05970ef68abce607a7a5cda0e971babdeb288957"
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

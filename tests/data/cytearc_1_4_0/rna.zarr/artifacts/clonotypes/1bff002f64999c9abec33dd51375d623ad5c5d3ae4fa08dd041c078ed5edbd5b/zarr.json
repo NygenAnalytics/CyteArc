@@ -1,0 +1,48 @@
+{
+  "attributes": {
+    "artifact_id": "1bff002f64999c9abec33dd51375d623ad5c5d3ae4fa08dd041c078ed5edbd5b",
+    "kind": "clonotypes",
+    "provenance": {
+      "operation": "define_clonotypes",
+      "parameters": {
+        "sequence": "nt",
+        "receptor_arms": "all",
+        "dual_ir": "any",
+        "same_v_gene": false,
+        "same_j_gene": false,
+        "within": [],
+        "within_receptor_type": true,
+        "metric": "identity",
+        "max_distance": 0
+      },
+      "inputs": {
+        "receptors": {
+          "type": "artifact",
+          "scope": "datastore",
+          "kind": "immune_receptors",
+          "artifact_id": "36cfc48e7a33ab73047ed99a852b23f25d268a654fdb18040c7e4021fecba8e6"
+        },
+        "within_fingerprint": null,
+        "cell_selection": {
+          "type": "artifact",
+          "scope": "datastore",
+          "kind": "cell_selection",
+          "artifact_id": "26fe72eafb5a078ff48fe49c95f5b8d59a3d872f2d3fb7b5fedd01877dfd6999"
+        }
+      }
+    },
+    "execution_options": {
+      "invalidate_cache": false
+    },
+    "created_at_ns": 1795720171325193000,
+    "cytearc_version": "1.4.0",
+    "complete": true,
+    "n_clonotypes": 30,
+    "diagnostics": {
+      "cellsWithClone": 72,
+      "largestCloneShare": 0.05555555555555555
+    }
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

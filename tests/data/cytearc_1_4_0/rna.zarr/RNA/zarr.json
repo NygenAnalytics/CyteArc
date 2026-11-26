@@ -1,0 +1,69 @@
+{
+  "attributes": {
+    "is_assay": true,
+    "prepared": true,
+    "misc": {},
+    "cytearc:countMatrixLayout": {
+      "policy": {
+        "unitBytes": 1000000000,
+        "chunkBytes": 100000000
+      },
+      "nCells": 200,
+      "nFeats": 389,
+      "dtype": "uint16",
+      "itemsize": 2,
+      "chunksPerShard": 1,
+      "counts": {
+        "shape": [
+          200,
+          389
+        ],
+        "chunks": [
+          200,
+          389
+        ],
+        "shards": [
+          200,
+          389
+        ]
+      },
+      "countsT": {
+        "shape": [
+          389,
+          200
+        ],
+        "chunks": [
+          389,
+          200
+        ],
+        "shards": [
+          389,
+          200
+        ]
+      },
+      "readGroup": {
+        "featureWidth": 389,
+        "cellExtent": 200,
+        "chunkFeatures": 389,
+        "chunkCells": 200,
+        "shardFeatures": 389,
+        "shardCells": 200,
+        "shardsTouched": 1,
+        "chunksTouched": 1,
+        "readGroupBytes": 155600,
+        "physicalShardBytes": 155600
+      },
+      "sourceDecodeAmplification": 1.0,
+      "fingerprint": "3266091741d671c75d468885493af4cd3389fc6faee4ffc1ec96b955aef39dd3"
+    },
+    "size_factor": 1000,
+    "percentFeatures": {
+      "RNA_percentMito": "^MT-",
+      "RNA_percentRibo": "^RPS|^RPL|^MRPS|^MRPL"
+    },
+    "dataset_fingerprint": "e17310f277d4dc70fc194df1d7a964ea9c7a62a72f9c1e49e46b6ea6b5efd175",
+    "counts_fingerprint": "9eac377755c5789bcb8ecbf9fc53ffd3a0217d2e8ce439e604d72b9d16b39b61"
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

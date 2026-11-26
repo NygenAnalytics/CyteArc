@@ -1,0 +1,145 @@
+{
+  "attributes": {
+    "artifact_id": "cb1aeb8cc79eff81de5ea636f8e012489969f0fd8551029b8579de598520e99f",
+    "kind": "cluster_selection",
+    "provenance": {
+      "operation": "select_clusters_by_silhouette",
+      "parameters": {
+        "candidateKeys": [
+          "0.5",
+          "0.75",
+          "1.0",
+          "1.25"
+        ],
+        "seed": 4466,
+        "maxSampleSize": 10000,
+        "metric": "euclidean",
+        "tieOrder": [
+          "0.5",
+          "0.75",
+          "1.0",
+          "1.25"
+        ],
+        "sampleStrategy": "sharedClusterQuota",
+        "minClusterQuota": 2
+      },
+      "inputs": {
+        "coordinates": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "reduction",
+          "artifact_id": "599f93f30be0329e974fedf6d7aeb9dfe0aa4acee1e83a2bce27dd36fdf0fcc0",
+          "assay": "ATAC"
+        },
+        "connectivityMap": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "connectivity_map",
+          "artifact_id": "18cd855a9467a7ef4d4cef6c6ec187e0570af42993dc06002d051db8d6325ee4",
+          "assay": "ATAC"
+        },
+        "cellSelection": {
+          "type": "artifact",
+          "scope": "datastore",
+          "kind": "cell_selection",
+          "artifact_id": "cb5d61c9658933cef87804046a9fda5f7eb3c6f7c658e8961cc6c4f27619925c"
+        },
+        "candidates": {
+          "0.5": {
+            "type": "artifact",
+            "scope": "assay",
+            "kind": "cluster_labels",
+            "artifact_id": "a6fe611f4d14557b5361978838f646ac560636009134d66922a1e13e8052acb0",
+            "assay": "ATAC"
+          },
+          "0.75": {
+            "type": "artifact",
+            "scope": "assay",
+            "kind": "cluster_labels",
+            "artifact_id": "97a4b3c8ba683ee523702bcbdf406c04f88c478bbb9226cbe9fae5329984cbdb",
+            "assay": "ATAC"
+          },
+          "1.0": {
+            "type": "artifact",
+            "scope": "assay",
+            "kind": "cluster_labels",
+            "artifact_id": "77a1f55111c152e82a0af40694d17ed26b5c2a0c58a8d6cd7a02f21d71259892",
+            "assay": "ATAC"
+          },
+          "1.25": {
+            "type": "artifact",
+            "scope": "assay",
+            "kind": "cluster_labels",
+            "artifact_id": "27fdc3bc554c3ad4cf05ac4cb0a1c22fccb7a43971c4436b77781c2197bb7bb2",
+            "assay": "ATAC"
+          }
+        }
+      }
+    },
+    "execution_options": {
+      "workingMemoryMiB": 1
+    },
+    "created_at_ns": 1795720172319555000,
+    "cytearc_version": "1.4.0",
+    "complete": true,
+    "candidateKeys": [
+      "0.5",
+      "0.75",
+      "1.0",
+      "1.25"
+    ],
+    "candidateRefs": [
+      {
+        "type": "artifact",
+        "scope": "assay",
+        "kind": "cluster_labels",
+        "artifact_id": "a6fe611f4d14557b5361978838f646ac560636009134d66922a1e13e8052acb0",
+        "assay": "ATAC"
+      },
+      {
+        "type": "artifact",
+        "scope": "assay",
+        "kind": "cluster_labels",
+        "artifact_id": "97a4b3c8ba683ee523702bcbdf406c04f88c478bbb9226cbe9fae5329984cbdb",
+        "assay": "ATAC"
+      },
+      {
+        "type": "artifact",
+        "scope": "assay",
+        "kind": "cluster_labels",
+        "artifact_id": "77a1f55111c152e82a0af40694d17ed26b5c2a0c58a8d6cd7a02f21d71259892",
+        "assay": "ATAC"
+      },
+      {
+        "type": "artifact",
+        "scope": "assay",
+        "kind": "cluster_labels",
+        "artifact_id": "27fdc3bc554c3ad4cf05ac4cb0a1c22fccb7a43971c4436b77781c2197bb7bb2",
+        "assay": "ATAC"
+      }
+    ],
+    "invalidReasons": [
+      null,
+      null,
+      null,
+      null
+    ],
+    "selectedKey": "1.0",
+    "sampleDefinition": {
+      "seed": 4466,
+      "populationSize": 174,
+      "sampleSize": 174,
+      "maxSampleSize": 10000,
+      "sampleStrategy": "sharedClusterQuota",
+      "minClusterQuota": 2
+    },
+    "tieOrder": [
+      "0.5",
+      "0.75",
+      "1.0",
+      "1.25"
+    ]
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

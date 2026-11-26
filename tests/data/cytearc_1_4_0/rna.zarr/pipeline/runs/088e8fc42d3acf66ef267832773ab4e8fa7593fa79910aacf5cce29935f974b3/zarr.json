@@ -1,0 +1,640 @@
+{
+  "attributes": {
+    "runId": "088e8fc42d3acf66ef267832773ab4e8fa7593fa79910aacf5cce29935f974b3",
+    "recipe": "rna",
+    "requestedLabel": "rna_text_sampling",
+    "label": "rna_text_sampling",
+    "assay": "RNA",
+    "startedAtNs": 1795720170103235000,
+    "finishedAtNs": 1795720170687774000,
+    "status": "completed",
+    "complete": true,
+    "cytearcVersion": "1.4.0",
+    "config": {
+      "cells": {
+        "column": "I"
+      },
+      "snapshotColumns": [],
+      "species": null,
+      "doubletSampleColumns": [],
+      "stages": {
+        "cell_calling": false,
+        "hashing": false,
+        "filtering": {
+          "enabled": true,
+          "method": "mad",
+          "attrs": [
+            "RNA_nCounts",
+            "RNA_nFeatures",
+            "RNA_percentMito",
+            "RNA_percentRibo"
+          ],
+          "minP": 0.01,
+          "maxP": 0.99,
+          "sampleColumn": null,
+          "nMads": 3.0,
+          "minCellsPerSample": 20
+        },
+        "cell_cycle": {},
+        "hvg": {
+          "top_n": 150,
+          "min_cells": 5
+        },
+        "normalization": {},
+        "pca": {
+          "dims": 15
+        },
+        "harmony": false,
+        "ann_index": {},
+        "neighbors": {},
+        "connectivity": {},
+        "embedding_initialization": {
+          "kmeans_sampling": "0.2"
+        },
+        "umap": {
+          "n_epochs": 100,
+          "min_dist": 1.5,
+          "spread": 1.0
+        },
+        "localmap": false,
+        "tsne": false,
+        "leiden": {
+          "partitions": [
+            0.5,
+            0.75,
+            1.0,
+            1.25
+          ],
+          "selected": null
+        },
+        "paris": false,
+        "membership_strength": false,
+        "doublets": {},
+        "markers": true
+      },
+      "shutdown": {
+        "signalGuardAvailable": true,
+        "unavailableReason": null
+      }
+    },
+    "stageOrder": [
+      "input_snapshot",
+      "cell_calling",
+      "hashing",
+      "filtering",
+      "cell_cycle",
+      "highly_variable_features",
+      "normalization",
+      "pca",
+      "harmony",
+      "ann_index",
+      "neighbors",
+      "connectivity",
+      "embedding_initialization",
+      "umap",
+      "localmap",
+      "leiden",
+      "paris",
+      "cluster_selection",
+      "membership_strength",
+      "tsne",
+      "doublets",
+      "markers"
+    ],
+    "outputs": [
+      {
+        "key": "input_cell_selection",
+        "artifact": {
+          "type": "artifact",
+          "scope": "datastore",
+          "kind": "cell_selection",
+          "artifact_id": "eccc59fd7a24206ea161b8a671642dd8b9246d3ec6a980f369ff88c08c7c9788"
+        }
+      },
+      {
+        "key": "analysis_cell_selection",
+        "artifact": {
+          "type": "artifact",
+          "scope": "datastore",
+          "kind": "cell_selection",
+          "artifact_id": "26fe72eafb5a078ff48fe49c95f5b8d59a3d872f2d3fb7b5fedd01877dfd6999"
+        }
+      },
+      {
+        "key": "feature_universe",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "feature_selection",
+          "artifact_id": "e31fc41b15405d44d6a87b7f60dab0d7c594be945d2e77e1ca0684e1b393966d",
+          "assay": "RNA"
+        }
+      },
+      {
+        "key": "cell_cycle",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "cell_cycle",
+          "artifact_id": "cf6ea6c9c47e3cf098cdc67a4e0e33bdee96776a0f9ab2ce4164a701ca8208cb",
+          "assay": "RNA"
+        }
+      },
+      {
+        "key": "highly_variable_features",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "feature_selection",
+          "artifact_id": "2c723e910ab9e4453fd1719e4d323c51f397daa3d6835346db585b4f6b5d7774",
+          "assay": "RNA"
+        }
+      },
+      {
+        "key": "normalized",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "normalized",
+          "artifact_id": "3573f9ddb91a9421aa510d261bc8a2b34eddb010cb2eb3bd5e9f4878cc401368",
+          "assay": "RNA"
+        }
+      },
+      {
+        "key": "pca",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "reduction",
+          "artifact_id": "bd6cb726cc209891c096d9ff0050ee23fa3130f488bb12f3b3e1baa307cf41de",
+          "assay": "RNA"
+        }
+      },
+      {
+        "key": "ann_index",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "ann_index",
+          "artifact_id": "aad6bfe9870fab0ffb7a331e4077c8a54c99e10ea222580b09c8268044493d9d",
+          "assay": "RNA"
+        }
+      },
+      {
+        "key": "neighbors",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "neighbors",
+          "artifact_id": "e0db29df565c7df6b09b20ca5e86753cab3f696dfd4052c776de7804d4e3d454",
+          "assay": "RNA"
+        }
+      },
+      {
+        "key": "connectivity_map",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "connectivity_map",
+          "artifact_id": "372fca04640f6e13c607e5634530c062e5e82782b19da854e0ca0d64b773ac75",
+          "assay": "RNA"
+        }
+      },
+      {
+        "key": "embedding_initialization",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "embedding_initialization",
+          "artifact_id": "500249893fe435e113cc9bd1f8a9b3680bfc5ef240a36a149663581d82589059",
+          "assay": "RNA"
+        }
+      },
+      {
+        "key": "umap",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "embedding",
+          "artifact_id": "936f5552ddc93e6816a4de3ce5f73a9d57b5d2942185895fdf9fd94fc240d363",
+          "assay": "RNA"
+        }
+      },
+      {
+        "key": "cluster_selection",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "cluster_selection",
+          "artifact_id": "6ca40bbec51b93718c593d08900120627863cd6a8356d8c29f0d267f04efb39b",
+          "assay": "RNA"
+        }
+      },
+      {
+        "key": "clusters",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "cluster_labels",
+          "artifact_id": "591a30b1f554d4248af4669e432da158a6c6a3d00e0af3865262b33afbb38b3a",
+          "assay": "RNA"
+        }
+      },
+      {
+        "key": "doublets",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "doublet_score",
+          "artifact_id": "d70962681aa04630658ed58f19013cf13f078cb6555d54fcaa0643ea22bf32b3",
+          "assay": "RNA"
+        }
+      },
+      {
+        "key": "markers",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "marker_table",
+          "artifact_id": "311e59369ea64f7f706ead103a7e7e623e3854108b95cc041becb41dc2d232a3",
+          "assay": "RNA"
+        }
+      }
+    ],
+    "fields": [
+      {
+        "key": "I",
+        "axis": "cells",
+        "artifact": {
+          "type": "artifact",
+          "scope": "datastore",
+          "kind": "cell_selection",
+          "artifact_id": "26fe72eafb5a078ff48fe49c95f5b8d59a3d872f2d3fb7b5fedd01877dfd6999"
+        },
+        "sourceValue": "values",
+        "valueIndex": null,
+        "dtype": "|b1",
+        "fill": false,
+        "missingMask": null,
+        "display": null
+      },
+      {
+        "key": "ids",
+        "axis": "cells",
+        "artifact": {
+          "type": "artifact",
+          "scope": "datastore",
+          "kind": "metadata_snapshot",
+          "artifact_id": "faa8fd56af7153324c96f3e2195d39f7d25cdeddab80d35d2d1d4efa27791a5f"
+        },
+        "sourceValue": "ids",
+        "valueIndex": null,
+        "dtype": "<U18",
+        "fill": "",
+        "missingMask": null,
+        "display": null
+      },
+      {
+        "key": "names",
+        "axis": "cells",
+        "artifact": {
+          "type": "artifact",
+          "scope": "datastore",
+          "kind": "metadata_snapshot",
+          "artifact_id": "faa8fd56af7153324c96f3e2195d39f7d25cdeddab80d35d2d1d4efa27791a5f"
+        },
+        "sourceValue": "names",
+        "valueIndex": null,
+        "dtype": "<U18",
+        "fill": "",
+        "missingMask": null,
+        "display": null
+      },
+      {
+        "key": "s_score",
+        "axis": "cells",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "cell_cycle",
+          "artifact_id": "cf6ea6c9c47e3cf098cdc67a4e0e33bdee96776a0f9ab2ce4164a701ca8208cb",
+          "assay": "RNA"
+        },
+        "sourceValue": "s_score",
+        "valueIndex": null,
+        "dtype": "<f8",
+        "fill": "nan",
+        "missingMask": null,
+        "display": {
+          "kind": "continuous",
+          "colormap": "viridis",
+          "minimum": -0.07804477700628693,
+          "maximum": 0.021385490465121292,
+          "scale": "linear"
+        }
+      },
+      {
+        "key": "g2m_score",
+        "axis": "cells",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "cell_cycle",
+          "artifact_id": "cf6ea6c9c47e3cf098cdc67a4e0e33bdee96776a0f9ab2ce4164a701ca8208cb",
+          "assay": "RNA"
+        },
+        "sourceValue": "g2m_score",
+        "valueIndex": null,
+        "dtype": "<f8",
+        "fill": "nan",
+        "missingMask": null,
+        "display": {
+          "kind": "continuous",
+          "colormap": "viridis",
+          "minimum": -0.08834264631589514,
+          "maximum": 0.027032406689879315,
+          "scale": "linear"
+        }
+      },
+      {
+        "key": "cell_cycle_phase",
+        "axis": "cells",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "cell_cycle",
+          "artifact_id": "cf6ea6c9c47e3cf098cdc67a4e0e33bdee96776a0f9ab2ce4164a701ca8208cb",
+          "assay": "RNA"
+        },
+        "sourceValue": "phase",
+        "valueIndex": null,
+        "dtype": "<U3",
+        "fill": "",
+        "missingMask": null,
+        "display": {
+          "kind": "categorical",
+          "categories": [
+            {
+              "value": "G1",
+              "label": "G1",
+              "color": "#4e79a7"
+            },
+            {
+              "value": "G2M",
+              "label": "G2M",
+              "color": "#f28e2b"
+            },
+            {
+              "value": "S",
+              "label": "S",
+              "color": "#e15759"
+            }
+          ]
+        }
+      },
+      {
+        "key": "umap_1",
+        "axis": "cells",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "embedding",
+          "artifact_id": "936f5552ddc93e6816a4de3ce5f73a9d57b5d2942185895fdf9fd94fc240d363",
+          "assay": "RNA"
+        },
+        "sourceValue": "values",
+        "valueIndex": 0,
+        "dtype": "<f4",
+        "fill": "nan",
+        "missingMask": null,
+        "display": {
+          "kind": "continuous",
+          "colormap": "viridis",
+          "minimum": -5.369217872619629,
+          "maximum": 7.201427936553955,
+          "scale": "linear"
+        }
+      },
+      {
+        "key": "umap_2",
+        "axis": "cells",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "embedding",
+          "artifact_id": "936f5552ddc93e6816a4de3ce5f73a9d57b5d2942185895fdf9fd94fc240d363",
+          "assay": "RNA"
+        },
+        "sourceValue": "values",
+        "valueIndex": 1,
+        "dtype": "<f4",
+        "fill": "nan",
+        "missingMask": null,
+        "display": {
+          "kind": "continuous",
+          "colormap": "viridis",
+          "minimum": -7.948014736175537,
+          "maximum": 6.032355308532715,
+          "scale": "linear"
+        }
+      },
+      {
+        "key": "clusters",
+        "axis": "cells",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "cluster_labels",
+          "artifact_id": "591a30b1f554d4248af4669e432da158a6c6a3d00e0af3865262b33afbb38b3a",
+          "assay": "RNA"
+        },
+        "sourceValue": "values",
+        "valueIndex": null,
+        "dtype": "<i8",
+        "fill": -1,
+        "missingMask": null,
+        "display": {
+          "kind": "categorical",
+          "categories": [
+            {
+              "value": 1,
+              "label": "1",
+              "color": "#4e79a7"
+            },
+            {
+              "value": 2,
+              "label": "2",
+              "color": "#f28e2b"
+            },
+            {
+              "value": 3,
+              "label": "3",
+              "color": "#e15759"
+            },
+            {
+              "value": 4,
+              "label": "4",
+              "color": "#76b7b2"
+            }
+          ]
+        }
+      },
+      {
+        "key": "doublet_score",
+        "axis": "cells",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "doublet_score",
+          "artifact_id": "d70962681aa04630658ed58f19013cf13f078cb6555d54fcaa0643ea22bf32b3",
+          "assay": "RNA"
+        },
+        "sourceValue": "values",
+        "valueIndex": null,
+        "dtype": "<f8",
+        "fill": "nan",
+        "missingMask": null,
+        "display": {
+          "kind": "continuous",
+          "colormap": "viridis",
+          "minimum": 0.030376670716889428,
+          "maximum": 0.24216524216524218,
+          "scale": "linear"
+        }
+      },
+      {
+        "key": "predicted_doublet",
+        "axis": "cells",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "doublet_score",
+          "artifact_id": "d70962681aa04630658ed58f19013cf13f078cb6555d54fcaa0643ea22bf32b3",
+          "assay": "RNA"
+        },
+        "sourceValue": "predicted_doublets",
+        "valueIndex": null,
+        "dtype": "|b1",
+        "fill": false,
+        "missingMask": null,
+        "display": {
+          "kind": "categorical",
+          "categories": [
+            {
+              "value": false,
+              "label": "False",
+              "color": "#4e79a7"
+            }
+          ]
+        }
+      },
+      {
+        "key": "I",
+        "axis": "features",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "feature_selection",
+          "artifact_id": "e31fc41b15405d44d6a87b7f60dab0d7c594be945d2e77e1ca0684e1b393966d",
+          "assay": "RNA"
+        },
+        "sourceValue": "values",
+        "valueIndex": null,
+        "dtype": "|b1",
+        "fill": false,
+        "missingMask": null,
+        "display": null
+      },
+      {
+        "key": "ids",
+        "axis": "features",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "metadata_snapshot",
+          "artifact_id": "299e8946296927bb1648765e69b8172f21c566a08b8a824f31e107446069f61f",
+          "assay": "RNA"
+        },
+        "sourceValue": "ids",
+        "valueIndex": null,
+        "dtype": "<U15",
+        "fill": "",
+        "missingMask": null,
+        "display": null
+      },
+      {
+        "key": "names",
+        "axis": "features",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "metadata_snapshot",
+          "artifact_id": "299e8946296927bb1648765e69b8172f21c566a08b8a824f31e107446069f61f",
+          "assay": "RNA"
+        },
+        "sourceValue": "names",
+        "valueIndex": null,
+        "dtype": "<U11",
+        "fill": "",
+        "missingMask": null,
+        "display": null
+      },
+      {
+        "key": "highly_variable_features",
+        "axis": "features",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "feature_selection",
+          "artifact_id": "2c723e910ab9e4453fd1719e4d323c51f397daa3d6835346db585b4f6b5d7774",
+          "assay": "RNA"
+        },
+        "sourceValue": "values",
+        "valueIndex": null,
+        "dtype": "|b1",
+        "fill": false,
+        "missingMask": null,
+        "display": null
+      }
+    ],
+    "error": null,
+    "interruption": null,
+    "outputLists": [
+      {
+        "key": "leiden",
+        "artifacts": [
+          {
+            "type": "artifact",
+            "scope": "assay",
+            "kind": "cluster_labels",
+            "artifact_id": "591a30b1f554d4248af4669e432da158a6c6a3d00e0af3865262b33afbb38b3a",
+            "assay": "RNA"
+          },
+          {
+            "type": "artifact",
+            "scope": "assay",
+            "kind": "cluster_labels",
+            "artifact_id": "b5c24faf44fb5ca2096e927d7cdb5ad416f78c10dee657b8cb9380061c8278b5",
+            "assay": "RNA"
+          },
+          {
+            "type": "artifact",
+            "scope": "assay",
+            "kind": "cluster_labels",
+            "artifact_id": "78583fcd243001d472abe1ca26ea2da25b1ce7d258534daaf2ed99b7de584560",
+            "assay": "RNA"
+          },
+          {
+            "type": "artifact",
+            "scope": "assay",
+            "kind": "cluster_labels",
+            "artifact_id": "6ac13ed0304dd3e93729df3d3e77ec8edf3e369d20573c61935ce9545e2b2cd0",
+            "assay": "RNA"
+          }
+        ]
+      }
+    ]
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

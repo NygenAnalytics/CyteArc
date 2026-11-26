@@ -1,0 +1,99 @@
+{
+  "attributes": {
+    "stage": "lsi",
+    "ordinal": 4,
+    "startedAtNs": 1795720171887385000,
+    "finishedAtNs": 1795720171929928000,
+    "status": "completed",
+    "complete": true,
+    "outputs": [
+      {
+        "outputKey": "lsi",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "reduction",
+          "artifact_id": "599f93f30be0329e974fedf6d7aeb9dfe0aa4acee1e83a2bce27dd36fdf0fcc0",
+          "assay": "ATAC"
+        },
+        "reused": false
+      }
+    ],
+    "plans": [
+      {
+        "operation": "calculate_feature_scaling",
+        "ref": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "feature_scaling",
+          "artifact_id": "a66d81c4f4a5d53d71da0b33bd9b754c452ed945422c6a93cf45f4479b0afc14",
+          "assay": "ATAC"
+        },
+        "disposition": "created"
+      },
+      {
+        "operation": "run_lsi",
+        "ref": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "reduction",
+          "artifact_id": "599f93f30be0329e974fedf6d7aeb9dfe0aa4acee1e83a2bce27dd36fdf0fcc0",
+          "assay": "ATAC"
+        },
+        "disposition": "created"
+      }
+    ],
+    "metrics": {
+      "wallSeconds": 0.04309595900122076,
+      "rssBaselineBytes": null,
+      "rssPeakBytes": null,
+      "rssIncrementalPeakBytes": null,
+      "sampleIntervalSeconds": 0.1,
+      "sampleCount": 0,
+      "samplingErrorCount": 0,
+      "rssUnavailableReason": "process-tree RSS requires the Linux /proc filesystem",
+      "cpuSeconds": 0.057771999999999935,
+      "threadsPeak": null,
+      "rssHighWaterStartBytes": 879804416,
+      "rssHighWaterEndBytes": 879919104,
+      "networkRxBytes": null,
+      "networkTxBytes": null,
+      "resources": {
+        "workers": 2,
+        "memoryBudgetBytes": 2147483648,
+        "cpusAvailable": 8,
+        "cpuQuotaCores": null,
+        "memoryLimitBytes": 17179869184
+      },
+      "trace": {
+        "seconds": [
+          0.0,
+          0.038
+        ],
+        "cpuSeconds": [
+          0.0,
+          0.058
+        ],
+        "rssBytes": null,
+        "threads": null,
+        "networkRxBytes": null,
+        "networkTxBytes": null
+      },
+      "unavailable": {
+        "threadsPeak": "OS thread counts require the Linux /proc filesystem",
+        "networkRxBytes": "network counters require the Linux /proc filesystem",
+        "networkTxBytes": "network counters require the Linux /proc filesystem"
+      }
+    },
+    "error": null,
+    "interruption": null,
+    "summary": {
+      "cells": 174,
+      "dims": 10
+    },
+    "warnings": [],
+    "outputLists": []
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

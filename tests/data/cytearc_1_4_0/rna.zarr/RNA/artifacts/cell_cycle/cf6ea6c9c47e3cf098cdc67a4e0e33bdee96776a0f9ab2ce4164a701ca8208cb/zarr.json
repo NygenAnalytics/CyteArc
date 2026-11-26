@@ -1,0 +1,118 @@
+{
+  "attributes": {
+    "artifact_id": "cf6ea6c9c47e3cf098cdc67a4e0e33bdee96776a0f9ab2ce4164a701ca8208cb",
+    "kind": "cell_cycle",
+    "provenance": {
+      "operation": "run_cell_cycle_scoring",
+      "parameters": {
+        "s_gene_indices": [
+          358,
+          344,
+          304,
+          189,
+          82,
+          152,
+          183,
+          226,
+          275,
+          58,
+          59,
+          39,
+          219,
+          314,
+          103,
+          181,
+          147,
+          9,
+          16,
+          118,
+          257,
+          91,
+          156,
+          251,
+          200,
+          50,
+          164,
+          290,
+          261,
+          267,
+          136,
+          18,
+          12,
+          367,
+          295
+        ],
+        "g2m_gene_indices": [
+          102,
+          255,
+          348,
+          305,
+          169,
+          35,
+          33,
+          224,
+          41,
+          92,
+          86,
+          259,
+          238,
+          283,
+          180,
+          24,
+          175,
+          179,
+          299,
+          14,
+          363,
+          205,
+          88,
+          263,
+          350,
+          22,
+          42,
+          188,
+          98,
+          274,
+          244,
+          225,
+          212,
+          46
+        ],
+        "control_size": 43,
+        "log_transform": true,
+        "n_bins": 50,
+        "rand_seed": 4466
+      },
+      "inputs": {
+        "feature_summary": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "feature_summary",
+          "artifact_id": "677452abfdf58cb11a05feb83c3bdaf5d6718bc42fee0a05189e742539d0a858",
+          "assay": "RNA"
+        },
+        "cell_selection": {
+          "type": "artifact",
+          "scope": "datastore",
+          "kind": "cell_selection",
+          "artifact_id": "26fe72eafb5a078ff48fe49c95f5b8d59a3d872f2d3fb7b5fedd01877dfd6999"
+        },
+        "feature_snapshot": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "metadata_snapshot",
+          "artifact_id": "299e8946296927bb1648765e69b8172f21c566a08b8a824f31e107446069f61f",
+          "assay": "RNA"
+        }
+      }
+    },
+    "execution_options": {
+      "invalidate_cache": false
+    },
+    "created_at_ns": 1795720168206136000,
+    "cytearc_version": "1.4.0",
+    "complete": true
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

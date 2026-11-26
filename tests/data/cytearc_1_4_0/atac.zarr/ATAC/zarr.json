@@ -1,0 +1,65 @@
+{
+  "attributes": {
+    "is_assay": true,
+    "prepared": true,
+    "misc": {},
+    "cytearc:countMatrixLayout": {
+      "policy": {
+        "unitBytes": 1000000000,
+        "chunkBytes": 100000000
+      },
+      "nCells": 200,
+      "nFeats": 600,
+      "dtype": "uint8",
+      "itemsize": 1,
+      "chunksPerShard": 1,
+      "counts": {
+        "shape": [
+          200,
+          600
+        ],
+        "chunks": [
+          200,
+          600
+        ],
+        "shards": [
+          200,
+          600
+        ]
+      },
+      "countsT": {
+        "shape": [
+          600,
+          200
+        ],
+        "chunks": [
+          600,
+          200
+        ],
+        "shards": [
+          600,
+          200
+        ]
+      },
+      "readGroup": {
+        "featureWidth": 600,
+        "cellExtent": 200,
+        "chunkFeatures": 600,
+        "chunkCells": 200,
+        "shardFeatures": 600,
+        "shardCells": 200,
+        "shardsTouched": 1,
+        "chunksTouched": 1,
+        "readGroupBytes": 120000,
+        "physicalShardBytes": 120000
+      },
+      "sourceDecodeAmplification": 1.0,
+      "fingerprint": "5886e5013804a224c9bbba756cd01ded0b6c694d9e1df471e577c196284f804e"
+    },
+    "percentFeatures": {},
+    "dataset_fingerprint": "d197c99a62014879555ed8548a218b4e42d6ab2755cb4cc597ad026d6160da7a",
+    "counts_fingerprint": "1f7b570d2c9efb26dbd5a92d7e9ccb3734b14b0e63da7e12772436fe1b08e66e"
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

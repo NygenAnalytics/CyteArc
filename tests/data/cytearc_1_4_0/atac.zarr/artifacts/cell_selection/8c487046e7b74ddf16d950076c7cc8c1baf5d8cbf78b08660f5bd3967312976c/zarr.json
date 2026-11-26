@@ -1,0 +1,24 @@
+{
+  "attributes": {
+    "artifact_id": "8c487046e7b74ddf16d950076c7cc8c1baf5d8cbf78b08660f5bd3967312976c",
+    "kind": "cell_selection",
+    "provenance": {
+      "operation": "snapshot_pipeline_input_selection",
+      "parameters": {
+        "assay": "ATAC"
+      },
+      "inputs": {
+        "ordered_row_ids_fingerprint": "9d002ca4083c27796dd0665940fe87d84a845f82b99c85539fb9a5dd285c6740",
+        "values_fingerprint": "4c4d967b3a83fe1d8d2ddad4a4635bd56aef3e3ff85c5e380835f10c5ea08b07"
+      }
+    },
+    "execution_options": {
+      "source_column": "I"
+    },
+    "created_at_ns": 1795720171708015000,
+    "cytearc_version": "1.4.0",
+    "complete": true
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

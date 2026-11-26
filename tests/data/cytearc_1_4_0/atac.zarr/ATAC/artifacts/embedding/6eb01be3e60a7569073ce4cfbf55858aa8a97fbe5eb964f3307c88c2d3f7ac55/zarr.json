@@ -1,0 +1,61 @@
+{
+  "attributes": {
+    "artifact_id": "6eb01be3e60a7569073ce4cfbf55858aa8a97fbe5eb964f3307c88c2d3f7ac55",
+    "kind": "embedding",
+    "provenance": {
+      "operation": "run_umap",
+      "parameters": {
+        "symmetric_graph": false,
+        "graph_upper_only": false,
+        "umap_dims": 2,
+        "spread": 2.0,
+        "min_dist": 1.0,
+        "n_epochs": 100,
+        "repulsion_strength": 1.0,
+        "initial_alpha": 1.0,
+        "negative_sample_rate": 5.0,
+        "use_density_map": false,
+        "dens_lambda": 2.0,
+        "dens_frac": 0.3,
+        "dens_var_shift": 0.1,
+        "random_seed": 4444,
+        "parallel": false
+      },
+      "inputs": {
+        "graph": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "connectivity_map",
+          "artifact_id": "18cd855a9467a7ef4d4cef6c6ec187e0570af42993dc06002d051db8d6325ee4",
+          "assay": "ATAC"
+        },
+        "initialization": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "embedding_initialization",
+          "artifact_id": "7a4f2aa81141380f1fddb1cb4d3f03ff79c153cf29f274599258544e8f0093f0",
+          "assay": "ATAC"
+        },
+        "cell_selection": {
+          "type": "artifact",
+          "scope": "datastore",
+          "kind": "cell_selection",
+          "artifact_id": "cb5d61c9658933cef87804046a9fda5f7eb3c6f7c658e8961cc6c4f27619925c"
+        }
+      }
+    },
+    "execution_options": {
+      "nthreads": 2,
+      "layout_threads": 1,
+      "invalidate_cache": false
+    },
+    "created_at_ns": 1795720172162182000,
+    "cytearc_version": "1.4.0",
+    "complete": true,
+    "diagnostics": {
+      "densityRadiusSpan": null
+    }
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

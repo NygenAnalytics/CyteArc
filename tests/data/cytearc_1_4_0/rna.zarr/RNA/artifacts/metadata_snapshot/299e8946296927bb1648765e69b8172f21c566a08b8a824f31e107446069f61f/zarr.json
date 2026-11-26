@@ -1,0 +1,28 @@
+{
+  "attributes": {
+    "artifact_id": "299e8946296927bb1648765e69b8172f21c566a08b8a824f31e107446069f61f",
+    "kind": "metadata_snapshot",
+    "provenance": {
+      "operation": "snapshot_run_metadata",
+      "parameters": {
+        "axis": "feature",
+        "assay": "RNA",
+        "ordered_columns": [
+          "names"
+        ]
+      },
+      "inputs": {
+        "ordered_row_ids_fingerprint": "37930d58a33f7bd15d54eb779bdfaaafa6dd283d2728dab3f9140eea82910cdd",
+        "column_fingerprints": {
+          "names": "6a69eec6caed75c777fff24069aaf8bf0c118bb5573aa1e36d951eeb545f27f0"
+        }
+      }
+    },
+    "execution_options": {},
+    "created_at_ns": 1795720168073584000,
+    "cytearc_version": "1.4.0",
+    "complete": true
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

@@ -1,0 +1,105 @@
+{
+  "attributes": {
+    "stage": "cell_cycle",
+    "ordinal": 4,
+    "startedAtNs": 1795720170191344000,
+    "finishedAtNs": 1795720170211684000,
+    "status": "completed",
+    "complete": true,
+    "outputs": [
+      {
+        "outputKey": "cell_cycle",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "cell_cycle",
+          "artifact_id": "cf6ea6c9c47e3cf098cdc67a4e0e33bdee96776a0f9ab2ce4164a701ca8208cb",
+          "assay": "RNA"
+        },
+        "reused": true
+      }
+    ],
+    "plans": [
+      {
+        "operation": "summarize_rna_features",
+        "ref": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "feature_summary",
+          "artifact_id": "677452abfdf58cb11a05feb83c3bdaf5d6718bc42fee0a05189e742539d0a858",
+          "assay": "RNA"
+        },
+        "disposition": "reused"
+      },
+      {
+        "operation": "run_cell_cycle_scoring",
+        "ref": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "cell_cycle",
+          "artifact_id": "cf6ea6c9c47e3cf098cdc67a4e0e33bdee96776a0f9ab2ce4164a701ca8208cb",
+          "assay": "RNA"
+        },
+        "disposition": "reused"
+      }
+    ],
+    "metrics": {
+      "wallSeconds": 0.02100066700950265,
+      "rssBaselineBytes": null,
+      "rssPeakBytes": null,
+      "rssIncrementalPeakBytes": null,
+      "sampleIntervalSeconds": 0.1,
+      "sampleCount": 0,
+      "samplingErrorCount": 0,
+      "rssUnavailableReason": "process-tree RSS requires the Linux /proc filesystem",
+      "cpuSeconds": 0.014809000000000516,
+      "threadsPeak": null,
+      "rssHighWaterStartBytes": 417923072,
+      "rssHighWaterEndBytes": 417939456,
+      "networkRxBytes": null,
+      "networkTxBytes": null,
+      "resources": {
+        "workers": 2,
+        "memoryBudgetBytes": 2147483648,
+        "cpusAvailable": 8,
+        "cpuQuotaCores": null,
+        "memoryLimitBytes": 17179869184
+      },
+      "trace": {
+        "seconds": [
+          0.0,
+          0.017
+        ],
+        "cpuSeconds": [
+          0.0,
+          0.015
+        ],
+        "rssBytes": null,
+        "threads": null,
+        "networkRxBytes": null,
+        "networkTxBytes": null
+      },
+      "unavailable": {
+        "threadsPeak": "OS thread counts require the Linux /proc filesystem",
+        "networkRxBytes": "network counters require the Linux /proc filesystem",
+        "networkTxBytes": "network counters require the Linux /proc filesystem"
+      }
+    },
+    "error": null,
+    "interruption": null,
+    "summary": {
+      "phases": {
+        "G1": 143,
+        "G2M": 17,
+        "S": 15
+      }
+    },
+    "warnings": [
+      "8 of 43 s_genes were not found in the assay feature names",
+      "20 of 54 g2m_genes were not found in the assay feature names"
+    ],
+    "outputLists": []
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

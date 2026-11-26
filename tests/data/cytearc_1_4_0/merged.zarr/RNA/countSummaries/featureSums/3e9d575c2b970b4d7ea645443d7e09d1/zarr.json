@@ -1,0 +1,122 @@
+{
+  "shape": [
+    160
+  ],
+  "data_type": "float64",
+  "chunk_grid": {
+    "name": "regular",
+    "configuration": {
+      "chunk_shape": [
+        160
+      ]
+    }
+  },
+  "chunk_key_encoding": {
+    "name": "default",
+    "configuration": {
+      "separator": "/"
+    }
+  },
+  "fill_value": 0.0,
+  "codecs": [
+    {
+      "name": "bytes",
+      "configuration": {
+        "endian": "little"
+      }
+    },
+    {
+      "name": "zstd",
+      "configuration": {
+        "level": 0,
+        "checksum": false
+      }
+    }
+  ],
+  "attributes": {
+    "features": [
+      0,
+      2,
+      6,
+      7,
+      10,
+      14,
+      16,
+      18,
+      20,
+      23,
+      24,
+      25,
+      26,
+      28,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      37,
+      39,
+      46,
+      47,
+      48,
+      50,
+      56,
+      57,
+      59,
+      62,
+      63,
+      64,
+      65,
+      66,
+      68,
+      69,
+      70,
+      71,
+      78,
+      80,
+      85,
+      86,
+      91,
+      92,
+      94,
+      99,
+      100,
+      107,
+      108,
+      109,
+      110,
+      111,
+      115,
+      117,
+      118,
+      119,
+      120,
+      122,
+      124,
+      129,
+      130,
+      133,
+      134,
+      136,
+      140,
+      141,
+      142,
+      144,
+      145,
+      146,
+      147,
+      148,
+      152,
+      153,
+      155,
+      156,
+      157,
+      158
+    ],
+    "source_fingerprint": "58f28f2b704ff0564a9b386e17374f4b6a59bda631495aa798a1a7db6fdb216e"
+  },
+  "zarr_format": 3,
+  "node_type": "array",
+  "storage_transformers": []
+}

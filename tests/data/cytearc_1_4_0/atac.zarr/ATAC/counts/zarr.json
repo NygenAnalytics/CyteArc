@@ -1,0 +1,121 @@
+{
+  "shape": [
+    200,
+    600
+  ],
+  "data_type": "uint8",
+  "chunk_grid": {
+    "name": "regular",
+    "configuration": {
+      "chunk_shape": [
+        200,
+        600
+      ]
+    }
+  },
+  "chunk_key_encoding": {
+    "name": "default",
+    "configuration": {
+      "separator": "/"
+    }
+  },
+  "fill_value": 0,
+  "codecs": [
+    {
+      "name": "sharding_indexed",
+      "configuration": {
+        "chunk_shape": [
+          200,
+          600
+        ],
+        "codecs": [
+          {
+            "name": "bytes"
+          },
+          {
+            "name": "blosc",
+            "configuration": {
+              "typesize": 1,
+              "cname": "lz4",
+              "clevel": 5,
+              "shuffle": "bitshuffle",
+              "blocksize": 0
+            }
+          }
+        ],
+        "index_codecs": [
+          {
+            "name": "bytes",
+            "configuration": {
+              "endian": "little"
+            }
+          },
+          {
+            "name": "crc32c"
+          }
+        ],
+        "index_location": "end"
+      }
+    }
+  ],
+  "attributes": {
+    "cytearc:countMatrixLayout": {
+      "policy": {
+        "unitBytes": 1000000000,
+        "chunkBytes": 100000000
+      },
+      "nCells": 200,
+      "nFeats": 600,
+      "dtype": "uint8",
+      "itemsize": 1,
+      "chunksPerShard": 1,
+      "counts": {
+        "shape": [
+          200,
+          600
+        ],
+        "chunks": [
+          200,
+          600
+        ],
+        "shards": [
+          200,
+          600
+        ]
+      },
+      "countsT": {
+        "shape": [
+          600,
+          200
+        ],
+        "chunks": [
+          600,
+          200
+        ],
+        "shards": [
+          600,
+          200
+        ]
+      },
+      "readGroup": {
+        "featureWidth": 600,
+        "cellExtent": 200,
+        "chunkFeatures": 600,
+        "chunkCells": 200,
+        "shardFeatures": 600,
+        "shardCells": 200,
+        "shardsTouched": 1,
+        "chunksTouched": 1,
+        "readGroupBytes": 120000,
+        "physicalShardBytes": 120000
+      },
+      "sourceDecodeAmplification": 1.0,
+      "fingerprint": "5886e5013804a224c9bbba756cd01ded0b6c694d9e1df471e577c196284f804e"
+    },
+    "complete": true,
+    "content_fingerprint": "1f7b570d2c9efb26dbd5a92d7e9ccb3734b14b0e63da7e12772436fe1b08e66e"
+  },
+  "zarr_format": 3,
+  "node_type": "array",
+  "storage_transformers": []
+}
