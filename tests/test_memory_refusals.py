@@ -25,6 +25,7 @@ from zarr.storage import MemoryStore
 import cytearc
 from cytearc.utils.memory_budget import MemoryBudgetError, memory_refusal
 from tests.storage_helpers import by_cell_id
+from tests.memory_helpers import held_within_charge
 
 CYTEARC_ROOT = Path(cytearc.__file__).parent
 
@@ -1037,7 +1038,8 @@ def test_checking_in_memory_ids_holds_what_its_size_helper_charges(
     held = traced_charge(lambda _ledger: _identifiers(values, "Cell IDs")).held
     # Beside the IDs, the check holds the charge, within the few kilobytes of
     # NumPy's and Python's objects of the calls.
-    assert expected - 8 * 1024 <= held <= expected + 8 * 1024
+    assert expected - 8 * 1024 <= held
+    assert held_within_charge(held, expected)
 
 
 @pytest.mark.parametrize("kind", ["bytes", "integers", "numpy-strings"])
@@ -1057,7 +1059,7 @@ def test_checking_in_memory_ids_of_other_values_holds_less_than_its_charge(
     else:
         values = np.array([np.str_(text) for text in texts], dtype=object)
     held = traced_charge(lambda _ledger: _identifiers(values, "Cell IDs")).held
-    assert held <= _identifier_check_bytes(values)
+    assert held_within_charge(held, _identifier_check_bytes(values))
 
 
 @pytest.mark.parametrize("shuffle_cells", [False, True], ids=["file", "shuffled"])

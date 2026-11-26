@@ -50,7 +50,7 @@ from cytearc.metadata.rows import (
 from cytearc.metadata.table import MetaData as implementation_metadata
 from cytearc.storage import ArtifactRef
 from cytearc.storage.errors import ArtifactResolutionError
-from tests.memory_helpers import recording_ledger, traced_charge
+from tests.memory_helpers import held_within_charge, recording_ledger, traced_charge
 from tests.signature_contracts import signature_digest
 
 
@@ -1447,7 +1447,8 @@ def test_numpy_holds_variable_width_values_as_their_extent_counts(
     sized = _sized_bytes(encoded_bytes)
     least = len(values) * (16 + sized)
     # The array object holds a few hundred bytes beside its values.
-    assert least <= held <= extent.keptBytes() + 1_024
+    assert least <= held
+    assert held_within_charge(held, extent.keptBytes())
     assert charged <= least + len(values) * (sized // 4 + 1)
 
 
@@ -1520,7 +1521,7 @@ def test_measuring_variable_width_text_is_charged_before_and_as_it_reads(
     )
     # The measure holds what it charges, chunk by chunk.
     traced = traced_charge(lambda ledger: variable_text_extent(stored, ledger))
-    assert traced.held <= traced.charged
+    assert held_within_charge(traced.held, traced.charged)
     # A chunk whose values cannot all be decoded within the budget, even as
     # empty strings, is refused before it is read.
     reads: list[object] = []
@@ -1545,8 +1546,8 @@ def test_measuring_variable_width_text_is_charged_before_and_as_it_reads(
     traced = traced_charge(
         lambda ledger: read_rows(ledger, stored, rows, item="the IDs")
     )
-    assert traced.held <= traced.charged
-    assert traced.held <= read_rows_bytes(stored, len(rows))
+    assert held_within_charge(traced.held, traced.charged)
+    assert held_within_charge(traced.held, read_rows_bytes(stored, len(rows)))
     rows = np.arange(0, 6_000, 7)
     # Text read from memory stays charged as NumPy keeps it.
     ledger = MemoryLedger(None, "Reading the IDs")
@@ -1713,11 +1714,15 @@ def test_reads_of_variable_width_text_hold_what_they_charge(
         variable_text_extent(stored)
         for name, (read, planned) in reads.items():
             traced[name] = traced_charge(read)
-            assert traced[name].held <= traced[name].charged, name
-            assert planned is None or traced[name].held <= planned, name
+            assert held_within_charge(traced[name].held, traced[name].charged), name
+            assert planned is None or held_within_charge(traced[name].held, planned), (
+                name
+            )
             # What the read returns stays charged, beside the few KiB of
             # objects that Zarr keeps after a read.
-            assert traced[name].kept <= traced[name].kept_charged + 32 * 1024, name
+            assert held_within_charge(traced[name].kept, traced[name].kept_charged), (
+                name
+            )
     if shards is None:
         # One row decodes its chunk, which holds at least the known bytes of
         # the chunk's values, its stored bytes as compressed among them, and
@@ -1747,7 +1752,7 @@ def test_a_read_of_variable_width_labels_is_charged_by_their_characters(
     traced = traced_charge(
         lambda ledger: read_whole(ledger, root, "labels", item="the labels")
     )
-    assert traced.held <= traced.charged
+    assert held_within_charge(traced.held, traced.charged)
     # A charge at NumPy's 16-byte elements, as such a read had, is passed.
     elements = array_geometry(stored)
     assert elements is not None and traced.held > elements.wholeReadBytes(1)
@@ -1768,7 +1773,7 @@ def test_one_long_label_does_not_widen_the_charge_of_every_label(tmp_path) -> No
         chunks=(5_000,),
     )
     whole = traced_charge(lambda ledger: read_whole(ledger, root, "labels", item="v"))
-    assert whole.held <= whole.charged
+    assert held_within_charge(whole.held, whole.charged)
     # Every chunk decoded at once, each at most as its own values, beside
     # the read's result: no more than the known bytes of the labels, four
     # times over, and far from 20,000 labels of 5,000 characters.
@@ -1779,7 +1784,8 @@ def test_one_long_label_does_not_widen_the_charge_of_every_label(tmp_path) -> No
     rows = traced_charge(
         lambda ledger: read_rows(ledger, stored, np.arange(10_000, 10_010), item="v")
     )
-    assert rows.held <= rows.charged <= 4 * most
+    assert held_within_charge(rows.held, rows.charged)
+    assert rows.charged <= 4 * most
 
 
 @pytest.mark.parametrize("kind", list(_TEXT_KINDS))

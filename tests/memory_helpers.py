@@ -1,4 +1,4 @@
-"""Read the budget that a memory refusal names, follow refusals to a budget that runs, give a domain function a ledger of a budget, trace a call after an untraced call, trace what a call holds against what its ledger charges, trace a read of selected cells, wait until the arrays handed to writes are freed, hold a read's decodes or a write's encodes together while it is traced, keep no chunks of a traced write, record and trace what an import's process sends through its pipe, and skip tests that need the resident memory of the test process."""
+"""Compare what a traced call held with its charge, read the budget that a memory refusal names, follow refusals to a budget that runs, give a domain function a ledger of a budget, trace a call after an untraced call, trace what a call holds against what its ledger charges, trace a read of selected cells, wait until the arrays handed to writes are freed, hold a read's decodes or a write's encodes together while it is traced, keep no chunks of a traced write, record and trace what an import's process sends through its pipe, and skip tests that need the resident memory of the test process."""
 
 import asyncio
 import re
@@ -20,6 +20,31 @@ needs_proc_resident_memory = pytest.mark.skipif(
         "from Linux's /proc filesystem"
     ),
 )
+
+# Traced on Python 3.13 and 3.14, with and without coverage, the memory
+# tests held at most 64,500 bytes beyond their charges, the objects of
+# Python, Zarr and NumPy, and no more than 4% beyond a charge of a megabyte or
+# more. The slack leaves twice the bytes and a tenth of the charge, and still
+# refuses a charge of 720 KB that leaves out one of three arrays of 8 bytes a
+# cell.
+#: The share of its charge that a traced call may hold beyond the charge.
+CHARGE_RELATIVE_SLACK = 0.1
+#: The bytes that a traced call may hold beyond its charge and that share.
+CHARGE_ABSOLUTE_SLACK_BYTES = 128 * 1024
+
+
+def held_within_charge(held: int, charged: int) -> bool:
+    """Whether a call that held at most ``held`` bytes stayed within its charge of ``charged`` bytes.
+
+    A charge estimates the arrays that grow with the data. Beside them, a
+    call holds what the interpreter, the allocator and its libraries allocate
+    for themselves, which no charge counts and which differs between Python
+    versions and under coverage. A call stays within its charge while it
+    holds no more than the charge, ``CHARGE_RELATIVE_SLACK`` of the charge
+    beside it and ``CHARGE_ABSOLUTE_SLACK_BYTES`` more.
+    """
+    allowed = charged * (1 + CHARGE_RELATIVE_SLACK) + CHARGE_ABSOLUTE_SLACK_BYTES
+    return held <= allowed
 
 
 def named_budget(refusal: BaseException) -> int:

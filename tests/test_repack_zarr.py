@@ -12,7 +12,7 @@ from cytearc.storage.ann_index import (
     ANN_INDEX_FORMAT_VERSION,
     _ANN_INDEX_METADATA,
 )
-from tests.memory_helpers import decodes_held_together
+from tests.memory_helpers import decodes_held_together, held_within_charge
 from tests.storage_helpers import finalize_test_counts
 from cytearc.storage.layout import normalize_chunks
 from cytearc.storage.pipeline_runs import (
@@ -831,7 +831,7 @@ def test_a_repack_reserves_what_reading_a_band_of_sharded_counts_holds(
             finally:
                 tracemalloc.stop()
         held[concurrency] = peak - base - band.nbytes
-        assert held[concurrency] <= producer(concurrency)
+        assert held_within_charge(held[concurrency], producer(concurrency))
     assert held[1] > 10 * 160_000 + band.nbytes
     assert held[10] > producer(1) + 8 * 160_000
     np.testing.assert_array_equal(
@@ -916,7 +916,7 @@ def test_a_repack_at_a_tight_budget_reads_each_band_within_its_reserve(
     # The first read also fills Zarr's own buffers.
     assert len(reads) > 2
     for held, reserved in reads[1:]:
-        assert held <= reserved
+        assert held_within_charge(held, reserved)
     np.testing.assert_array_equal(
         zarr.open_group(str(output), mode="r")["RNA/counts"][:], values
     )

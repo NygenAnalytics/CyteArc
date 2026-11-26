@@ -35,7 +35,7 @@ from cytearc.utils.logging import logger
 from cytearc.writers import SubsetZarr, create_zarr_count_assay
 from cytearc.writers._store import write_membership_column
 from cytearc.writers.counts_t import finalize_writer_counts_t
-from tests.memory_helpers import traced_reruns
+from tests.memory_helpers import held_within_charge, traced_reruns
 from tests.storage_helpers import (
     by_cell_id,
     drop_row_nonzero,
@@ -984,7 +984,8 @@ def test_counting_merged_cells_charges_what_placing_each_sources_counts_holds(
     # source's order. The charge also counts the flag of every merged cell,
     # which the search frees before it copies the rows.
     held = 8 * 40_000 + peaks[0]
-    assert held <= place <= held + row_plan.nCells + 4_096
+    assert held_within_charge(held, place)
+    assert place <= held + row_plan.nCells + 4_096
 
 
 # Each pair of features shares a name, so a merge by name sums the pair and

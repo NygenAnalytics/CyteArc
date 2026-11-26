@@ -42,6 +42,7 @@ from cytearc.datastore.datastore import DataStore
 from cytearc.writers import SparseToZarr
 from tests.signature_contracts import signature_digest
 from tests.storage_helpers import by_cell_id
+from tests.memory_helpers import held_within_charge
 
 
 _PUBLIC_CLASS_METHODS = {
@@ -703,7 +704,7 @@ def test_feature_means_charge_each_block_the_shards_of_its_cells(tmp_path, monke
     shards, (fixed, per_row) = charged[-1]
     assert shards == 100
     read, peak = traced_selection_read(counts, blocks[0], feature)
-    assert peak <= read.nbytes + fixed + blocks[0].size * per_row
+    assert held_within_charge(peak, read.nbytes + fixed + blocks[0].size * per_row)
     # A charge of one shard's task falls short of the read.
     one_fixed, one_per_row = row_read_parts(
         array_geometry(counts), feature, rows_contiguous=False

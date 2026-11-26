@@ -15,7 +15,7 @@ from cytearc.writers._store import (
     metadata_column_write_bytes,
     write_metadata_column,
 )
-from tests.memory_helpers import traced_charge
+from tests.memory_helpers import held_within_charge, traced_charge
 
 
 def _group() -> zarr.Group:
@@ -115,7 +115,8 @@ def test_a_wide_text_column_write_holds_one_encoded_chunk_a_write_thread(
     # the charge with Zarr's objects of the array and its writes, tens of
     # kilobytes, and what a coverage tracer records of the lines that the
     # write runs.
-    assert least + encoded <= held <= charge + 128 * 1024
+    assert least + encoded <= held
+    assert held_within_charge(held, charge)
 
 
 @pytest.mark.parametrize(
@@ -204,7 +205,8 @@ def test_a_column_write_holds_what_its_size_helper_charges(
     )
     assert charge == expected
     held, encoded = _traced_write(values, missing, threads, encodes_at_once=threads)
-    assert least + encoded <= held <= charge + 128 * 1024
+    assert least + encoded <= held
+    assert held_within_charge(held, charge)
 
 
 def test_a_column_with_a_third_missing_holds_less_than_its_charge() -> None:
@@ -215,7 +217,7 @@ def test_a_column_with_a_third_missing_holds_less_than_its_charge() -> None:
     missing = np.arange(30_000) % 3 == 0
     charge = metadata_column_write_bytes(30_000, 800, missing=True, threads=1)
     held, _ = _traced_write(values, missing, 1)
-    assert held <= charge
+    assert held_within_charge(held, charge)
     # It holds the column's copy and the present values' at least.
     assert held >= 30_000 * 800 + 20_000 * 800
 
@@ -226,7 +228,7 @@ def test_a_column_of_blank_text_holds_less_than_the_charge_of_missing_rows() -> 
     values, missing = np.full(100_000, ""), np.ones(100_000, dtype=bool)
     charge = metadata_column_write_bytes(100_000, 4, missing=True, threads=1)
     held, _ = _traced_write(values, missing, 1)
-    assert held <= charge
+    assert held_within_charge(held, charge)
 
 
 def test_a_column_write_hands_zarr_one_chunk_for_each_write_thread_at_a_time(

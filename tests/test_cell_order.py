@@ -30,6 +30,7 @@ from cytearc.storage.cell_order import (
 )
 from cytearc.utils.memory_budget import MemoryBudgetError
 from tests.storage_helpers import by_cell_id, open_store
+from tests.memory_helpers import held_within_charge
 
 _MASK = (1 << 64) - 1
 
@@ -190,17 +191,20 @@ def test_drawing_a_shuffle_holds_no_more_than_its_charge() -> None:
     n_cells = 30_000
     charge = SHUFFLE_BYTES_PER_CELL * n_cells
     order_peak = traced_charge(lambda _ledger: shuffled_order(n_cells, 5), 3).held
-    assert charge - n_cells < order_peak <= charge + 4_096
+    assert charge - n_cells < order_peak
+    assert held_within_charge(order_peak, charge)
     # An import draws the order and then its inverse, holding the order.
     both_peak = traced_charge(
         lambda _ledger: destination_rows(shuffled_order(n_cells, 5)), 3
     ).held
-    assert charge - n_cells < both_peak <= charge + 4_096
+    assert charge - n_cells < both_peak
+    assert held_within_charge(both_peak, charge)
     order = shuffled_order(n_cells, 5)
     inverse_peak = (
         order.nbytes + traced_charge(lambda _ledger: destination_rows(order), 3).held
     )
-    assert charge - n_cells < inverse_peak <= charge + 4_096
+    assert charge - n_cells < inverse_peak
+    assert held_within_charge(inverse_peak, charge)
 
 
 def test_a_shuffle_beyond_the_budget_is_refused_naming_the_budget_that_holds_it() -> (

@@ -28,6 +28,7 @@ from cytearc.trajectory.pseudotime import (
 from cytearc.trajectory.parameters import AGGREGATION_ANN_DEFAULTS
 from cytearc.trajectory.results import PseudotimeMarkerResult
 from tests.storage_helpers import by_cell_id, graph_rows
+from tests.memory_helpers import held_within_charge
 
 
 def _metadata_values(table):
@@ -2115,10 +2116,10 @@ def test_nearest_feature_profiles_bytes_count_what_the_search_holds(
     else:
         least = arrays
     held = peak - before
-    assert (
-        least
-        <= held
-        <= nearest_feature_profiles_bytes(n_profiles, n_bins, 11, nthreads, space=space)
+    assert least <= held
+    assert held_within_charge(
+        held,
+        nearest_feature_profiles_bytes(n_profiles, n_bins, 11, nthreads, space=space),
     )
     assert (
         nearest_feature_profiles_bytes(n_profiles, n_bins, 11, nthreads, space=space)
@@ -2786,7 +2787,7 @@ def test_component_numbering_bytes_cover_what_numbering_holds(dtype, subgraph):
     # The estimate covers what numbering holds beside the graph on every
     # supported SciPy. SciPy 1.16, the oldest, holds what the estimate counts
     # for float32 weights; later releases hold less.
-    assert most <= estimate
+    assert held_within_charge(most, estimate)
     release = tuple(int(part) for part in scipy.__version__.split(".")[:2])
     if release < (1, 17) and dtype == np.float32:
         assert estimate <= 1.1 * most
@@ -3859,8 +3860,9 @@ def test_pseudotime_solve_bytes_cover_what_the_solves_hold(method, dtype):
     solve()
     _, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
-    assert peak - before <= pseudotime_solve_bytes(
-        n_cells, graph.nnz, method=method, n_modes=10
+    assert held_within_charge(
+        peak - before,
+        pseudotime_solve_bytes(n_cells, graph.nnz, method=method, n_modes=10),
     )
 
 

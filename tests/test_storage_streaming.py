@@ -17,6 +17,7 @@ from cytearc.storage.selections import (
     fingerprint_selected_stored_strings,
     resolve_stored_selection_artifact,
 )
+from tests.memory_helpers import held_within_charge
 
 
 def test_streamed_metadata_column_writes_contiguous_blocks_and_mask():
@@ -429,7 +430,8 @@ def test_a_cell_table_write_holds_what_its_size_helper_charges(
     # rows and its chunks' buffers, with one thread a codec's buffer of the
     # chunk's bound before it is cut to the encoded bytes, and at most the
     # charge with Zarr's objects, tens of kilobytes.
-    assert least <= held <= charge + 128 * 1024
+    assert least <= held
+    assert held_within_charge(held, charge)
 
 
 @pytest.mark.parametrize("kind", ["bytes", "byte-objects", "byte-objects-and-a-number"])
@@ -458,7 +460,7 @@ def test_a_cell_table_measures_wide_bytes_a_block_of_its_write_at_a_time(
         register_store_threads(store, 1)
         create_cell_data(zarr.open_group(store=store, mode="w"), None, ids, ids)
 
-    assert traced_charge(write).held <= charge + 128 * 1024
+    assert held_within_charge(traced_charge(write).held, charge)
 
 
 def test_a_cell_table_reads_a_list_of_ids_once_for_its_ids_and_names(
@@ -523,7 +525,8 @@ def test_a_cell_table_of_bytes_holds_no_more_than_its_size_helper_charges(
         )
 
     held = traced_charge(write).held
-    assert least <= held <= expected + 128 * 1024
+    assert least <= held
+    assert held_within_charge(held, expected)
 
 
 def test_a_cell_table_hands_zarr_one_chunk_for_each_write_thread_at_a_time(

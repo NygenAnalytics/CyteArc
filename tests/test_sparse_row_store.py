@@ -21,6 +21,7 @@ from cytearc.readers import _sparse
 from cytearc.readers._sparse import ROW_BYTES, SparseRowStore, encoded_entry_bytes
 from cytearc.utils.memory_budget import MemoryBudgetError
 from tests.row_store_helpers import asked_bytes, free_disk
+from tests.memory_helpers import held_within_charge
 
 _BIG = 1 << 40
 # The operation that the stores of these tests name in their errors.
@@ -786,7 +787,9 @@ def test_a_read_holds_no_more_than_the_store_reports(tmp_path):
                     store._cache = None
                     first, last = store.bucket_starts[bucket : bucket + 2]
                     store.read(int(first), int(last))
-                    assert tracemalloc.get_traced_memory()[1] - base <= reported
+                    assert held_within_charge(
+                        tracemalloc.get_traced_memory()[1] - base, reported
+                    )
             finally:
                 tracemalloc.stop()
         finally:
@@ -1700,7 +1703,9 @@ def test_a_ragged_read_holds_no_more_than_the_store_reports(tmp_path):
                 tracemalloc.reset_peak()
                 base = tracemalloc.get_traced_memory()[0]
                 store._load_ragged_bucket(bucket)
-                assert tracemalloc.get_traced_memory()[1] - base <= reported
+                assert held_within_charge(
+                    tracemalloc.get_traced_memory()[1] - base, reported
+                )
         finally:
             tracemalloc.stop()
     finally:

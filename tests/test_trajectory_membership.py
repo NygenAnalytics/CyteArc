@@ -80,6 +80,7 @@ from .test_trajectory_record_paths import (
     _write_graph_payload,
 )
 from tests.storage_helpers import by_cell_id
+from tests.memory_helpers import held_within_charge
 
 _SOURCES = ["t1"]
 
@@ -2367,7 +2368,7 @@ def _assert_calls_run_within_the_budget_they_name(
                 finally:
                     tracemalloc.stop()
                 peaks[call_name] = (peak - before, budget)
-                if peak - before <= budget:
+                if held_within_charge(peak - before, budget):
                     break
                 gc.collect()
             full_collections[call_name] = (
@@ -2380,7 +2381,7 @@ def _assert_calls_run_within_the_budget_they_name(
                 check(call_name, result)
     finally:
         _set_budget(store, unbounded)
-    over = {name: held for name, held in peaks.items() if held[0] > held[1]}
+    over = {name: held for name, held in peaks.items() if not held_within_charge(*held)}
     assert not over, _over_budget_report(
         store, calls, over, full_collections, unbounded
     )

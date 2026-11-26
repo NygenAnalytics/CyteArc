@@ -19,7 +19,7 @@ from cytearc.quality_control import doublets
 from cytearc.storage.artifacts import artifact_group, callable_identity
 from cytearc.storage.budget import ResourceBudget
 from cytearc.storage.count_matrix import CountMatrixPolicy
-from tests.memory_helpers import traced_reruns
+from tests.memory_helpers import held_within_charge, traced_reruns
 
 from .doublet_fixtures import write_doublet_target_zarr
 
@@ -229,7 +229,7 @@ def test_doublet_parents_charge_each_block_the_shards_of_its_parents(
     _rows, shards, (fixed, per_row) = charged[-1]
     assert shards == 100
     read, peak = traced_selection_read(counts, blocks[-1], feature)
-    assert peak <= read.nbytes + fixed + blocks[-1].size * per_row
+    assert held_within_charge(peak, read.nbytes + fixed + blocks[-1].size * per_row)
     # A charge of one shard's task falls short of the read.
     one_fixed, one_per_row = row_read_parts(
         array_geometry(counts), feature, rows_contiguous=False
@@ -1341,14 +1341,16 @@ def test_the_charges_of_the_builds_and_a_query_block_hold_their_arrays(
 
     # A part being built holds its positions, and a contiguous copy of its
     # rows when the sample is split, which the charge of the builds holds.
-    assert 0 < phases["build"] - before <= build_bytes
+    assert 0 < phases["build"] - before
+    assert held_within_charge(phases["build"] - before, build_bytes)
     # hnswlib's results and search queues are not NumPy arrays, so the rest
     # of the block's charge holds the merge's arrays; the counts, 8 bytes a
     # point, are charged beside the block.
     hnswlib_bytes = ann_query_block_bytes(
         16_000, 31, ef=doublets._part_depth(100, 30, parts), nthreads=2
     )
-    assert 0 < queries - 8 * 16_000 <= block_bytes(16_000) - hnswlib_bytes
+    assert 0 < queries - 8 * 16_000
+    assert held_within_charge(queries - 8 * 16_000, block_bytes(16_000) - hnswlib_bytes)
 
 
 def test_a_sample_charge_holds_builds_larger_than_its_query_block(monkeypatch):

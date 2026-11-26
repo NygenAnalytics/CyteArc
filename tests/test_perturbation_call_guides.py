@@ -44,6 +44,7 @@ from tests.storage_helpers import (
     write_count_store,
     written,
 )
+from tests.memory_helpers import held_within_charge
 
 N_PER_LANE = 200
 # Cells come in this lane order, so the fits must sort the lanes.
@@ -1259,7 +1260,7 @@ def test_the_tables_of_calls_hold_what_loading_them_charges(width) -> None:
     # The tables of cells and calls, beside the arrays they are made from,
     # hold no more than loading the calls charges them, the least of three
     # builds.
-    assert min(held) <= charged
+    assert held_within_charge(min(held), charged)
 
 
 def test_the_cells_ids_are_charged_as_their_strings_and_values() -> None:
@@ -1359,4 +1360,4 @@ def test_checking_variable_width_ids_against_a_call_file_holds_what_it_charges()
         )
 
     traced = traced_charge(check, runs=3)
-    assert traced.held <= traced.charged
+    assert held_within_charge(traced.held, traced.charged)

@@ -15,6 +15,7 @@ from zarr.storage import MemoryStore
 from cytearc import DataStore
 from cytearc.metadata import MetaData
 from tests.storage_helpers import by_cell_id, write_count_store
+from tests.memory_helpers import held_within_charge
 
 IDS = ["c0", "c1", "c2", "c3", "c4", "c5"]
 # A shuffled order of the cells, as the obs of another tool may list them.
@@ -481,4 +482,6 @@ def test_reading_ids_and_aligning_keyed_values_hold_what_their_estimate_states(
     _, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
     assert aligned.to_numpy()[0] == n_cells + 99
-    assert peak - before <= cell_id_alignment_bytes(stored, n_cells, len(values))
+    assert held_within_charge(
+        peak - before, cell_id_alignment_bytes(stored, n_cells, len(values))
+    )

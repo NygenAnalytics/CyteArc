@@ -20,6 +20,7 @@ from cytearc.storage.count_matrix import (
 )
 from cytearc.storage.layout import count_array_spec
 from cytearc.utils.memory_budget import MemoryBudgetError
+from tests.memory_helpers import held_within_charge
 
 
 class _MergeMeta:
@@ -4310,7 +4311,7 @@ def test_a_merge_charges_its_scan_of_a_column_of_variable_width_labels(tmp_path)
     tracemalloc.stop()
     # The pass that measures the labels' width and collects them holds no
     # more than the scan charges the column.
-    assert peak - before <= fixed + n_cells * per_row
+    assert held_within_charge(peak - before, fixed + n_cells * per_row)
     # A budget that one row of the labels' read cannot fit, which the IDs
     # alone fit, refuses the scan.
     ids_fixed, ids_per_row = array_row_selection_parts(table._get_array("ids"))
@@ -5457,7 +5458,7 @@ def test_a_scan_budget_charges_dates_that_another_source_holds_as_text(monkeypat
     merge_metadata._as_merged_text(days, np.dtype(str), None)
     _current, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
-    assert shared >= days.nbytes + peak
+    assert held_within_charge(days.nbytes + peak, shared)
 
 
 def _feature_columns_merge(tmp_path, second_features, second_columns):
@@ -5936,7 +5937,7 @@ def test_a_scan_budget_charges_dates_and_durations_that_a_merge_reads(monkeypatc
     )
     _current, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
-    assert other_unit >= days.nbytes + peak
+    assert held_within_charge(days.nbytes + peak, other_unit)
 
 
 def test_an_intersection_merge_checks_the_feature_dates_that_it_keeps(tmp_path):
@@ -6681,7 +6682,8 @@ def test_building_a_row_plan_holds_no_more_than_its_charge():
         peak = tracemalloc.get_traced_memory()[1]
     finally:
         tracemalloc.stop()
-    assert needed - 30_000 < peak <= needed + 4_096
+    assert needed - 30_000 < peak
+    assert held_within_charge(peak, needed)
     with pytest.raises(
         MemoryBudgetError,
         match="^Ordering 30000 merged cells holds about 720000 bytes",
@@ -8669,9 +8671,12 @@ def test_a_merge_decodes_each_source_chunk_once_for_each_window_of_cells_it_hold
         # Reading batch by batch, the write reserves what a read of a band's
         # cells of every column holds, traced on a shuffled band of each
         # source.
-        assert merged["reserve"] >= max(
-            _traced_band_read(location, merged["batch_rows"])
-            for location in chunk_column_sources
+        assert held_within_charge(
+            max(
+                _traced_band_read(location, merged["batch_rows"])
+                for location in chunk_column_sources
+            ),
+            merged["reserve"],
         )
     # The store's files are those of a merge that reads batch by batch.
     _same_files(merged, reference)
@@ -9154,7 +9159,7 @@ def test_a_csr_window_holds_no_more_than_its_charge(tmp_path, dtype, density):
     # The window, its refill and the first piece taken from it hold no more
     # than their charge, and more than the window and the piece alone, as
     # the read of a chunk column holds the chunk's rows.
-    assert peak <= window + refill + take
+    assert held_within_charge(peak, window + refill + take)
     assert peak > window + take + 400 * 400 * itemsize
     # A piece taken from the window without a refill holds its dense rows,
     # which its charge counts, and a few objects.
@@ -9166,7 +9171,8 @@ def test_a_csr_window_holds_no_more_than_its_charge(tmp_path, dtype, density):
         tracemalloc.stop()
     np.testing.assert_array_equal(rows, values[first + 64 : first + 128])
     assert rows.nbytes == take
-    assert take <= piece <= take + 4_096
+    assert take <= piece
+    assert held_within_charge(piece, take)
 
 
 def test_a_dense_merge_write_makes_each_batch_once_the_previous_one_is_gone(
@@ -9735,7 +9741,7 @@ def test_a_held_read_holds_no_more_than_its_charge(tmp_path, column):
     # holds the read only with the copy for the wide column, and only with
     # the indexers, 64 bytes a cell of a sharded read, for the narrow one.
     charge = _held_read_bytes(run, n_cells)
-    assert peak <= charge
+    assert held_within_charge(peak, charge)
     if column == "wide":
         assert peak > charge - n_cells * width * itemsize
     else:
@@ -9755,7 +9761,7 @@ def test_a_held_read_holds_no_more_than_its_charge(tmp_path, column):
     finally:
         tracemalloc.stop()
     np.testing.assert_array_equal(held, values[:, :width])
-    assert peak <= charge
+    assert held_within_charge(peak, charge)
     if column == "narrow":
         assert peak > run._read_bytes(n_cells * width * itemsize)
 

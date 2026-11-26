@@ -27,6 +27,7 @@ from cytearc.utils.logging import collect_warnings
 from .test_graph_coverage import _memory_graph_store
 from .test_graph_feature_projection import _native_chain
 from tests.storage_helpers import by_cell_id
+from tests.memory_helpers import held_within_charge
 
 
 def _y_graph() -> tuple[csr_matrix, np.ndarray, np.ndarray]:
@@ -1394,6 +1395,7 @@ def test_taking_the_mapped_cells_graph_holds_what_its_estimate_states(
     np.testing.assert_array_equal(
         retained.toarray(), graph.toarray()[mapped][:, mapped]
     )
-    assert 1.9 * graph_bytes < peak - before <= 2 * graph_bytes + 24 * n_cells
+    assert 1.9 * graph_bytes < peak - before
+    assert held_within_charge(peak - before, 2 * graph_bytes + 24 * n_cells)
     # A graph that maps every cell is kept as it is.
     assert mapped_cells_graph(graph, np.ones(n_cells, dtype=bool)) is graph

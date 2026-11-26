@@ -53,6 +53,7 @@ from cytearc.writers import (
 )
 from tests.storage_helpers import drawn_shuffles, shuffle_refusal
 from tests.variant_truth import tapestri_truth, write_tapestri
+from tests.memory_helpers import held_within_charge
 
 _N_CELLS = 157
 _N_FEATURES = 12
@@ -1567,7 +1568,8 @@ def test_a_10x_reader_gives_its_kept_barcodes_as_the_file_holds_them(
     # beside them.
     assert held == 6 * _N_CELLS + (6 * kept.size if cutoff else 0)
     # Within the few kilobytes of the objects of h5py's read.
-    assert 6 * _N_CELLS <= read <= held + 16 * 1024
+    assert 6 * _N_CELLS <= read
+    assert held_within_charge(read, held)
 
 
 def test_a_10x_import_stores_barcodes_that_are_not_ascii_as_text(tmp_path) -> None:

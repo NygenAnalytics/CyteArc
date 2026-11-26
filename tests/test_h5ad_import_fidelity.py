@@ -27,6 +27,7 @@ from cytearc.readers._h5ad_columns import (
 from cytearc.storage.count_matrix import DEFAULT_COUNT_MATRIX_POLICY
 from cytearc.utils.memory_budget import MemoryBudgetError
 from cytearc.writers import H5adToZarr
+from tests.memory_helpers import held_within_charge
 
 anndata = pytest.importorskip("anndata")
 
@@ -2987,6 +2988,7 @@ def test_the_import_charges_what_tracing_finds_the_reader_keeps(tmp_path) -> Non
     # What the allocations that the reader keeps add up to, which the import
     # charges, within 1%.
     assert kept > 50_000 * (8 + 33 + 16)
+    assert held_within_charge(kept, charged)
     assert abs(charged - kept) <= kept // 100
 
 

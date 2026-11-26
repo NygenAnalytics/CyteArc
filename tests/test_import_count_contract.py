@@ -43,7 +43,7 @@ from cytearc.writers import (
     create_zarr_count_assay,
     subset_assay_zarr,
 )
-from tests.memory_helpers import traced_charge, traced_reruns
+from tests.memory_helpers import held_within_charge, traced_charge, traced_reruns
 from tests.storage_helpers import finalize_test_counts, write_count_store
 from tests.test_seurat_reader import _Wire
 
@@ -1855,7 +1855,7 @@ def _drain_sparse_writes(
     run_import(first)
     (record,) = records
     record["why"] = ""
-    if record["held"] > record["reserve"]:
+    if not held_within_charge(record["held"], record["reserve"]):
         frames = 25
         # The repeat summarizes snapshots inside its trace. Taking one, which
         # refuses while nothing is traced, and summarizing one of two
@@ -1936,7 +1936,7 @@ def test_every_sparse_producer_holds_no_more_than_its_plan_reserves(
     # more, so a band it wrote is not held beside the next batch.
     assert record["bands"] > 1
     assert record["kept"] == 0
-    assert record["held"] <= record["reserve"], record["why"]
+    assert held_within_charge(record["held"], record["reserve"]), record["why"]
     if bound is not None:
         # Readers that hold one batch are planned within ``bound`` times what
         # they hold; the plan once charged two to six times it, and a Seurat
@@ -2041,7 +2041,7 @@ def test_a_drain_finalizes_what_earlier_tests_left_before_it_traces(
     # once each time, the traced import's before its drain traced.
     assert not tracing[0] and tracing[-1]
     assert len(finalized) == 2
-    assert record["held"] <= record["reserve"], record["why"]
+    assert held_within_charge(record["held"], record["reserve"]), record["why"]
 
 
 def _record_sparse_plans(monkeypatch) -> list[dict[str, Any]]:
@@ -2102,7 +2102,7 @@ def test_a_seurat_import_reserves_what_its_producer_holds(
     assert plan["canonicalBatches"] is canonical
     assert record["bands"] > 1
     assert record["kept"] == 0
-    assert record["held"] <= record["reserve"], record["why"]
+    assert held_within_charge(record["held"], record["reserve"]), record["why"]
     if bound is not None:
         assert record["reserve"] <= bound * record["held"]
 
@@ -2136,7 +2136,7 @@ def test_a_shuffled_seurat_import_reserves_what_its_producer_holds(
     # bucket loading ahead, which its reserve holds beside each batch.
     assert record["bands"] > 1
     assert record["kept"] == 0
-    assert record["held"] <= record["reserve"], record["why"]
+    assert held_within_charge(record["held"], record["reserve"]), record["why"]
 
 
 def test_a_shuffled_seurat_batch_charges_three_pointer_arrays(tmp_path):
@@ -2359,11 +2359,14 @@ def test_a_matrix_market_parse_of_the_largest_values_holds_no_more_than_its_char
     }
     for (n_entries, chunk_rows), peak in peaks.items():
         header = small if n_entries == small.n_entries else large
-        assert peak <= matrix_market_parse_bytes(header, chunk_rows), chunk_rows
+        assert held_within_charge(
+            peak, matrix_market_parse_bytes(header, chunk_rows)
+        ), chunk_rows
     # The charge grows with the lines of a chunk at least as fast as the parse.
-    assert peaks[120_000, 40_000] - peaks[120_000, 10_000] <= (
+    assert held_within_charge(
+        peaks[120_000, 40_000] - peaks[120_000, 10_000],
         matrix_market_parse_bytes(large, 40_000)
-        - matrix_market_parse_bytes(large, 10_000)
+        - matrix_market_parse_bytes(large, 10_000),
     )
 
 
@@ -2401,7 +2404,8 @@ def test_a_matrix_market_parse_reads_through_its_own_buffer_on_a_large_block_fil
     monkeypatch.setattr(builtins, "open", large_block_open)
     held = _traced_parse(header, 1_000)
     # Read through 4 MiB, the parse would hold more than twice its charge.
-    assert held <= matrix_market_parse_bytes(header, 1_000) < 4 * 1024**2
+    assert held_within_charge(held, matrix_market_parse_bytes(header, 1_000))
+    assert matrix_market_parse_bytes(header, 1_000) < 4 * 1024**2
 
 
 @pytest.mark.slow
@@ -2426,7 +2430,9 @@ def test_a_matrix_market_parse_of_many_chunks_holds_no_more_than_its_charge(
             for index in range(60_000)
         )
     header = matrix_market_header(path)
-    assert _traced_parse(header, 10) <= matrix_market_parse_bytes(header, 10)
+    assert held_within_charge(
+        _traced_parse(header, 10), matrix_market_parse_bytes(header, 10)
+    )
 
 
 @pytest.mark.parametrize(
@@ -2475,7 +2481,7 @@ def test_sorting_matrix_market_entries_into_rows_holds_no_more_than_its_charge(
         assert prepared
     finally:
         _close(reader)
-    assert held <= charge
+    assert held_within_charge(held, charge)
     # The charge counts the Python objects that pandas 2.2 makes of each
     # line. pandas 3.0 makes fewer of a chunk of many lines, and pandas 3.1
     # parses a chunk of 1,000 lines in half the memory of 3.0, so the charge

@@ -19,7 +19,11 @@ from cytearc.storage.geometry import (
     array_geometry,
 )
 from cytearc.storage.partition import row_read_parts
-from tests.memory_helpers import decodes_held_together, traced_charge
+from tests.memory_helpers import (
+    decodes_held_together,
+    held_within_charge,
+    traced_charge,
+)
 from tests.thread_helpers import blas_threads, raised_threads
 
 
@@ -343,7 +347,7 @@ def test_a_read_through_zarrs_fused_pipeline_holds_no_more_than_its_charge(
             return of.readBytes(block.nbytes, 4, decodes=concurrency, shards=4)
         return of.readBytes(block.nbytes, 16, decodes=concurrency)
 
-    assert peak - base <= charge(geometry)
+    assert held_within_charge(peak - base, charge(geometry))
     if workers > 1:
         # A charge that followed the plan's reads at once falls short.
         earlier = replace(geometry, fusedPoolWorkers=0, fusedReadsAsync=False)
@@ -420,7 +424,8 @@ def test_the_objects_of_a_zarr_read_lie_within_what_object_bytes_charges(
     buffers = (2 if sharded else 1) * values[:1].nbytes + stored + decodes * 16
     # Within half of the charge, a charge that drifted up from Zarr's objects
     # fails too, as one that falls short of them does.
-    assert charged / 2 <= held - buffers <= charged
+    assert charged / 2 <= held - buffers
+    assert held_within_charge(held - buffers, charged)
 
 
 @pytest.mark.parametrize(
@@ -489,7 +494,7 @@ def test_a_row_block_read_of_an_unsharded_array_holds_no_more_than_its_plan(
     # chunk, more than those two alone, and the plan covers all of it.
     assert block.nbytes == decoded
     assert peak > block.nbytes + decoded
-    assert matrix.stream_bytes() >= peak
+    assert held_within_charge(peak, matrix.stream_bytes())
 
 
 @pytest.mark.parametrize("profile", ["fast_local", "cloud"])
@@ -531,7 +536,7 @@ def test_a_band_read_of_a_sharded_array_holds_no_more_than_its_charge(
     decoded = 4_096 * 512 * 4
     band_bytes = 8_192 * 512 * 4
     assert held > 2 * band_bytes + 3 * decoded
-    assert geometry.readBytes(band_bytes, 2, decodes=1) >= held
+    assert held_within_charge(held, geometry.readBytes(band_bytes, 2, decodes=1))
     assert geometry.readBytes(band_bytes, 2, decodes=1) - decoded < held
 
 
@@ -572,7 +577,7 @@ def test_a_whole_read_of_an_unsharded_array_holds_no_decoded_chunk_beside_its_de
     # the earlier decoded chunk that it reserved for each decode before.
     assert values.nbytes == 4 * decoded
     assert peak - base > values.nbytes + 2 * 2 * decoded
-    assert geometry.wholeReadBytes(2) >= peak - base
+    assert held_within_charge(peak - base, geometry.wholeReadBytes(2))
     assert geometry.wholeReadBytes(2) - decoded < peak - base
 
 
@@ -717,7 +722,7 @@ def test_a_read_of_selected_cells_holds_no_more_than_its_charge(
     # features of a chunk. Two index arrays on an unsharded read also hold
     # NumPy's buffers of 8,192 elements of each array.
     charge = block._read_bytes(read.nbytes)
-    assert peak <= charge
+    assert held_within_charge(peak, charge)
     run = matrix[:2_000, :] if selected == "rows" else matrix[:2_000, 64:192]
     copy = 2_000 * (128 if selected == "rows" else 64) * 4
     if selected == "both" and sharded:
@@ -786,7 +791,7 @@ def test_a_read_of_cells_spread_over_shards_holds_a_task_for_each_shard(
     tens = ChunkedArray(stored, rows=spread, block_size=10)
     ones = ChunkedArray(stored, rows=spread, block_size=1)
     assert tens._read_bytes(0) - ones._read_bytes(0) == 9 * column_shards * 4_096
-    assert peak <= charge
+    assert held_within_charge(peak, charge)
     if column_shards == 1:
         # Without those tasks the charge would not cover the read, even with
         # the file buffer that it charges a read of part of a shard, which a
@@ -870,7 +875,7 @@ def test_a_read_in_bands_of_cells_spread_over_shards_holds_what_the_bands_before
     )
     assert set(sliced) == {0}
     charge = block._read_bytes(read.nbytes)
-    assert peak <= charge
+    assert held_within_charge(peak, charge)
     # No band waits on another shard, so the block is charged as many cells
     # of the first shards are but for what the earlier bands leave.
     clustered = np.random.default_rng(7).permutation(touched)
@@ -950,7 +955,7 @@ def test_a_read_of_cells_on_zarrs_fused_pipeline_is_charged_its_pools_reads(
             lambda: replace(geometry, fusedPoolWorkers=0, fusedReadsAsync=False),
         )
         one_at_a_time = block._read_bytes(read.nbytes)
-    assert peak - base <= charge
+    assert held_within_charge(peak - base, charge)
     assert peak - base > one_at_a_time
 
 
@@ -985,7 +990,7 @@ def test_a_read_of_a_run_of_cells_given_as_an_index_array_holds_its_charge(
     )
     # Finding the run takes its steps 65,536 at a time; all at once they
     # would hold 9 bytes a cell, 900 KB, beyond the read's charge.
-    assert held <= read.nbytes + fixed + cells.size * per_row
+    assert held_within_charge(held, read.nbytes + fixed + cells.size * per_row)
 
 
 @pytest.mark.parametrize("sharded", [True, False], ids=["sharded", "unsharded"])
@@ -1031,7 +1036,7 @@ def test_reads_of_selected_cells_copy_one_chunk_at_a_time_however_many_they_deco
     # a time, 2,000 x 128 x 4 bytes, so the charge holds one such copy, and
     # without it would not cover the read.
     copy = 2_000 * 128 * 4
-    assert peak - base <= charge
+    assert held_within_charge(peak - base, charge)
     assert peak - base > charge - copy
 
 
@@ -1059,7 +1064,7 @@ def test_a_read_of_many_cells_of_a_narrow_matrix_holds_their_indexers(
         read, values[cells] if selected == "rows" else values[np.ix_(cells, features)]
     )
     charge = block._read_bytes(read.nbytes)
-    assert peak <= charge
+    assert held_within_charge(peak, charge)
     if selected == "both" and sharded:
         # A sharded read of both is read in bands of the one chunk band of
         # cells, which index the three features, rather than in bands of a
@@ -1416,5 +1421,7 @@ def test_a_run_of_rows_over_scattered_columns_holds_the_chunks_between_them(
     # of the four chunks between them too, as row selections and row-block
     # streams over those genes plan it.
     assert held > apart + cells.size * per_row
-    assert held <= fixed + cells.size * per_row
-    assert ChunkedArray(counts, cols=genes)._read_bytes(block.nbytes) >= peak - base
+    assert held_within_charge(held, fixed + cells.size * per_row)
+    assert held_within_charge(
+        peak - base, ChunkedArray(counts, cols=genes)._read_bytes(block.nbytes)
+    )

@@ -33,6 +33,7 @@ from cytearc.utils.memory_budget import (
     sort_bytes,
 )
 from tests.memory_helpers import (
+    held_within_charge,
     named_budget,
 )
 from tests.storage_helpers import by_cell_id
@@ -425,7 +426,7 @@ def test_a_row_read_holds_what_it_charges(tmp_path, shape, chunks, dtype, n_rows
     # in the rows it returns, and each band's read leaves its objects while
     # the next bands are read, 150 of them for the chunks of 2,000 rows.
     charged = row_read_bytes(array_geometry(array), n_rows)
-    assert peak - before <= charged
+    assert held_within_charge(peak - before, charged)
 
 
 @pytest.mark.parametrize("kind", ["ASCII", "four-byte"])
@@ -490,7 +491,7 @@ def test_reads_of_many_small_chunks_hold_what_they_charge(tmp_path, layout) -> N
     }
     for name, read in reads.items():
         traced = traced_charge(read, runs=3)
-        assert traced.held <= traced.charged, name
+        assert held_within_charge(traced.held, traced.charged), name
 
 
 def test_a_read_of_a_local_file_is_charged_the_buffer_that_python_gives_it(
@@ -574,7 +575,7 @@ def test_what_thousands_of_band_reads_leave_levels_off_within_its_charge(
         return read_whole(ledger, root, "flags", item="the flags")
 
     traced = traced_charge(read, runs=2)
-    assert traced.held <= traced.charged
+    assert held_within_charge(traced.held, traced.charged)
 
 
 @pytest.mark.slow
@@ -603,8 +604,8 @@ def test_whole_and_row_reads_of_a_thousand_bands_of_rows_stay_within_their_charg
         lambda ledger: read_rows(ledger, array, rows, item="the rows"), runs=2
     )
 
-    assert whole.held <= whole.charged
-    assert selected.held <= selected.charged
+    assert held_within_charge(whole.held, whole.charged)
+    assert held_within_charge(selected.held, selected.charged)
 
 
 @pytest.mark.slow
@@ -626,7 +627,7 @@ def test_a_read_of_every_row_of_many_bands_orders_them_within_its_charge() -> No
         return read_rows(ledger, array, rows, item="the flags")
 
     traced = traced_charge(read, runs=3)
-    assert traced.held <= traced.charged
+    assert held_within_charge(traced.held, traced.charged)
 
 
 def test_the_reads_of_bands_leave_the_objects_of_a_read_and_of_each_chunk() -> None:
@@ -750,10 +751,12 @@ def test_a_whole_read_of_bands_of_up_to_twenty_chunks_stays_within_its_charge(
         tracemalloc.stop()
 
     np.testing.assert_array_equal(read, values)
-    assert peak - start <= ledger.most
+    assert held_within_charge(peak - start, ledger.most)
     # What the reads of the bands left once the read returned, beside its
     # result, stays within what the read is charged for them.
-    assert left - start - read.nbytes <= geometry.bandsLeftoverBytes(999)
+    assert held_within_charge(
+        left - start - read.nbytes, geometry.bandsLeftoverBytes(999)
+    )
 
 
 def test_a_sharded_array_reads_whole(tmp_path) -> None:

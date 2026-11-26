@@ -17,6 +17,7 @@ from cytearc.writers import (
     subset_assay_zarr,
 )
 from tests.storage_helpers import by_cell_id
+from tests.memory_helpers import held_within_charge
 
 
 def _value_range(values: np.ndarray) -> CountValueRange:
@@ -1326,7 +1327,8 @@ def test_h5ad_import_processes_are_charged_what_tracing_finds_their_reader_keeps
     pointers = 0 if encoding == "dense" and not shuffle_cells else 8 * (n_cells + 1)
     features = 24 * n_feats if split else 0
     assert charged == pointers + features
-    assert 0 <= kept_bytes - pointers <= 64 * 1024
+    assert 0 <= kept_bytes - pointers
+    assert held_within_charge(kept_bytes, charged)
 
 
 @pytest.mark.parametrize(
@@ -1711,7 +1713,7 @@ def test_a_dense_h5ad_reader_process_holds_no_more_than_its_charge(tmp_path):
     # The process holds its batch and the band it fills, which its admission
     # charges, beside a few kilobytes of the objects of its reader; the band
     # of 320,000 bytes that it sent last is freed before it makes the next.
-    assert held <= charge + 64 * 1024
+    assert held_within_charge(held, charge)
 
 
 @pytest.mark.parametrize("encoding", ["csr", "dense"])
@@ -2597,7 +2599,7 @@ def test_subset_assay_zarr_reserves_what_reading_its_selection_of_sharded_counts
             finally:
                 tracemalloc.stop()
         held[concurrency] = peak - base - block.nbytes
-        assert held[concurrency] <= producer(concurrency)
+        assert held_within_charge(held[concurrency], producer(concurrency))
     # Every gene is read from the ten stored 160,000-byte chunks of the shard
     # at once; scattered genes a chunk at a time, each stored chunk beside its
     # decoded copy. One decoded chunk, the charge before #353, leaves both out.
@@ -2672,7 +2674,7 @@ def test_subset_assay_zarr_reserves_the_indices_of_scattered_cells(
                 tracemalloc.stop()
         held[name] = peak - base - block.nbytes
         planned[name] = producer(1)
-        assert held[name] <= planned[name]
+        assert held_within_charge(held[name], planned[name])
     # The indices of 100,000 scattered cells, at least two int64 values each,
     # come beside what a run of as many cells holds, and a run is planned
     # near what it holds rather than as scattered cells.
@@ -2767,7 +2769,7 @@ def test_subset_assay_zarr_band_tasks_fit_their_reserve_at_the_writes_concurrenc
     assert plan.ioConcurrency == 10
     per_task = (plan.reservedBytes - plan.residentBytes) // plan.readWorkers
     assert len(tasks) == -(-cells.size // 1_000)
-    assert max(tasks) <= per_task
+    assert held_within_charge(max(tasks), per_task)
     # The bands read their cells from this many source shards.
     assert shards == max(
         len(np.unique(cells[start : start + 1_000] // 1_000))

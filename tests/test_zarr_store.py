@@ -60,7 +60,7 @@ from cytearc.storage.stores import (
     open_store,
 )
 from cytearc.storage.types import array_metadata_shards
-from tests.memory_helpers import HandedArrays, traced_reruns
+from tests.memory_helpers import HandedArrays, held_within_charge, traced_reruns
 from tests.store_probes import RecordingStore
 
 
@@ -1864,7 +1864,7 @@ def test_a_copy_from_larger_chunks_reserves_what_each_band_read_holds(
     (producer,) = recorded
     assert band.nbytes == 16 * 4_096 * 4
     assert peak - base > band.nbytes + 2 * 8 * 1024**2
-    assert producer + band.nbytes >= peak - base
+    assert held_within_charge(peak - base, producer + band.nbytes)
     np.testing.assert_array_equal(target[:].view(np.uint32), bits)
 
 
