@@ -20,7 +20,7 @@ These instructions apply to the whole repository.
 - Saved computations are immutable artifacts. `ArtifactRef`, provenance, and durable `PipelineRun` records connect frozen selections, results, reuse, and complete workflow invocations.
 - The lazy public facades are compatibility boundaries. Trace the public call, operation implementation, domain algorithm, persisted result, callers, tests, and documentation before changing a contract.
 - Plotting consumes narrow adapters and must not gain a module-load dependency on `datastore`.
-- Memory estimates count the arrays that grow with the data, such as blocks, coordinates, graphs, and per-cell IDs and labels. Add no charge for fixed or incidental allocations, such as the interpreter's and Zarr's objects, free lists, file buffers or temporaries. A memory test that traces a call compares the traced peak with the charge through `held_within_charge` in `tests/memory_helpers.py`, and a refusal test checks that the budget a refusal names runs, not that one byte less is refused.
+- Memory estimates count the arrays that grow with the data, such as blocks, coordinates, graphs, and per-cell IDs and labels, and `READ_ALLOWANCE_BYTES` of `utils/memory_budget.py` for each read of stored arrays in flight. Add no other charge for fixed or incidental allocations, such as the interpreter's and Zarr's objects, free lists, file buffers or temporaries. A memory test that traces a call compares the traced peak with the charge through `held_within_charge` in `tests/memory_helpers.py`, and a refusal test checks that the budget a refusal names runs, not that one byte less is refused.
 
 ## Source and conventions
 
