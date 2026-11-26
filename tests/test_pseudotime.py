@@ -894,8 +894,8 @@ def test_aggregation_leaves_out_the_settings_of_an_approximate_search(
     # One warning names the settings that were left out.
     assert _ignored_settings_warnings(caught) == [
         "Feature modules find each feature's nearest features exactly, so these "
-        "settings of an approximate search in ann_params have no effect and can "
-        f"be dropped: {names}"
+        "settings of an approximate search in ann_params have no effect, and "
+        f"CyteArc 1.6.0 stops accepting them; remove them: {names}"
     ]
     # The call asks for the modules of the distance alone, which the store holds.
     assert ref == default

@@ -1002,7 +1002,9 @@ def test_lineage_aggregation_records_the_distance_and_leaves_out_search_settings
     ignored = [item for item in caught if "no effect" in str(item.message)]
     assert len(ignored) == 1
     assert ignored[0].category is FutureWarning
-    assert str(ignored[0].message).endswith("can be dropped: 'M', 'ef'")
+    assert str(ignored[0].message).endswith(
+        "CyteArc 1.6.0 stops accepting them; remove them: 'M', 'ef'"
+    )
     before = set(datastore.artifacts.list(kind="lineage_aggregation", from_assay="RNA"))
     with pytest.raises(
         ValueError, match="ann_params contains unsupported parameters: 'n_trees'"
