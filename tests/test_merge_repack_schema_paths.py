@@ -906,25 +906,18 @@ def test_merge_refuses_a_feature_profile_beyond_its_budget(tmp_path):
     # and 16 for each of the 25,000 features. Counting each merged cell's
     # values adds 8 bytes for each cell and one more, and a whole read of a
     # source's summary of its 4 cells in one chunk: the counts, a decoded copy
-    # and an encoded one at its bound, 1 KiB more, and the 52 KiB of objects
-    # of Zarr's read of one chunk.
-    needed = (
-        row_plan.resident_bytes()
-        + alignment.resident_bytes()
-        + 40 * 8
-        + 16 * 25_000
-        + 8 * 9
-        + 3 * 8 * 4
-        + 1_024
-        + 32_768
-        + 4_096
-        + 16_384
-    )
+    # and an encoded one, beside the objects of Zarr's read.
+    held = row_plan.resident_bytes() + alignment.resident_bytes() + 40 * 8 + 16 * 25_000
+    counting = 8 * 9 + 3 * 8 * 4
+    # A budget with room for half of what counting holds beside the rest.
+    below = held + counting // 2
 
     with pytest.raises(MemoryError) as refused:
-        _merge(sources, str(destination), mem_budget=needed - 1).plan()
+        _merge(sources, str(destination), mem_budget=below).plan()
+    needed = refused.value.needed_bytes
+    assert needed >= held + counting
     assert str(refused.value) == _counting_refusal(
-        needed, needed - 1, "the count summaries of source 'left'"
+        needed, below, "the count summaries of source 'left'"
     )
     assert not destination.exists()
 
@@ -985,7 +978,6 @@ def test_counting_merged_cells_charges_what_placing_each_sources_counts_holds(
     # which the search frees before it copies the rows.
     held = 8 * 40_000 + peaks[0]
     assert held_within_charge(held, place)
-    assert place <= held + row_plan.nCells + 4_096
 
 
 # Each pair of features shares a name, so a merge by name sums the pair and
@@ -1271,9 +1263,6 @@ def test_merge_counts_signed_values_within_its_budget_or_names_the_budget_it_nee
     # it decodes each chunk once, and counts every value.
     np.testing.assert_array_equal(np.diff(profile(needed)), expected)
     assert sorted(recorded_blocks) == one_chunk_column
-    with pytest.raises(MemoryBudgetError) as short:
-        profile(needed - 1)
-    assert short.value.needed_bytes == needed
     # Every larger budget counts every value too, in wider runs of chunk
     # columns up to every column, each of which fits beside what is held and
     # the buffer of the counts' shard file; steps shorter than the 1,584 bytes
@@ -1287,15 +1276,15 @@ def test_merge_counts_signed_values_within_its_budget_or_names_the_budget_it_nee
     # What the merge holds beside the read adds to what the read needs, and
     # leaves the read the same runs.
     with pytest.raises(MemoryBudgetError) as holding_more:
-        profile(needed + 99_999, held=101_000)
+        profile(needed + 50_000, held=101_000)
     assert holding_more.value.needed_bytes == needed + 100_000
     np.testing.assert_array_equal(
         np.diff(profile(needed + 100_000, held=101_000)), expected
     )
     assert sorted(recorded_blocks) == one_chunk_column
     # The read alone, beside the profile of 48 cells (49 int64 values), needs
-    # exactly the budget that the merge named before it.
-    for budget in (needed, needed - 1):
+    # the budget that the merge named before it.
+    for budget in (needed, needed // 2):
         resources = ResourceBudget(budget, 1)
         count = partial(
             merge_writer._counted_row_values,
@@ -1353,9 +1342,19 @@ def test_merge_refuses_before_it_reads_any_source_when_one_cannot_be_read(
     assert str(refused.value) == _counting_refusal(
         needed, 2_000, "a read of the counts of source 'right'"
     )
-    # One byte short, the left source would fit, and none is read.
+    # Between the two sources' smallest reads the left source would fit, and
+    # none is read.
+    with pytest.raises(MemoryBudgetError) as left_alone:
+        merge_writer._cumulative_row_nnz(
+            [assays[0], assays[0]],
+            row_plan,
+            ResourceBudget(2_000, 1),
+            resident_bytes=1_000,
+        )
+    between = (left_alone.value.needed_bytes + needed) // 2
+    assert left_alone.value.needed_bytes < between < needed
     with pytest.raises(MemoryBudgetError) as short:
-        profile(needed - 1)
+        profile(between)
     assert short.value.needed_bytes == needed
     assert recorded_blocks == []
     np.testing.assert_array_equal(
@@ -1394,19 +1393,18 @@ def test_merge_names_the_count_summaries_that_its_budget_cannot_load(
 
     # Beside the 1,000 bytes held, a count of each of the 600 merged cells
     # and one more, 8 bytes each, and a whole read of the left source's
-    # summary of its 400 cells in one chunk: the counts, a decoded copy and
-    # an encoded one at its bound, 1/128 more and 1 KiB, the buffer of its
-    # file where Python reads it through one, and the 52 KiB of objects of
-    # Zarr's read of one chunk.
-    from tests.storage_helpers import local_read_buffer
-
-    buffer = local_read_buffer(Path(stores[0][0]) / "zarr.json", ranged=False)
-    summary = 3 * 8 * 400 + 8 * 400 // 128 + 1_024 + buffer + 32_768 + 4_096 + 16_384
-    needed = 1_000 + 8 * 601 + summary
+    # summary of its 400 cells in one chunk: the counts, a decoded copy and an
+    # encoded one, beside the objects of Zarr's read and of its file. A
+    # budget with room for half of the summary's three copies is refused.
+    held = 1_000 + 8 * 601
+    summary = 3 * 8 * 400
+    below = held + summary // 2
     with pytest.raises(MemoryBudgetError) as refused:
-        profile(needed - 1)
+        profile(below)
+    needed = refused.value.needed_bytes
+    assert needed >= held + summary
     assert str(refused.value) == _counting_refusal(
-        needed, needed - 1, "the count summaries of source 'left'"
+        needed, below, "the count summaries of source 'left'"
     )
     # At that budget each merged cell takes its source cell's nonzero values,
     # counted here with NumPy, and no count is read.

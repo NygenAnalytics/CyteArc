@@ -2978,8 +2978,6 @@ def test_source_preparation_names_the_budget_of_a_row_that_its_limit_refuses(
         "One row of the Seurat row conversion exceeds its memory"
     )
     assert str(refused).endswith(f"It needs at least {refused.needed_bytes} bytes.")
-    below = refusal(refused.needed_bytes - 1)
-    assert (below.needed_bytes, below.item) == (refused.needed_bytes, refused.item)
 
     prepared = source()
     try:

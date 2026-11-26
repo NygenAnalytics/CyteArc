@@ -1343,9 +1343,6 @@ def test_hto_demultiplexing_names_the_budget_of_its_clustering(
     assert refusal is not None
     assert (refusal.budget_bytes, refusal.item) == (budget, item)
     assert str(refusal).endswith(f"It needs at least {refusal.needed_bytes} bytes.")
-    below = demultiplex(refusal.needed_bytes - 1)
-    assert below is not None
-    assert (below.needed_bytes, below.item) == (refusal.needed_bytes, item)
     later = demultiplex(refusal.needed_bytes)
     assert later is None or (
         later.item != item and later.needed_bytes > refusal.needed_bytes

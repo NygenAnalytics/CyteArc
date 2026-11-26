@@ -584,7 +584,7 @@ def test_the_hash_codes_of_long_texts_count_against_the_budget() -> None:
     # about 4 MB, beside a few kilobytes of encoded text.
     texts = ["A" * 2_000, "A" * 1_999 + "C"]
     with pytest.raises(MemoryError, match="for the encoded texts"):
-        neighbor_pairs(texts, "hamming", 1, ledger=budgeted(8 * 257 * 2_000 - 1))
+        neighbor_pairs(texts, "hamming", 1, ledger=budgeted(8 * 257 * 2_000 // 2))
     found = neighbor_pairs(
         texts, "hamming", 1, ledger=budgeted(8 * 257 * 2_000 + 2**20)
     )

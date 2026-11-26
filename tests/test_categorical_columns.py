@@ -45,6 +45,7 @@ from cytearc.storage.metadata_keys import metadata_column_keys
 from cytearc.storage.selections import snapshot_run_metadata
 from cytearc.utils.memory_budget import MemoryBudgetError, MemoryLedger
 from tests.storage_helpers import by_cell_id, open_store, write_count_store
+from tests.memory_helpers import held_within_charge
 
 # Labels with a missing row, text beyond ASCII, slashes and underscores, and
 # numbers written as text, whose natural order puts "2" before "10".
@@ -469,16 +470,17 @@ def test_a_categorical_read_charges_the_codes_it_returns_beside_its_categories(
     assert values.categories.tolist() == categories
     assert values.tolist() == [labels[row] for row in rows]
     # The categories are charged as stored, as the references of an object
-    # array, and as Python values: a string takes what sys.getsizeof gives,
-    # and a float its 24 bytes, which pymalloc's 16-byte blocks round up to 32.
+    # array, and as Python values, which covers what Python holds of them.
     if isinstance(categories[0], str):
         stored = 4 * max(map(len, categories)) * len(categories)
         python_values = sum(sys.getsizeof(category) for category in categories)
     else:
         stored = 8 * len(categories)
-        python_values = len(categories) * -(-sys.getsizeof(0.5) // 16) * 16
-    category_bytes = stored + 8 * len(categories) + python_values
-    assert category_values_bytes(column) == category_bytes
+        python_values = len(categories) * sys.getsizeof(0.5)
+    category_bytes = category_values_bytes(column)
+    assert held_within_charge(
+        stored + 8 * len(categories) + python_values, category_bytes
+    )
     # The codes stay charged once, at the width returned, beside the
     # categories; codes that pandas widened replace the stored ones.
     assert ledger.held_bytes == values.codes.nbytes + category_bytes

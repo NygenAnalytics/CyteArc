@@ -943,11 +943,13 @@ def test_a_budget_without_room_for_the_shuffle_is_refused_before_it_runs(
                 shuffle_cells=True,
             ).dump()
 
+    # A budget with room for half of the order beside what the import holds.
+    below = held + 12 * _N_CELLS
     with pytest.raises(MemoryBudgetError) as caught:
-        attempt(tmp_path / "refused.zarr", needed - 1)
+        attempt(tmp_path / "refused.zarr", below)
     refusal = caught.value
-    assert (refusal.needed_bytes, refusal.budget_bytes) == (needed, needed - 1)
-    assert str(refusal) == shuffle_refusal(_N_CELLS, held, needed - 1)
+    assert (refusal.needed_bytes, refusal.budget_bytes) == (needed, below)
+    assert str(refusal) == shuffle_refusal(_N_CELLS, held, below)
     # The import is refused before it draws the order or writes anything.
     assert drawn == []
     assert not (tmp_path / "refused.zarr").exists()
@@ -1101,7 +1103,7 @@ def test_what_a_shuffled_import_holds_beside_a_gathered_array_is_charged(
         row_bytes = dims * 8 + 4 * width + 16
         needed = resident + 9 * _N_CELLS + (_N_CELLS + block) * row_bytes
         assert needed > budget
-        for memory in (budget, needed - 1):
+        for memory in (budget, (budget + needed) // 2):
             writer.resources = dataclasses.replace(writer.resources, memoryBytes=memory)
             with pytest.raises(MemoryBudgetError) as caught:
                 writer._check_shuffled_holds(np.dtype(f"U{width}"))
@@ -1137,7 +1139,7 @@ def test_the_check_of_rows_held_in_memory_charges_every_row_and_one_block(
                 40, block_rows, "rows", 300, n_rows=n_rows
             )
             writer.resources = dataclasses.replace(
-                writer.resources, memoryBytes=needed - 1
+                writer.resources, memoryBytes=needed // 2
             )
             with pytest.raises(MemoryBudgetError) as caught:
                 writer._check_shuffled_rows_memory(

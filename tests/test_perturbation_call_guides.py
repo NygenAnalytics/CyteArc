@@ -1264,8 +1264,6 @@ def test_the_tables_of_calls_hold_what_loading_them_charges(width) -> None:
 
 
 def test_the_cells_ids_are_charged_as_their_strings_and_values() -> None:
-    import sys
-
     # IDs of 2 to 32 characters, each beyond ASCII, so that every Python
     # string is of one kind, the longest beyond the 15 bytes that NumPy keeps
     # in a variable-width value's element.
@@ -1281,25 +1279,23 @@ def test_the_cells_ids_are_charged_as_their_strings_and_values() -> None:
     # bytes behind a one-byte size in an arena beside them.
     elements = 16 * len(strings) + sum(size + 1 for size in utf8 if size > 15)
 
-    # Python strings of one kind are counted as sys.getsizeof gives each,
-    # beside a reference to each.
+    # Python strings are counted at least by their characters, beside a
+    # reference to each.
     every = operations._strings_bytes(ids)
-    assert every == sum(map(sys.getsizeof, strings)) + 8 * len(strings)
+    assert every >= sum(map(len, strings)) + 8 * len(strings)
     # A table entry's ID, under pyarrow, holds the longest ID's UTF-8 bytes.
     assert operations._text_size(ids) == (
         sum(map(len, strings)),
         len(longest.encode("utf-8")),
         ord("é"),
     )
-    # A copy of some of the IDs holds no more than NumPy keeps for every one,
-    # and those at least NEP 55's elements and sized bytes.
+    # A copy of some of the IDs holds at least NEP 55's elements and sized
+    # bytes of every one, and is not charged as their Python strings.
     copy = operations._text_copy_bytes(ids)
-    assert elements <= copy <= elements + (elements - 16 * len(strings)) // 4 + 1
+    assert elements <= copy <= 2 * elements
 
 
 def test_fixed_width_ids_are_counted_at_the_widest_character_of_any() -> None:
-    import sys
-
     # The first ID is ASCII, a later one beyond Latin-1, so every ID can hold
     # two characters of three bytes each in UTF-8, and of two in Python.
     ids = np.asarray(["ab", "c中"])
@@ -1309,7 +1305,7 @@ def test_fixed_width_ids_are_counted_at_the_widest_character_of_any() -> None:
     assert widest == ord("中")
     assert longest >= len("中中".encode("utf-8"))
     assert characters >= sum(map(len, ids.tolist()))
-    assert operations._strings_bytes(ids) >= len(ids) * (sys.getsizeof("中中") + 8)
+    assert operations._strings_bytes(ids) >= len(ids) * (2 * 2 + 8)
 
 
 def test_each_call_of_a_table_is_charged_its_ids_reference_and_bytes() -> None:

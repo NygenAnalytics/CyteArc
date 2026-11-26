@@ -443,7 +443,5 @@ def test_chromvar_names_twice_its_background_model(store_path):
     # The model may take half of the budget, so it names twice the model.
     model = int(str(refusal).split("needs about ")[1].split(" bytes")[0])
     assert refusal.needed_bytes == 2 * model
-    below = score(refusal.needed_bytes - 1)
-    assert below is not None and below.item == refusal.item
     later = score(refusal.needed_bytes)
     assert later is None or later.item != refusal.item

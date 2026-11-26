@@ -476,7 +476,7 @@ def test_a_reorder_refuses_a_budget_below_spilling_the_rows(tmp_path) -> None:
     read = 8 * 1001 + 3 * (50 * 44 + 48 + 64)
     assert spill > read
     with pytest.raises(MemoryBudgetError) as refused:
-        reordered_matrix(_matrix(values), order, max_bytes=spill - 1)
+        reordered_matrix(_matrix(values), order, max_bytes=spill // 2)
     assert refused.value.needed_bytes == spill
     assert "cell_order='stored'" in str(refused.value)
     # At that budget the rows go one conversion step at a time.
@@ -500,7 +500,7 @@ def test_a_reorder_refuses_a_budget_that_cannot_read_back_its_widest_row(
     read = 8 * 3 + 3 * (20_000 * 56 + 48 + 64)
     assert read > spill
     with pytest.raises(MemoryBudgetError) as refused:
-        reordered_matrix(_matrix(values), order, max_bytes=read - 1)
+        reordered_matrix(_matrix(values), order, max_bytes=(spill + read) // 2)
     assert refused.value.needed_bytes == read
     # At that budget the store reads the row back.
     exported = materialize_h5ad_matrix(

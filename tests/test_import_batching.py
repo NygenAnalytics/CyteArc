@@ -1329,6 +1329,10 @@ def _held_by_sparse_buffer(matrix: csr_matrix, band_rows: int) -> int:
     from cytearc.utils.arrays import csr_to_coo
 
     n_rows, n_columns = matrix.shape
+    # A batch given to another buffer untraced makes the first calls of the
+    # traced ones.
+    warm = SparseShardBuffer(_band_spec(n_rows, n_columns, band_rows))
+    list(warm.add(csr_to_coo(matrix[:band_rows])))
     buffer = SparseShardBuffer(_band_spec(n_rows, n_columns, band_rows))
     held = 0
     tracemalloc.start()

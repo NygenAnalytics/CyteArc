@@ -472,7 +472,15 @@ def test_reading_ids_and_aligning_keyed_values_hold_what_their_estimate_states(
     labels = [f"{index:0{width}d}" for index in range(n_cells + 100)][::-1]
     values = pd.Series(np.arange(n_cells + 100, dtype=np.float64), index=labels)
     rows = np.arange(n_cells)
-    read_array_rows_chunkwise(stored, rows)
+    # An untraced read and alignment make the first calls of both.
+    align_to_cell_ids(
+        values,
+        read_array_rows_chunkwise(stored, rows),
+        name="x",
+        cells="c",
+        remedy="r",
+        leave_out_others=True,
+    )
     tracemalloc.start()
     before, _ = tracemalloc.get_traced_memory()
     ids = read_array_rows_chunkwise(stored, rows)

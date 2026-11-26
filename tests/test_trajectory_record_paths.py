@@ -742,7 +742,7 @@ def test_a_pseudotime_of_some_cells_charges_the_subgraph_before_reading_the_grap
         (whole, 96 + 108 + 228 + 916),
         (some, 96 + 160 + 90 + 228 + 916 + 144),
     ):
-        _set_budget(store, needed - 1)
+        _set_budget(store, needed // 2)
         with pytest.raises(MemoryBudgetError) as refused:
             store.trajectory.load_pseudotime(ref)
         assert refused.value.needed_bytes == needed

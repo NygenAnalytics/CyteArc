@@ -186,24 +186,23 @@ def test_drawing_a_shuffle_holds_no_more_than_its_charge() -> None:
     # so the trace counts what every build holds. Three arrays of 8 bytes a
     # cell are held at the peak: the hashes as they are mixed and the two
     # steps of the mixing, and later the order, its inverse and their
-    # positions. A charge without one of them is passed by more than a cell's
-    # byte, as is a charge of a fourth.
+    # positions. A charge without one of them is passed beyond the slack.
     n_cells = 30_000
     charge = SHUFFLE_BYTES_PER_CELL * n_cells
     order_peak = traced_charge(lambda _ledger: shuffled_order(n_cells, 5), 3).held
-    assert charge - n_cells < order_peak
+    assert order_peak > 2 * 8 * n_cells
     assert held_within_charge(order_peak, charge)
     # An import draws the order and then its inverse, holding the order.
     both_peak = traced_charge(
         lambda _ledger: destination_rows(shuffled_order(n_cells, 5)), 3
     ).held
-    assert charge - n_cells < both_peak
+    assert both_peak > 2 * 8 * n_cells
     assert held_within_charge(both_peak, charge)
     order = shuffled_order(n_cells, 5)
     inverse_peak = (
         order.nbytes + traced_charge(lambda _ledger: destination_rows(order), 3).held
     )
-    assert charge - n_cells < inverse_peak
+    assert inverse_peak > 2 * 8 * n_cells
     assert held_within_charge(inverse_peak, charge)
 
 

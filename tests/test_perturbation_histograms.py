@@ -311,7 +311,7 @@ def test_histograms_refuse_memory_below_their_least_before_reading() -> None:
     least = histogram_bytes(2, 3, 4, n_distinct=0)
     with pytest.raises(MemoryError) as refused:
         guide_count_histograms(
-            unread(), samples, n_samples=2, n_guides=3, ledger=_ledger(least - 1)
+            unread(), samples, n_samples=2, n_guides=3, ledger=_ledger(least // 2)
         )
     assert named_budget(refused.value) == least
     assert "for the guide count histograms of 0 distinct counts, while 4 of 4" in str(

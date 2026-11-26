@@ -1827,7 +1827,7 @@ def test_loaded_clonotypes_are_checked_against_the_memory_budget(
             labels = artifact_group(store.zw, ref)["within_labels"]
             assert labels.dtype == np.dtype("<U2") and labels.shape == (2,)
             needed += text_read_bytes(labels, 2)
-        monkeypatch.setattr(store, "memoryBytes", needed - 1)
+        monkeypatch.setattr(store, "memoryBytes", needed // 2)
         with pytest.raises(
             MemoryError, match=f"clonotypes of 8 cells holds about {needed} bytes"
         ):

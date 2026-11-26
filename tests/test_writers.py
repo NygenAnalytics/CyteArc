@@ -1,4 +1,5 @@
 import os
+import sys
 
 import numpy as np
 import pandas as pd
@@ -739,19 +740,23 @@ def test_h5ad_parallel_producer_count_is_memory_admitted(tmp_path):
     # Producer processes keep buffering while the parent writes, so two of
     # them need both of their reserves beside the parent's write band, and
     # beside the IDs and names that the parent keeps: the cell and feature IDs
-    # as bytes objects, 33 bytes and one a character each with a reference of
-    # 8, and the names as text, 4 bytes a character of the longest. The count
+    # as bytes objects, as Python sizes them, each with a reference of 8, and
+    # the names as text, 4 bytes a character of the longest. The count
     # summary of the 12 cells holds 8 bytes more for each cell's count of its
     # nonzero values, 96 bytes beside the 5,300 of the rest. Each process's
     # own reader also holds the file's row pointers, as the parent's does:
     # 13 int32 values, 52 bytes.
     cells = [f"c{i}" for i in range(12)]
-    kept = sum(8 + 33 + len(text) for text in [*cells, "f0", "f1", "f2"]) + 3 * 4 * 2
-    assert kept == 671
+    kept = sum(
+        8 + sys.getsizeof(text.encode()) for text in [*cells, "f0", "f1", "f2"]
+    ) + (3 * 4 * 2)
     pointers = 13 * 4
-    producers, store = write(5_300 + 8 * 12 + kept + 2 * pointers)
+    two = 5_300 + 8 * 12 + kept + 2 * pointers
+    producers, store = write(two)
     assert producers == 2
-    assert write(5_299 + 8 * 12 + kept + 2 * pointers)[0] == 1
+    # A budget 500 bytes short of that holds one producer's reserve and not
+    # two, so one producer writes.
+    assert write(two - 500)[0] == 1
 
     root = zarr.open_group(store=store, mode="r")
     np.testing.assert_array_equal(root["RNA/counts"][:], values)

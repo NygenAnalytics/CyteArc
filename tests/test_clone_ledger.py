@@ -25,6 +25,7 @@ from cytearc.utils.memory_budget import (
 )
 from tests.clone_helpers import every_cell, write_cells_store
 from tests.storage_helpers import by_cell_id, insert_nullable_cell_column
+from tests.memory_helpers import held_within_charge
 
 
 def test_identical_sets_refuse_a_budget_below_the_sets_hashes() -> None:
@@ -448,7 +449,7 @@ def test_clones_of_a_column_of_variable_width_text_are_those_of_its_labels(
         MemoryLedger(None, "Importing clones"),
     )
     utf8 = len(longest.encode("utf-8"))
-    assert planned >= 16 + utf8 + 1 + sys.getsizeof(longest) + 16
+    assert held_within_charge(16 + utf8 + 1 + sys.getsizeof(longest) + 16, planned)
 
 
 def test_clone_rows_are_read_in_chunks_that_half_the_room_holds() -> None:

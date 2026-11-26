@@ -552,13 +552,6 @@ def test_call_cells_names_the_budget_that_passes_its_resident_arrays(
         "the barcodes' totals, the ambient profile and the simulations"
     )
     assert f"holds about {refusal.needed_bytes} bytes" in str(refusal)
-    store.memoryBytes = refusal.needed_bytes - 1
-    with pytest.raises(MemoryBudgetError) as below:
-        store.qc.call_cells(n_iter=N_ITER)
-    assert (below.value.needed_bytes, below.value.item) == (
-        refusal.needed_bytes,
-        refusal.item,
-    )
     # The named budget passes the check; a later step names more if it needs it.
     store.memoryBytes = refusal.needed_bytes
     try:

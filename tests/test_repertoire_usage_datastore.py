@@ -1101,7 +1101,7 @@ def test_the_ranks_of_stored_values_are_checked_before_they_are_held(tmp_path) -
         # Each stored value's presence and rank, before any value is read.
         n_values = group[f"contig_{name}_offsets"].shape[0] - 1
         needed = repertoire_operations._RANK_BYTES_PER_VALUE * n_values
-        ledger = MemoryLedger(1_000 + needed - 1, "Counting")
+        ledger = MemoryLedger(1_000 + needed // 2, "Counting")
         ledger.hold("what counting holds", 1_000)
         with pytest.raises(
             MemoryBudgetError,

@@ -34,7 +34,7 @@ from cytearc.storage.selections import (
 )
 from tests.qc_helpers import create_labeled_qc_store
 from tests.storage_helpers import by_cell_id
-from tests.memory_helpers import held_within_charge
+from tests.memory_helpers import held_within_charge, traced_reruns
 
 
 class _MemoryGraphStore(GraphDataStore):
@@ -1846,18 +1846,24 @@ def test_writing_a_diffusion_operator_holds_what_its_estimate_states(
         random_state=np.random.default_rng(1),
     )
     root = zarr.open_group(store=zarr.storage.MemoryStore(), mode="w")
-    # Writing fingerprints the stored arrays, and the check before the
-    # operator is published fingerprints them again.
-    tracemalloc.start()
-    before, _ = tracemalloc.get_traced_memory()
-    group = root.create_group("operator")
-    write_diffusion_payload(group, operator)
-    fingerprint_stored_arrays(group, DIFFUSION_PAYLOAD)
-    _, peak = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
-    # The stored arrays themselves stay in the store in memory, which a store
-    # on disk does not hold.
-    stored = sum(group[name].nbytes_stored() for name in DIFFUSION_PAYLOAD)
-    assert held_within_charge(
-        peak - before - stored, diffusion_write_bytes(operator.nnz, n_cells)
-    )
+
+    def write() -> int:
+        # Writing fingerprints the stored arrays, and the check before the
+        # operator is published fingerprints them again. The untraced write
+        # and the traced one each write a group of their own.
+        name = "operator" if tracemalloc.is_tracing() else "untraced"
+        before, _ = tracemalloc.get_traced_memory()
+        group = root.create_group(name)
+        write_diffusion_payload(group, operator)
+        fingerprint_stored_arrays(group, DIFFUSION_PAYLOAD)
+        _, peak = tracemalloc.get_traced_memory()
+        # The stored arrays themselves stay in the store in memory, which a
+        # store on disk does not hold.
+        return (
+            peak
+            - before
+            - sum(group[array].nbytes_stored() for array in DIFFUSION_PAYLOAD)
+        )
+
+    (held,) = traced_reruns(write)
+    assert held_within_charge(held, diffusion_write_bytes(operator.nnz, n_cells))

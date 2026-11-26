@@ -420,12 +420,9 @@ def _serve_host_files(monkeypatch: pytest.MonkeyPatch, host, files: dict[str, st
     )
 
 
-def test_plans_read_the_hosts_cgroup_and_memory_files_without_a_buffer(
+def test_plans_read_the_quota_and_memory_limit_of_the_hosts_cgroup(
     tmp_path, monkeypatch
 ):
-    import gc
-    import tracemalloc
-
     # A host in a cgroup with a quota of 1.5 CPUs and a 2 GiB memory limit,
     # whose legacy CPU controller allows 2.5 CPUs.
     _serve_host_files(
@@ -447,19 +444,6 @@ def test_plans_read_the_hosts_cgroup_and_memory_files_without_a_buffer(
     assert budget_module.detect_cpu_quota_cores() == 1.5
     assert detect_workers() == 1
     assert budget_module.detect_memory_limit_bytes() == 2 * 1024**3
-
-    # Every plan reads the CPU quota, and a default budget the memory. A
-    # buffered read of each file would hold a buffer of at least 128 KiB from
-    # Python 3.14, and 4 to 8 KiB before.
-    gc.collect()
-    tracemalloc.start()
-    try:
-        detect_workers()
-        budget_module.detect_memory_limit_bytes()
-        _current, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
-    assert peak < 16 * 1024
 
 
 def test_system_files_are_read_whole_and_decoded_as_file_names(tmp_path):

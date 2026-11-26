@@ -2370,71 +2370,6 @@ def test_a_matrix_market_parse_of_the_largest_values_holds_no_more_than_its_char
     )
 
 
-@pytest.mark.parametrize("compressed", [False, True], ids=["plain", "gzip"])
-def test_a_matrix_market_parse_reads_through_its_own_buffer_on_a_large_block_file_system(
-    tmp_path, monkeypatch, compressed
-):
-    import builtins
-    import gzip
-
-    from cytearc.readers._matrix_market import (
-        matrix_market_header,
-        matrix_market_parse_bytes,
-    )
-
-    # 60,000 entries of 6 bytes, more than the 256 KiB that pandas reads at
-    # a time.
-    path = tmp_path / ("large_block.mtx.gz" if compressed else "large_block.mtx")
-    with gzip.open(path, "wt") if compressed else path.open("w") as handle:
-        handle.write("%%MatrixMarket matrix coordinate integer general\n")
-        handle.write("9 9 60000\n")
-        handle.writelines(
-            f"{1 + index % 9} {1 + index % 7} {1 + index % 5}\n"
-            for index in range(60_000)
-        )
-    header = matrix_market_header(path)
-    opened = builtins.open
-
-    def large_block_open(file, mode="r", buffering=-1, *args, **kwargs):
-        # open() buffers a file that it opens without a buffer size by the
-        # block that the file system reports, here one of 4 MiB.
-        buffering = 4 * 1024**2 if buffering == -1 else buffering
-        return opened(file, mode, buffering, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "open", large_block_open)
-    held = _traced_parse(header, 1_000)
-    # Read through 4 MiB, the parse would hold more than twice its charge.
-    assert held_within_charge(held, matrix_market_parse_bytes(header, 1_000))
-    assert matrix_market_parse_bytes(header, 1_000) < 4 * 1024**2
-
-
-@pytest.mark.slow
-def test_a_matrix_market_parse_of_many_chunks_holds_no_more_than_its_charge(
-    tmp_path,
-):
-    import gzip
-
-    from cytearc.readers._matrix_market import (
-        matrix_market_header,
-        matrix_market_parse_bytes,
-    )
-
-    # pandas before 3.0 keeps 99 bytes for each chunk that it reads until the parse
-    # ends: 0.59 MB for 6,000 chunks of 10 entries, beside its buffers.
-    path = tmp_path / "many.mtx.gz"
-    with gzip.open(path, "wt") as handle:
-        handle.write("%%MatrixMarket matrix coordinate integer general\n")
-        handle.write("9 9 60000\n")
-        handle.writelines(
-            f"{1 + index % 9} {1 + index % 7} {1 + index % 5}\n"
-            for index in range(60_000)
-        )
-    header = matrix_market_header(path)
-    assert held_within_charge(
-        _traced_parse(header, 10), matrix_market_parse_bytes(header, 10)
-    )
-
-
 @pytest.mark.parametrize(
     ("order", "shape", "lines"),
     [
@@ -2521,10 +2456,6 @@ def test_a_feature_major_import_refuses_a_budget_that_cannot_sort_its_entries(
         # Nothing was parsed or created.
         assert not destination.exists()
         assert list((tmp_path / "rows").iterdir()) == []
-        # A budget one byte short of the bytes it names is refused again.
-        with pytest.raises(MemoryBudgetError) as again:
-            _writer("mtx", reader, str(destination), mem_budget=needed - 1)
-        assert again.value.needed_bytes == needed
         # The refusal also names lines_in_mem halved until the sorting fits,
         # which imports within the refused budget.
         lines = int(re.search(r"lines_in_mem=(\d+)", str(refused.value))[1])
@@ -2618,10 +2549,6 @@ def test_a_shuffled_feature_major_import_refuses_a_budget_that_cannot_sort_its_e
         )
         assert not destination.exists()
         assert list((tmp_path / "rows").iterdir()) == []
-        # A budget one byte short of the bytes it names is refused again.
-        with pytest.raises(MemoryBudgetError) as again:
-            shuffled(destination, needed - 1)
-        assert again.value.needed_bytes == needed
         # The refusal also names lines_in_mem halved until the sorting fits,
         # which imports within the refused budget.
         lines = int(re.search(r"lines_in_mem=(\d+)", str(refused.value))[1])

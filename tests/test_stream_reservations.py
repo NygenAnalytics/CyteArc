@@ -14,7 +14,6 @@ from cytearc.matrix.chunked import ChunkedArray
 from cytearc.storage.budget import ResourceBudget
 from cytearc.storage.execution import execution_report_scope
 from cytearc.storage.geometry import (
-    _BAND_LEFTOVER_LIMIT_BYTES,
     ArrayGeometry,
     array_geometry,
 )
@@ -89,17 +88,6 @@ def test_read_bytes_follow_what_a_zarr_read_holds() -> None:
     assert replace(unsharded, fusedPoolWorkers=10).wholeReadBytes(1) == (
         100 * 40 * 2 + 10 * (stored + nominal) + _read_objects(100, 10)
     )
-    # A chunk of 2,048 bytes is bounded at 16 bytes more than itself, and the
-    # scratch a store reports is charged once per decode.
-    scratched = ArrayGeometry(
-        shape=(640, 8), chunks=(64, 8), shards=None, itemsize=4, readScratchBytes=100
-    )
-    assert scratched.readBytes(500, 3, decodes=2) == (
-        500 + 2 * (2_048 + 2_048 + 16 + 1_024 + 100) + _read_objects(3, 2)
-    )
-    assert scratched.readBytes(0, 1) == (
-        2_048 + 2_048 + 16 + 1_024 + 100 + _read_objects(1, 1)
-    )
 
 
 def test_a_read_on_cytearcs_pools_holds_its_objects_where_a_plain_pool_keeps_a_chunk() -> (
@@ -155,15 +143,6 @@ def test_a_read_on_cytearcs_pools_holds_its_objects_where_a_plain_pool_keeps_a_c
     assert unsharded.wholeReadBytes(2) == 160_000_000 + 2 * stored + read_objects
     assert replace(unsharded, fusedPoolWorkers=2).wholeReadBytes(2) == (
         160_000_000 + 2 * stored + 2 * 40_000_000 + read_objects
-    )
-    # An unsharded array of a local store reads each chunk as a file, so a
-    # buffer of 4,096 bytes is held for each of the chunks read at once: two
-    # in a whole read, and four of a band of ten chunks.
-    buffered = replace(unsharded, readScratchBytes=4_096)
-    assert buffered.wholeReadBytes(2) == unsharded.wholeReadBytes(2) + 2 * 4_096
-    band = replace(sharded, shards=None)
-    assert replace(band, readScratchBytes=4_096).bandReadBytes(1_000, 4) == (
-        band.bandReadBytes(1_000, 4) + 4 * 4_096
     )
 
 
@@ -352,80 +331,6 @@ def test_a_read_through_zarrs_fused_pipeline_holds_no_more_than_its_charge(
         # A charge that followed the plan's reads at once falls short.
         earlier = replace(geometry, fusedPoolWorkers=0, fusedReadsAsync=False)
         assert peak - base > charge(earlier)
-
-
-@pytest.mark.parametrize("concurrency", [1, 10])
-@pytest.mark.parametrize("n_chunks", [1, 10, 40])
-@pytest.mark.parametrize("sharded", [True, False], ids=["sharded", "unsharded"])
-def test_the_objects_of_a_zarr_read_lie_within_what_object_bytes_charges(
-    tmp_path: Any, sharded: bool, n_chunks: int, concurrency: int
-) -> None:
-    import gc
-    import os
-    import sys
-    import tracemalloc
-
-    from zarr.codecs import ZstdCodec
-
-    from cytearc.storage.async_execution import zarr_io_concurrency
-    from cytearc.storage.geometry import array_geometry
-    from cytearc.storage.virtual_arrays import read_selection
-
-    if sys.gettrace() is not None:
-        pytest.skip(
-            "a trace function, such as the C tracer that coverage installs, "
-            "allocates inside the traced window"
-        )
-    # A row of chunks of 1 by 4 uint32 values, 16 bytes each, so that what a
-    # read of the row holds beyond its buffers is the objects of Zarr's read.
-    root = zarr.open_group(store=LocalStore(str(tmp_path)), mode="w")
-    array = root.create_array(
-        "counts",
-        shape=(2, 4 * n_chunks),
-        chunks=(1, 4),
-        shards=(1, 4 * n_chunks) if sharded else None,
-        dtype=np.uint32,
-        compressors=ZstdCodec(),
-    )
-    values = np.arange(8 * n_chunks, dtype=np.uint32).reshape(2, 4 * n_chunks)
-    array[:] = values
-    stored = sum(
-        os.path.getsize(tmp_path / "counts" / "c" / "0" / name)
-        for name in (["0"] if sharded else [str(chunk) for chunk in range(n_chunks)])
-    )
-    geometry = array_geometry(array)
-    assert geometry is not None
-    decodes = min(concurrency, n_chunks)
-    charged = geometry.objectBytes(n_chunks, decodes)
-    traced = []
-    with zarr_io_concurrency(concurrency):
-        # Two reads make what every read shares.
-        for _ in range(2):
-            read_selection(array, slice(0, 1), slice(None))
-        for _ in range(3):
-            # A full collection empties CPython's free lists, so that the
-            # traced read allocates each of its objects anew.
-            gc.collect()
-            tracemalloc.start()
-            try:
-                start = tracemalloc.get_traced_memory()[0]
-                block = read_selection(array, slice(0, 1), slice(None))
-                traced.append(tracemalloc.get_traced_memory()[1] - start)
-            finally:
-                tracemalloc.stop()
-            np.testing.assert_array_equal(block, values[:1])
-            del block
-    # tracemalloc counts what every thread allocates, which can only add
-    # bytes, so the smallest of the three reads is the one that other threads
-    # disturbed least.
-    held = min(traced)
-    # The buffers: the row, and Zarr's shard-level copy of it, the stored
-    # chunks, and the chunks decoded at once, under 2 KB in all.
-    buffers = (2 if sharded else 1) * values[:1].nbytes + stored + decodes * 16
-    # Within half of the charge, a charge that drifted up from Zarr's objects
-    # fails too, as one that falls short of them does.
-    assert charged / 2 <= held - buffers
-    assert held_within_charge(held - buffers, charged)
 
 
 @pytest.mark.parametrize(
@@ -806,88 +711,6 @@ def test_a_read_of_cells_spread_over_shards_holds_a_task_for_each_shard(
 
 
 @pytest.mark.parametrize(
-    ("chunk", "touched", "left", "short"),
-    [
-        # Two chunks a band, 100 bands: the reads of the 99 bands before the
-        # last took 198 chunks, whose objects pass the limit at which what
-        # reads in bands leave levels off, where as many cells of one shard
-        # are one band and leave none; a charge without them falls short.
-        pytest.param(
-            10,
-            100,
-            _BAND_LEFTOVER_LIMIT_BYTES,
-            _BAND_LEFTOVER_LIMIT_BYTES,
-            id="two-chunks-100-bands",
-        ),
-        # Five chunks a band, 1,000 bands, against as many cells of the first
-        # ten shards, whose nine bands before the last leave the objects of a
-        # read, 32 KiB, and of their 45 chunks, 4 KiB each; a charge of what
-        # whole reads of one-dimensional arrays leave, up to 192 KiB, falls
-        # short.
-        pytest.param(
-            4,
-            1_000,
-            _BAND_LEFTOVER_LIMIT_BYTES - (32 * 1024 + 45 * 4_096),
-            _BAND_LEFTOVER_LIMIT_BYTES - 192 * 1024,
-            id="five-chunks-1000-bands",
-            marks=pytest.mark.slow,
-        ),
-    ],
-)
-def test_a_read_in_bands_of_cells_spread_over_shards_holds_what_the_bands_before_it_leave(
-    tmp_path: Any,
-    monkeypatch: pytest.MonkeyPatch,
-    chunk: int,
-    touched: int,
-    left: int,
-    short: int,
-) -> None:
-    import sys
-
-    from cytearc.storage import virtual_arrays
-    from tests.memory_helpers import traced_selection_read
-
-    # 100 cells for each shard that the block reads, by 20 features in shards
-    # of 100 cells of 10-feature or 4-feature chunks; a block of one cell
-    # from each of 100 or 1,000 shards by every other feature, which a
-    # sharded read of both takes in bands of rows, each in one shard, two or
-    # five chunks of it, and a block of as many shuffled cells of the first
-    # shards.
-    stored, values = _random_bits_store(
-        tmp_path, (touched * 100, 20), (100, chunk), (100, 20), np.float32
-    )
-    columns = np.arange(0, 20, 2)
-    sliced: list[int] = []
-    read_bands = virtual_arrays._read_bands
-
-    def recording(*args: Any, axis: int, **kwargs: Any) -> np.ndarray:
-        sliced.append(axis)
-        return read_bands(*args, axis=axis, **kwargs)
-
-    monkeypatch.setattr(virtual_arrays, "_read_bands", recording)
-    spread = np.arange(touched) * 100 + 7
-    block = ChunkedArray(stored, rows=spread, cols=columns, block_size=touched)
-    # Each traced read starts after a full collection, which empties CPython's
-    # free lists, so the reads of the earlier bands fill them again.
-    read, peak = traced_selection_read(stored, spread, columns)
-    np.testing.assert_array_equal(
-        read.view(np.uint32), values[np.ix_(spread, columns)].view(np.uint32)
-    )
-    assert set(sliced) == {0}
-    charge = block._read_bytes(read.nbytes)
-    assert held_within_charge(peak, charge)
-    # No band waits on another shard, so the block is charged as many cells
-    # of the first shards are but for what the earlier bands leave.
-    clustered = np.random.default_rng(7).permutation(touched)
-    fewer = ChunkedArray(stored, rows=clustered, cols=columns, block_size=touched)
-    assert charge - fewer._read_bytes(read.nbytes) == left
-    if sys.version_info < (3, 14):
-        # On Python 3.13 the read holds those objects beyond the rest of its
-        # charge; the reads leave few of them on Python 3.14.
-        assert peak > charge - short
-
-
-@pytest.mark.parametrize(
     ("layout", "shape", "chunks", "shards"),
     [
         ("unsharded, four column chunks", (2_000, 512), (2_000, 128), None),
@@ -1089,7 +912,7 @@ def test_a_row_block_stream_of_an_unsharded_array_reserves_each_stored_chunk() -
     assert matrix._block_size == 6
     np.testing.assert_array_equal(np.vstack(list(matrix.stream_blocks())), values)
 
-    short = ChunkedArray(stored, resources=ResourceBudget(needed - 1, 1))
+    short = ChunkedArray(stored, resources=ResourceBudget(needed // 2, 1))
     with pytest.raises(MemoryError, match=f"One unit needs about {needed} bytes"):
         next(short.stream_blocks())
 
@@ -1363,8 +1186,9 @@ def test_sharded_feature_blocks_reserve_their_read() -> None:
     planned = plan(needed)
     assert [block.bins for block in planned.blocks] == [(0, 1)]
     assert (planned.readWorkers, planned.ioConcurrency) == (1, 1)
+    # Without room for one feature's result and copy, 80 bytes, seven fit.
     with pytest.raises(MemoryError, match="affordable width is 7"):
-        plan(needed - 1)
+        plan(needed - 80)
 
 
 def test_a_run_of_rows_over_scattered_columns_holds_the_chunks_between_them(

@@ -779,6 +779,8 @@ def test_a_read_holds_no_more_than_the_store_reports(tmp_path):
             store.append_entries(rows, columns, values)
             store.finalize()
             reported = store.read_bytes()
+            # An untraced read makes the first calls of every traced one.
+            store.read(int(store.bucket_starts[0]), int(store.bucket_starts[1]))
             tracemalloc.start()
             try:
                 for bucket in range(store.bucket_starts.size - 1):
@@ -1143,9 +1145,10 @@ def test_a_bucket_limit_below_one_row_is_refused(tmp_path):
     # A float32 entry that a read may sum reads in 3 * 4 + 32 + 2 * 8 + 24
     # bytes, its piece in 48 and its row's two pointers in 64.
     assert raised.value.needed_bytes == 84 + 48 + 64
-    # A row of three entries in one piece.
+    # A row of three entries in one piece, beyond a limit with room for two.
     limit = 3 * 84 + 48 + 64
-    store = _whole_store(tmp_path, (2, 4), np.float32, bucket_bytes=limit - 1)
+    room = 2 * 84 + 48 + 64
+    store = _whole_store(tmp_path, (2, 4), np.float32, bucket_bytes=room)
     try:
         store.append_rows(
             [0, 1], csr_matrix(np.array([[1, 1, 1, 0], [1, 0, 0, 0]], np.float32))
@@ -1154,7 +1157,7 @@ def test_a_bucket_limit_below_one_row_is_refused(tmp_path):
             store.finalize()
         assert widest.value.item == "one row of the sparse row conversion"
         assert widest.value.needed_bytes == limit
-        assert widest.value.budget_bytes == limit - 1
+        assert widest.value.budget_bytes == room
     finally:
         store.close()
 
@@ -1697,6 +1700,8 @@ def test_a_ragged_read_holds_no_more_than_the_store_reports(tmp_path):
         _append_in_blocks(store, rng.permutation(3000), values, offsets, 333)
         store.finalize()
         reported = store.read_bytes()
+        # An untraced load makes the first calls of every traced one.
+        store._load_ragged_bucket(0)
         tracemalloc.start()
         try:
             for bucket in range(store.bucket_starts.size - 1):
