@@ -12,6 +12,7 @@ of ``docs/source/developers/zarr_internals.md``.
 import csv
 import hashlib
 import json
+import re
 import shutil
 from collections.abc import Callable
 from pathlib import Path
@@ -31,6 +32,7 @@ from scipy.io import mmread  # noqa: E402
 
 import cytearc  # noqa: E402
 from cytearc import DataStore  # noqa: E402
+from cytearc.features.variability import default_hvg_min_cells  # noqa: E402
 from cytearc.merge import DataStoreMerge  # noqa: E402
 from cytearc.metadata.membership import (  # noqa: E402
     features_measured_by_every_source,
@@ -103,6 +105,16 @@ def _writable(folder: Path, name: str = "rna.zarr") -> DataStore:
 
 def _read_only(name: str = "rna.zarr") -> DataStore:
     return DataStore(str(_FIXTURE / name), zarr_mode="r", nthreads=1)
+
+
+def _exactly(message: str) -> str:
+    """A pattern that matches ``message`` and nothing more."""
+    return f"^{re.escape(message)}$"
+
+
+def _read_only_refusal(operation: str) -> str:
+    """The refusal of a call that would save a result of ``operation`` in a store opened read-only."""
+    return _exactly(f"{operation} requires a DataStore opened with zarr_mode='r+'")
 
 
 def _change(operation: str, revisions: tuple[int, ...]) -> str:
@@ -267,6 +279,87 @@ def test_a_replay_selects_the_same_genes_under_the_new_revision_and_says_so(
     assert sorted(names[selected]) == sorted(_MANIFEST["rna"]["read"]["hvgNames"])
 
 
+def test_a_replay_on_a_read_only_store_names_no_stage_and_its_plan_names_the_superseded_one() -> (
+    None
+):
+    opened = _read_only()
+    run = opened.pipeline.open(label="rna")
+    before = _contents(_FIXTURE / "rna.zarr")
+    events: list[Any] = []
+    with pytest.raises(
+        PermissionError, match=_exactly("Pipeline execution requires zarr_mode='r+'")
+    ):
+        opened.pipeline.rerun(run, label="replayed", callback=events.append)
+    # It stops before its first stage starts.
+    assert events == []
+    plan = opened.pipeline.plan(run)
+    superseded = [stage for stage in plan.stages if stage.reason == "superseded"]
+    assert [
+        (stage.stage, stage.status, stage.operation, stage.existing)
+        for stage in superseded
+    ] == [
+        (
+            "highly_variable_features",
+            "computed",
+            "select_hvgs",
+            _RNA["highly_variable_features"],
+        )
+    ]
+    # The stages that read what it computes wait on it, the doublet scores
+    # through the clusters that it changes.
+    assert plan["normalization"].upstream == ("highly_variable_features",)
+    assert (plan["doublets"].reason, plan["doublets"].upstream) == (
+        "upstream",
+        ("connectivity", "cluster_selection"),
+    )
+    assert _contents(_FIXTURE / "rna.zarr") == before
+
+
+def test_doublet_scores_of_a_run_record_its_frozen_feature_names_which_a_call_does_not_take() -> (
+    None
+):
+    # So a call of qc.doublets with the run's clusters and graph differs from
+    # the run's scores in more than its revision, and meets only the scores
+    # that such a call saved.
+    opened = _read_only()
+    of_run = opened.artifacts.inspect(_RNA["doublets"])
+    of_call = opened.artifacts.inspect(_ARTIFACTS["doublets"])
+    assert of_run.revision == of_call.revision == 2
+    assert of_run.parameters == of_call.parameters
+    inputs = dict(of_run.inputs or {})
+    assert inputs.pop("feature_snapshot")["kind"] == "metadata_snapshot"
+    assert inputs == of_call.inputs
+
+
+def _default_min_cells_of_1_4_0(n_cells: int) -> int:
+    """The default HVG min_cells of CyteArc 1.4.0: 1% of the cells rounded up, from 3 to 20, and at most a fifth of them."""
+    return min(20, max(3, -(-n_cells // 100)), max(1, n_cells // 5))
+
+
+def test_an_hvg_selection_at_the_default_min_cells_is_computed_beside_the_saved_one_without_a_line(
+    tmp_path,
+) -> None:
+    # The defaults of 1.4.0 and of this release agree from 1,901 to 8,000
+    # cells alone, so a default selection of 1.4.0 outside them records
+    # another min_cells than a call of this release.
+    agreeing = [
+        n_cells
+        for n_cells in range(1, 20_000)
+        if default_hvg_min_cells(n_cells) == _default_min_cells_of_1_4_0(n_cells)
+    ]
+    assert agreeing == list(range(1_901, 8_001))
+    opened = _writable(tmp_path)
+    saved = _RNA["highly_variable_features"]
+    with recomputations() as lines:
+        again = opened.features.hvgs(_RNA["analysis_cell_selection"], top_n=150)
+    assert lines == []
+    assert again != saved
+    # The run's 175 cells, for which 1.4.0's default was 3 and the runs set 5.
+    assert _default_min_cells_of_1_4_0(175) == 3
+    recorded = (opened.artifacts.inspect(ref).parameters for ref in (saved, again))
+    assert [parameters["min_cells"] for parameters in recorded] == [5, 9]
+
+
 def test_a_selection_of_1_4_0_reads_its_ratio_as_unmeasured_and_serves_explicit_calls() -> (
     None
 ):
@@ -349,7 +442,7 @@ def test_a_superseded_result_is_computed_anew_with_a_log_line_and_refused_read_o
     assert (status.revision, status.current_revision) == (revision, current)
     # A read-only store cannot save the result again, and the refusal names
     # the operation that computes it.
-    with pytest.raises(PermissionError, match=f"^{operation} requires"):
+    with pytest.raises(PermissionError, match=_read_only_refusal(operation)):
         call(read_only, tmp_path)
     opened = _writable(tmp_path)
     with recomputations() as lines:
@@ -439,12 +532,19 @@ def test_an_aggregation_with_hnsw_settings_loads_plots_and_is_computed_anew(
             n_clusters=3,
         )
 
-    with pytest.raises(PermissionError, match="^run_pseudotime_aggregation requires"):
+    with pytest.raises(
+        PermissionError, match=_read_only_refusal("run_pseudotime_aggregation")
+    ):
         call(opened)
     writable = _writable(tmp_path)
-    again = call(writable)
+    # The call records no HNSW settings, so it differs from the saved
+    # aggregation in more than its revision and logs no line.
+    with recomputations() as lines:
+        again = call(writable)
+    assert lines == []
     assert again != saved
     assert writable.artifacts.inspect(again).revision == 3
+    assert "ef" not in writable.artifacts.inspect(again).parameters["ann_params"]
 
 
 def test_label_snapshots_without_categories_are_reused_and_plot_in_natural_order(
