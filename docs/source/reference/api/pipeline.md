@@ -950,9 +950,7 @@ RSS, thread counts, and network bytes come from the Linux `/proc` filesystem. On
 
 ### Runs saved by other releases
 
-A run completed under any 1.x release reopens under every later 1.x release. `open` by label or
-run ID, `list_runs`, `run[key]`, `run.report()`, and the frozen `run.cells` and `run.features`
-views work as long as the artifacts the run references exist and satisfy their payload contracts.
+A run completed under any 1.x release reopens under every later 1.x release. `open` by label or run ID, `list_runs`, `run[key]`, `run.report()`, and the frozen `run.cells` and `run.features` views work as long as the artifacts the run references exist and satisfy their payload contracts. What CyteArc does with the rest of a store that an earlier release wrote is in [Stores written by other releases](../developers/zarr-internals#stores-written-by-other-releases).
 
 Runs that `pipeline.run()` saved open unchanged. Their `run.recipe` is `"basic_rna_analysis"`, and
 their configuration keeps the shape that their release recorded, such as `cellKey`, `hvgCount`,
