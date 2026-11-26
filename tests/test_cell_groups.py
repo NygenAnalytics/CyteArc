@@ -486,7 +486,7 @@ def test_variable_width_labels_group_and_sample_cells_as_fixed_width_labels_do(
     )
     np.testing.assert_array_equal(with_variable.codes, with_fixed.codes)
     assert with_variable.names == with_fixed.names
-    assert held_while_numbered[-1] >= strings
+    assert held_within_charge(strings, held_while_numbered[-1])
     with_numbers = cell_samples.read_cell_samples(
         store, MemoryLedger(None, "Samples"), "numbers", every, reason="r"
     )

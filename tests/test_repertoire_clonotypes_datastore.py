@@ -2247,10 +2247,10 @@ def test_decoded_values_read_only_the_codes_given(tmp_path, monkeypatch) -> None
             )
             assert decoded.tolist() == every[codes].tolist()
             assert chunked == (["contig_junction_offsets"] if cheap_rows else [])
-            # The decoded junctions stay charged as the strings they are, 41
-            # bytes and a byte a base each with an object's slot, and their
-            # bounds are let go.
-            kept = sum(8 + 41 + len(value) for value in every[codes].tolist())
+            # The decoded junctions stay charged as the strings they are,
+            # about 49 bytes and a byte a base each with an object's slot,
+            # and their bounds are let go.
+            kept = sum(8 + 49 + len(value) for value in every[codes].tolist())
             assert ledger.charged == 7 + kept
     monkeypatch.setattr(repertoire_operations, "row_read_bytes", row_bytes)
     with pytest.raises(

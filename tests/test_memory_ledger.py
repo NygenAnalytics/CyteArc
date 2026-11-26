@@ -161,21 +161,19 @@ def test_a_ledger_refuses_codec_threads_that_are_not_a_count(threads) -> None:
         # np.sort returns a 1,000-value copy and sorts it in place.
         (np.uint8, False, False, 1_000),
         (np.float32, False, False, 4_000),
-        # A stable sort radix-sorts values of one or two bytes into a second
-        # buffer as large as the copy.
+        # A stable sort holds a second buffer as large as the copy, as its
+        # radix sort of one or two bytes does and more than its merge sort of
+        # wider values holds.
         (np.uint8, True, False, 2_000),
         (np.int16, True, False, 4_000),
-        # Wider values merge through a buffer half the copy's size; 1,000
-        # float32 values hold 4,000 bytes and the buffer 2,000.
-        (np.float32, True, False, 6_000),
-        (np.int64, True, False, 12_000),
+        (np.float32, True, False, 8_000),
+        (np.int64, True, False, 16_000),
         # np.argsort returns 1,000 int64 positions whatever the values' width.
         (np.uint8, False, True, 8_000),
         (np.int64, False, True, 8_000),
-        # Its stable sort holds a radix buffer as large as the positions, or a
-        # merge buffer half their size.
+        # Its stable sort holds as much again.
         (np.int16, True, True, 16_000),
-        (np.float32, True, True, 12_000),
+        (np.float32, True, True, 16_000),
     ],
 )
 def test_sort_bytes_count_the_copy_or_order_and_the_stable_buffer(

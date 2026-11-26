@@ -15,8 +15,9 @@ Planners that size work outside any ledger raise the same error with the same
 fields in their own words, and :func:`memory_refusal` words the refusal of a
 step that has none.
 
-The shared costs below estimate the structures that many steps build: Python
-strings, fixed-width text, object arrays, sorts and hash tables.
+The shared costs below estimate the structures that many steps build, at a
+simple cost for each item: Python strings, fixed-width text, object arrays,
+sorts and hash tables.
 """
 
 import sys
@@ -277,25 +278,22 @@ def _bytes(nbytes: int) -> int:
     return resolved
 
 
-# CPython's compact strings: the bytes of a string beside one character
-# width for each character, by the widest code point the string holds. An
-# ASCII string keeps its trailing NUL in its header.
-_STRING_KINDS = ((0x7F, 41, 1), (0xFF, 57, 1), (0xFFFF, 58, 2), (0x10FFFF, 60, 4))
+#: The bytes of a Python string beside its characters, between the 41 of
+#: ASCII text and the 60 of text beyond U+FFFF.
+_STRING_BYTES = 49
 
 
 def python_text_bytes(n_values: int, characters: int, *, widest: int = 0x7F) -> int:
     """Return the bytes of ``n_values`` Python strings that hold ``characters`` characters in all.
 
-    Each string takes a header and one, two or four bytes per character,
-    by the widest code point among its characters: ASCII strings 41 bytes
-    and one per character, strings up to U+00FF 57 and one, up to U+FFFF 58
-    and two, and beyond 60 and four. Every string is counted at the kind of
-    ``widest``, the widest code point of any of them.
+    Each string takes about 49 bytes beside its characters, which take a
+    byte each, two when ``widest``, the widest code point of any string, is
+    beyond U+00FF, and four when it is beyond U+FFFF.
     """
-    for limit, header, width in _STRING_KINDS:
-        if widest <= limit:
-            return int(n_values) * header + width * int(characters)
-    raise ValueError(f"A code point cannot exceed U+10FFFF, not {widest:#x}")
+    if widest > 0x10FFFF:
+        raise ValueError(f"A code point cannot exceed U+10FFFF, not {widest:#x}")
+    width = 1 if widest <= 0xFF else 2 if widest <= 0xFFFF else 4
+    return int(n_values) * _STRING_BYTES + width * int(characters)
 
 
 def fixed_text_bytes(n_values: int, width: int) -> int:
@@ -378,56 +376,26 @@ def sort_bytes(
 ) -> int:
     """Return the bytes that sorting ``n_values`` values of ``itemsize`` bytes holds, beside them.
 
-    ``np.sort`` returns a copy, and its stable sort holds half as much again
-    while it merges, or, on values of one or two bytes, which it sorts by
-    radix, as much again; with ``order``, ``np.argsort`` returns the order as
-    int64, and its stable sort holds half of that again, or by radix as much
-    again.
+    ``np.sort`` returns a copy, and with ``order`` ``np.argsort`` returns the
+    order as int64; a stable sort holds as much again while it merges.
     """
     n_values, itemsize = int(n_values), int(itemsize)
-    radix = itemsize <= 2
-    if order:
-        if not stable:
-            return 8 * n_values
-        return (16 if radix else 12) * n_values
-    copy = n_values * itemsize
-    if not stable:
-        return copy
-    return 2 * copy if radix else copy + copy // 2
+    held = 8 * n_values if order else n_values * itemsize
+    return 2 * held if stable else held
 
 
-def _power_of_two(n: int) -> int:
-    """The smallest power of two of at least ``n``, and at least 4."""
-    return max(4, 1 << max(0, int(n) - 1).bit_length())
+#: The bytes of pandas' hash table for each value that it hashes: 16 bytes a
+#: bucket, with 1.3 to 2.6 buckets a value, 30 bytes on average.
+_HASH_TABLE_BYTES = 32
 
 
-def _buckets(n_keys: int) -> int:
-    """The buckets of a khash table that holds ``n_keys`` keys at most 77% full: a power of two."""
-    candidate = _power_of_two(n_keys)
-    return 2 * candidate if candidate * 0.77 + 0.5 < n_keys else candidate
-
-
-#: pandas sizes a hash table for at most this many keys before it hashes
-#: them, and grows it from there as distinct keys arrive.
-_SIZE_HINT_LIMIT = (1 << 20) + 7
-
-
-def hash_table_bytes(n_values: int, *, n_distinct: int | None = None) -> int:
+def hash_table_bytes(n_values: int) -> int:
     """Return the bytes of the hash table that pandas builds to hash ``n_values`` values.
 
     ``pd.factorize``, ``pd.unique`` and ``Index.get_indexer`` hash their
-    values into a khash table of 16 bytes per bucket, a key and a position,
-    and a bit per bucket for whether it is empty, with a power of two of
-    buckets that are at most 77% full. pandas sizes it
-    for every value given, up to about a million, whether or not the values
-    repeat, and doubles it in place while its distinct keys outgrow it.
-    ``n_distinct`` bounds the distinct values, all of them when None. Beside the table, pandas
-    returns codes, and the distinct values, which it gathers in a buffer
-    that grows four times over when it fills, and an object array hashes the
+    values into a table that pandas sizes for every value given, whether or
+    not the values repeat, about 32 bytes a value. Beside the table, pandas
+    returns codes and the distinct values, and an object array hashes the
     values' strings, which fixed-width text becomes first.
     """
-    n_values = int(n_values)
-    distinct = n_values if n_distinct is None else min(int(n_distinct), n_values)
-    initial = _power_of_two(min(_buckets(n_values), _SIZE_HINT_LIMIT))
-    buckets = max(initial, _buckets(distinct))
-    return 16 * buckets + buckets // 8
+    return _HASH_TABLE_BYTES * max(0, int(n_values))
