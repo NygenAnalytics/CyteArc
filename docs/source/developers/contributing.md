@@ -221,10 +221,11 @@ the current commit again.
 3. Execute it on Modal and inspect its figures and downloaded notebook.
 4. Commit the notebook with its outputs and execution metadata. Keep rendered site files outside Git.
 
-Fact-check method names against `cytearc/`, dataset identifiers against the `cytearc_docs`
-example repository (`cytearc.datasets.connect("cytearc_docs").list_datasets()`), and numerical
-claims against actual outputs. Keep credentials and private connection values out of sources
-and notebook outputs.
+Fact-check method names against `cytearc/` and dataset identifiers against the `cytearc_docs`
+example repository (`cytearc.datasets.connect("cytearc_docs").list_datasets()`). Keep
+credentials and private connection values out of sources and notebook outputs.
+
+A page doesn't quote a value that it or an earlier analysis computed, in prose, code comments or `metadata.figure_descriptions`: cluster, state, clone or module numbers, counts, shares, scores, rankings, top genes, positions on a computed layout, timings or IDs. A rebuilt example store numbers its clusters differently and changes most of these values, and a saved figure description never updates when a page runs again. The code prints each value, the prose describes it in words and names a computed thing by what identifies it, such as "the cluster that expresses `CD79A`", "the module that holds Neurog3" or "the largest clone", and code selects by computed names instead of typed numbers. Parameters such as `resolution=1.0`, documented defaults, published dataset sizes and known biology stay. Where the narrative depends on an order or a comparison that a rerun could change, add an assertion to the code that keeps it true or stops the execution. `tests/test_docs_structure.py` fails on a cluster, module, clone or state number in a Markdown cell or a figure description. It doesn't see counts or scores, which a reviewer checks.
 
 A page that opens a store with `download_dataset(..., zarr=True)` gets back, when a reader runs it again in the same directory, the store that the earlier run downloaded, with the results that run saved in it. Every step that creates a named result must therefore succeed when that result already exists: open a saved run or assay when it is there, insert columns with `overwrite=True`, and leave out labels that nothing reads.
 
