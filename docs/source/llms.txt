@@ -52,7 +52,7 @@ CyteBase, the catalog of public datasets stored as cloud-hosted CyteArc DataStor
 ## Trajectories and fate mapping
 
 - [Pseudotime and expression dynamics](tutorials/pseudotime/): supervised sources and sinks, genes correlated with pseudotime, and expression modules that catch transient genes
-- [Fate mapping and potency](tutorials/fate-mapping/): multiple terminal outcomes, directed by a pseudotime or by potency scores without source cells
+- [Fate mapping and potency](tutorials/fate-mapping/): multiple terminal outcomes, directed by a pseudotime or by potency scores without source cells, and the initial and terminal states that a search finds in the walk the score directs
 - [Lineage dynamics](tutorials/lineage-dynamics/): fate-weighted genes, branch points, drivers, and modules per lineage
 - [Lineage curves and trajectory checks](tutorials/lineage-curves/): candidate sinks from a cluster tree, curves per lineage, placing points, and checks of scored cells, subgraph order, potency direction, cells off every curve, and branch points
 
@@ -94,8 +94,8 @@ CyteBase, the catalog of public datasets stored as cloud-hosted CyteArc DataStor
 ## API reference
 
 - [API overview](api/index.html): exact public signatures and result contracts
-- [DataStore](api/datastore.html): open stores, select cells and features, run analyses, and access saved results
-- [Analysis pipelines](api/pipeline.html): run the RNA, ATAC, ADT, multimodal, and CRISPR screen recipes, configure their stages, follow and cancel runs, inspect durable runs, and access frozen outputs
+- [DataStore](api/datastore.html): open stores, select cells and features, run analyses, plan trajectory calls before they compute, and access saved results
+- [Analysis pipelines](api/pipeline.html): run the RNA, ATAC, ADT, multimodal, and CRISPR screen recipes, configure their stages, pause a run after a stage and resume or end it, follow and cancel runs, inspect durable runs, and access frozen outputs
 - [Graph construction](api/graph_construction.html): normalization, reduction, neighbor search, and connectivity stages
 - [Reference mapping](api/mapping.html): build references, project query cells, and transfer labels
 - [Integration and metrics](api/integration.html): WNN, SNN, Harmony2 batch correction and its parameters, and integration diagnostics

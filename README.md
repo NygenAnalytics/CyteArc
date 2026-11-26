@@ -19,17 +19,17 @@ Start with the [quick start](https://docs.nygen.io/CyteArc/quickstart), browse t
 
 | Analysis | What you can do |
 | :-- | :-- |
-| **[Data access](https://docs.nygen.io/CyteArc/tutorials/remote-stores)** | Mount local or remote stores; combine cells across studies into composite datasets without copying their counts |
-| **[Cell calling and QC](https://docs.nygen.io/CyteArc/tutorials/quality-control)** | EmptyDrops cell calling, ambient RNA correction, doublet detection within samples, cell-cycle scoring, and HTO demultiplexing |
+| **[Data access](https://docs.nygen.io/CyteArc/tutorials/remote-stores)** | Mount local or remote stores; combine cells across studies into composite datasets without copying their counts; merged and composite stores record which features each source measured |
+| **[Cell calling and QC](https://docs.nygen.io/CyteArc/tutorials/quality-control)** | EmptyDrops cell calling, ambient RNA correction, doublet detection within samples for RNA and ATAC cells, cell-cycle scoring, and HTO demultiplexing |
 | **[Cell populations](https://docs.nygen.io/CyteArc/tutorials/scrna-seq)** | RNA, ATAC, and protein pipelines; batch-aware feature selection, PCA/LSI, UMAP, densMAP, LocalMAP, t-SNE, Leiden/Paris clustering, and marker tests |
 | **[Integration](https://docs.nygen.io/CyteArc/tutorials/multimodal-diagnostics)** | Harmony2 batch correction, WNN/SNN integration of modalities measured in the same cells, and integration diagnostics |
 | **[Reference mapping](https://docs.nygen.io/CyteArc/tutorials/mapping-and-label-transfer)** | Symphony-style mapping onto a finished analysis, which becomes a reference without reading its counts; label transfer and diagnostics for projected cells |
 | **[Donor comparisons and pseudobulk](https://docs.nygen.io/CyteArc/tutorials/condition-comparisons)** | Sample-level and paired comparisons across donors, with pseudobulk export for downstream differential expression |
-| **[Trajectories and fate mapping](https://docs.nygen.io/CyteArc/tutorials/pseudotime)** | Population Balance Analysis pseudotime, fate probabilities directed by pseudotime or potency scores, lineage-specific gene dynamics, and fate-weighted curves |
+| **[Trajectories and fate mapping](https://docs.nygen.io/CyteArc/tutorials/pseudotime)** | Population Balance Analysis pseudotime, fate probabilities directed by pseudotime or potency scores, the initial and terminal states of the walk that a score directs, lineage-specific gene dynamics, and fate-weighted curves |
 | **[Lineage tracing and immune repertoires](https://docs.nygen.io/CyteArc/tutorials/lineage-tracing)** | Clones from lineage barcodes, lineage recorder alleles and phylogenies, and mitochondrial or targeted DNA variants; clonal expansion, diversity, fate coupling, and fate bias; TCR and BCR clonotypes, gene usage, and AIRR export |
 | **[Gene activity and regulation](https://docs.nygen.io/CyteArc/tutorials/regulons)** | AUCell/WAGGR gene-set scores, SCENIC-style regulons, chromVAR motif activity, region-to-gene links, and gene programs |
 | **[CRISPR screens](https://docs.nygen.io/CyteArc/tutorials/crispr-screens)** | Guide calling, perturbation labels, target knockdown and E-distances, Mixscape's knocked-out cells and escapers, calibrated association tests at low and high MOI, and perturbation clusters |
-| **[Import and export](https://docs.nygen.io/CyteArc/tutorials/import-and-export)** | Cell Ranger, Matrix Market, CSV, AnnData, Seurat, and Mission Bio Tapestri import, of counts or normalized values; export counts and selected analysis results to AnnData |
+| **[Import and export](https://docs.nygen.io/CyteArc/tutorials/import-and-export)** | Cell Ranger, Matrix Market, CSV, AnnData, Seurat, and Mission Bio Tapestri import, of counts or normalized values; shuffled cell order by default, so any block of rows is a random sample; export counts and selected analysis results to AnnData in the file's order |
 
 ## Install
 
@@ -50,6 +50,8 @@ ds.plots.embedding(run=run, color_by="clusters")
 ```
 
 Recipes for RNA, ATAC, protein, multimodal, and CRISPR screen data cover quality control through marker discovery. See the [analysis pipeline API reference](https://docs.nygen.io/CyteArc/api/pipeline.html) for every stage and its settings.
+
+A long run can stop after a stage and continue under the same run ID, on any machine that opens the store: pass `run_until="pca"` to a recipe, then call `ds.pipeline.resume(run.run_id)`.
 
 ## Mount a remote dataset
 
