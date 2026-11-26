@@ -245,8 +245,8 @@ class DataStoreMerge:
     keeps its own source in the cell column of sources, so a run of one
     study's cells keeps that study's antibodies however often its store is
     merged again. The merged source's own columns are not copied. A merged
-    store without a record, whose sources measured the same features, is
-    recorded as one source. A source column of the same name as one of these
+    store without a record, such as one that CyteArc 1.4.0 merged, is
+    recorded as one source, whatever features its sources measured. A source column of the same name as one of these
     columns is left out with a warning.
 
     Merged cells interleave the sources' cells in a random order that

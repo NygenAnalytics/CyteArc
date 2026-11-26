@@ -346,7 +346,7 @@ class PseudotimeAggregationArguments(OperationArguments):
     smoothen: bool = parameter()
     z_scale: bool = parameter()
     # The n_neighbors argument, saved under the key that 1.3.0 records, so
-    # that results computed by 1.3.0 are still reused.
+    # that records of 1.3.0 and 1.4.0 still validate.
     n_neighbours: int = parameter()
     n_clusters: int = parameter()
     ann_params: dict[str, Any] = parameter()
