@@ -15,7 +15,8 @@ AGGREGATION_ANN_STATIC_PARAMETER_NAMES = frozenset(
 AGGREGATION_ANN_DERIVED_PARAMETER_NAMES = frozenset({"dim"})
 # The settings of the HNSW search that found approximate feature neighbors
 # until exact neighbors replaced it. The modules saved before then record them,
-# and a call that passes one is warned that it has no effect.
+# and a call that passes one is warned that it has no effect and that
+# CyteArc 1.6.0 stops accepting the names.
 AGGREGATION_HNSW_PARAMETER_NAMES = frozenset(
     {"ef_construction", "M", "random_seed", "ef", "num_threads", "max_elements"}
 )
@@ -59,7 +60,8 @@ def requested_ann_params(ann_params: Mapping[str, Any] | None) -> dict[str, Any]
         warn(
             "Feature modules find each feature's nearest features exactly, so "
             "these settings of an approximate search in ann_params have no "
-            "effect and can be dropped: " + ", ".join(repr(name) for name in ignored),
+            "effect, and CyteArc 1.6.0 stops accepting them; remove them: "
+            + ", ".join(repr(name) for name in ignored),
             FutureWarning,
         )
     return {

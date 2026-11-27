@@ -2,9 +2,9 @@
 name: cytearc-single-cell
 description: Analyze single-cell data with core CyteArc, the out-of-core Zarr DataStore library with immutable artifacts and pipeline runs. Covers opening, converting and mounting stores (including public CyteBase datasets opened by their hf:// URIs), QC with removal audits, HVG/PCA/neighbor graphs, Leiden/Paris clustering, UMAP, markers and cautious annotation, batch correction and donor-level comparisons, RNA, ATAC, ADT, multimodal (WNN) and CRISPR screen pipeline recipes, headless plotting, provenance and export. Use when a task involves a CyteArc .zarr store, a CyteBase dataset, cytearc.DataStore, ds.pipeline, or converting H5AD/10x/MTX/Seurat data for CyteArc. For CyteBase catalog search in depth, use the cytebase skill.
 license: BSD-3-Clause
-compatibility: Requires Python 3.13+ and a cytearc release after 1.3.0, which adds the ds.pipeline.rna/atac/adt/multimodal recipes (pip install "cytearc[extra]>1.3.0", plus --pre for a release candidate; CyteBase datasets need network access, and searching their catalog needs the separate cytebase package; add the tsne extra for t-SNE and the regulons extra for cisTarget ranking databases).
+compatibility: Requires Python 3.13+ and cytearc 1.5.0 or later, which this skill's recipes need (pip install "cytearc[extra]>=1.5.0", plus --pre and >=1.5.0rc1 for a release candidate; CyteBase datasets need network access, and searching their catalog needs the separate cytebase package; add the tsne extra for t-SNE and the regulons extra for cisTarget ranking databases).
 metadata:
-  version: "0.6"
+  version: "0.7"
 ---
 
 # CyteArc single-cell analysis
@@ -22,9 +22,10 @@ not thresholds.
 
 ## Setup
 
-- Install into the environment you run Python from: `pip install "cytearc[extra]>1.3.0"`, plus
+- Install into the environment you run Python from: `pip install "cytearc[extra]>=1.5.0"`, plus
   `cytearc[tsne]` for t-SNE and `cytearc[regulons]` for cisTarget ranking databases. The floor
-  matters: releases up to 1.3.0 have `ds.pipeline.run(...)` instead of the recipes this skill uses.
+  matters: releases up to 1.3.0 have `ds.pipeline.run(...)` instead of the recipes this skill uses,
+  and 1.4.0 lacks `run_until`, `ds.pipeline.resume`, `ds.trajectory.states` and `SubsetZarr(cell_ids=)`.
   pip skips pre-releases, so a release candidate also needs `pip install --pre`.
 - CyteBase datasets are CyteArc stores in public Hugging Face buckets, opened by URI with plain
   CyteArc (`references/data-access.md`). Searching their catalog needs the separate `cytebase`
