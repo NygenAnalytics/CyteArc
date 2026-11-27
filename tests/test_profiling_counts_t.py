@@ -144,7 +144,8 @@ def test_write_counts_t_accounts_for_process_resident_memory(tmp_path, monkeypat
     assert result.error is not None
     assert re.fullmatch(
         r"MemoryBudgetError: countsT write needs at least \d+ bytes, "
-        r"but the operation limit is 1048576 bytes",
+        r"but the operation limit is 1048576 bytes\. Raise mem_budget to at "
+        r"least \d+ MiB\.",
         result.error,
     )
     assert "countsT" not in zarr.open_group(str(root_path), mode="r")["RNA"]

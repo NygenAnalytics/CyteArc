@@ -616,11 +616,11 @@ def reordered_matrix(
         raise MemoryBudgetError(
             f"Writing {label[0].lower()}{label[1:]} in source order exceeds the "
             f"memory limit. Sending the rows of its {n_rows} cells to their "
-            f"buckets and reading them back needs at least {least} bytes. Raise "
-            "mem_budget, or export with cell_order='stored'.",
+            f"buckets and reading them back needs at least {least} bytes.",
             needed_bytes=least,
             budget_bytes=int(max_bytes),
             item=f"the row order of {n_rows} cells",
+            remedy="export with cell_order='stored'",
         )
     return replace(
         matrix,
@@ -1921,7 +1921,7 @@ def _require_graph_memory(
     if max_bytes is not None and required > max_bytes:
         raise MemoryBudgetError(
             f"Exporting the graph's {n_edges} edges needs about {required} bytes, "
-            f"but the memory budget is {max_bytes} bytes. Raise mem_budget.",
+            f"but the memory budget is {max_bytes} bytes.",
             needed_bytes=required,
             budget_bytes=int(max_bytes),
             item=f"the graph's {n_edges} edges",

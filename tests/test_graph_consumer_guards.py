@@ -34,6 +34,7 @@ from cytearc.neighbors.graph import (
 )
 from cytearc.storage.artifacts import ArtifactRef, artifact_group
 from cytearc.storage.budget import ResourceBudget
+from tests.memory_helpers import NEEDS_NAMING_ONE_MIB
 from tests.storage_helpers import by_cell_id, write_count_store
 
 N_CELLS = 150
@@ -245,10 +246,12 @@ def _required(load: GraphLoadMemory, held: int, working: int) -> int:
 
 
 def _budget_message(work: str, required: int, limit: int) -> str:
+    # The graphs of these tests need so little that the refusal names 1 MiB.
+    assert required <= NEEDS_NAMING_ONE_MIB
     return (
         f"{work} of {N_CELLS} cells needs about {required} bytes in memory for a "
         f"graph of {N_CELLS * K} edges, but the operation limit is {limit} bytes. "
-        "Raise mem_budget."
+        "Raise mem_budget to at least 1 MiB."
     )
 
 
@@ -376,8 +379,9 @@ def test_consumers_admit_their_graph_memory_before_reading_it(
     assert str(caught.value) == (
         f"Building the connectivity map of {N_CELLS} cells needs about {required} "
         f"bytes in memory for a graph of {N_CELLS * K} edges, but the operation "
-        f"limit is {required // 2} bytes. Raise mem_budget."
+        f"limit is {required // 2} bytes. Raise mem_budget to at least 1 MiB."
     )
+    assert required <= NEEDS_NAMING_ONE_MIB
     assert store.artifacts.list(kind="cluster_labels", from_assay="RNA") == [
         refs["leiden"]
     ]
@@ -443,8 +447,9 @@ def test_the_graph_check_names_a_later_step_that_needs_more_than_the_load(
     assert str(table) == (
         f"Loading a saved table of {N_CELLS} cells needs about {loading + 1} bytes "
         "in memory for the saved table and its work, but the operation limit is 1 "
-        "bytes. Raise mem_budget."
+        "bytes. Raise mem_budget to at least 1 MiB."
     )
+    assert loading + 1 <= NEEDS_NAMING_ONE_MIB
 
 
 def test_the_graph_load_estimate_pins_its_terms() -> None:

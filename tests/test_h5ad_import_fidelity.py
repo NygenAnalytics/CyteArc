@@ -28,7 +28,7 @@ from cytearc.readers._h5ad_columns import (
 from cytearc.storage.count_matrix import DEFAULT_COUNT_MATRIX_POLICY
 from cytearc.utils.memory_budget import MemoryBudgetError
 from cytearc.writers import H5adToZarr
-from tests.memory_helpers import held_within_charge
+from tests.memory_helpers import NEEDS_NAMING_ONE_MIB, held_within_charge
 
 anndata = pytest.importorskip("anndata")
 
@@ -2662,10 +2662,10 @@ def test_a_scan_refusal_states_what_the_import_needs_beside_the_ids(
     assert refused.value.needed_bytes == needed
     assert refused.value.budget_bytes == budget
     assert refused.value.item == item
+    assert needed <= NEEDS_NAMING_ONE_MIB
     assert str(refused.value) == (
         f"Importing 'ids.h5ad' holds about {needed} bytes for {item}, more than "
-        f"the memory budget of {budget} bytes. Raise mem_budget to at least "
-        f"{needed} bytes."
+        f"the memory budget of {budget} bytes. Raise mem_budget to at least 1 MiB."
     )
     assert "compressed vector" not in str(later.value)
     assert not (tmp_path / "refused.zarr").exists()

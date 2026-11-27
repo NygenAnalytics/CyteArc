@@ -92,24 +92,27 @@ def _require_budget(
     holding: str,
     *,
     beside: str = "",
-    remedy: str = "Raise mem_budget.",
+    remedy: str | None = None,
 ) -> None:
     """Refuse a memory budget below the ``needed`` bytes of an operation.
 
     The message reads ``holding``, which names what holds the bytes and ends
     with its verb, such as ``"The profiles of 9 targets hold about"``, then
-    the bytes, ``beside``, which names what else they cover, the budget, and
-    ``remedy``. The refusal is a :class:`MemoryBudgetError` whose item is
-    ``holding`` up to its verb. The screen steps that charge a
-    :class:`MemoryLedger` refuse through it instead.
+    the bytes, ``beside``, which names what else they cover, and the budget,
+    and closes with the budget that the refusal names and ``remedy``,
+    another way to fit the budget, such as ``"pass fewer features"``. The
+    refusal is a :class:`MemoryBudgetError` whose item is ``holding`` up to
+    its verb. The screen steps that charge a :class:`MemoryLedger` refuse
+    through it instead.
     """
     if needed > budget:
         raise MemoryBudgetError(
             f"{holding} {needed} bytes{beside}, more than the memory budget of "
-            f"{budget} bytes. {remedy}",
+            f"{budget} bytes.",
             needed_bytes=needed,
             budget_bytes=budget,
             item=holding.rpartition(" hold")[0] or holding,
+            remedy=remedy,
         )
 
 

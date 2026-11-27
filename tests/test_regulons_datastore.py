@@ -792,10 +792,11 @@ def test_specificity_charges_a_block_of_scores_that_follows_the_budget_not_the_c
         blocks_read.clear()
         return _open(path, mem_budget=budget).regulons.specificity(auc, "groups")
 
-    # The budget that the refusals name, from 1 KiB, is the least that runs:
-    # its last refusal is the block's, so it streams the scores a cell at a
-    # time, within its budget, and gives the scores of the default budget.
-    refusals, scores = climb_refusals(score, start=1024)
+    # The bytes that the refusals need, from 1 KiB, climb to the least budget
+    # that runs: its last refusal is the block's, so it streams the scores a
+    # cell at a time, within its budget, and gives the scores of the default
+    # budget.
+    refusals, scores = climb_refusals(score, start=1024, at_needs=True)
     ledger = ledgers[-1]
     assert refusals[-1].item == _BLOCK
     assert ledger.most <= ledger.budget == refusals[-1].needed_bytes
@@ -833,7 +834,7 @@ def test_connection_specificity_charges_a_block_of_scores_and_their_deviations(
     def correlate(budget: int) -> pd.DataFrame:
         return _open(path, mem_budget=budget).regulons.connection_specificity(auc)
 
-    refusals, csi = climb_refusals(correlate, start=1024)
+    refusals, csi = climb_refusals(correlate, start=1024, at_needs=True)
     ledger = ledgers[-1]
     assert refusals[-1].item == _BLOCK
     assert ledger.most <= ledger.budget == refusals[-1].needed_bytes

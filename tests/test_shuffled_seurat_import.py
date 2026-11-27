@@ -39,6 +39,7 @@ from cytearc.storage.count_matrix import CountMatrixPolicy
 from cytearc.storage.refs import artifact_path
 from cytearc.utils.memory_budget import MemoryBudgetError
 from cytearc.writers.seurat import SeuratToZarr
+from tests.memory_helpers import headroom_budget, named_budget
 from tests.storage_helpers import drawn_shuffles, shuffle_refusal
 from tests.test_seurat_import import _ordered_factor
 from tests.test_seurat_reader import _Wire, _write_fragment_matrix_fixture
@@ -58,8 +59,10 @@ def _warnings() -> Iterator[list[str]]:
         logger.remove(handler)
 
 
-def _cells(n_cells: int) -> list[str]:
-    # IDs of several lengths, so their stored text is padded.
+def _cells(n_cells: int, width: int = 0) -> list[str]:
+    """IDs of several lengths, so their stored text is padded, or of ``width`` characters each."""
+    if width:
+        return [f"cell-{index}-".ljust(width, "x") for index in range(n_cells)]
     return [f"cell-{index}" + "x" * (index % 4) for index in range(n_cells)]
 
 
@@ -249,10 +252,11 @@ def _write_object(
     n_cells: int = _N_CELLS,
     sparse: bool = True,
     source_column: bool = True,
+    id_width: int = 0,
 ) -> Path:
-    """Write a Seurat object of every kind of per-cell array."""
+    """Write a Seurat object of every kind of per-cell array, with IDs of ``id_width`` characters each if given."""
     wire = _Wire()
-    cells = _cells(n_cells)
+    cells = _cells(n_cells, id_width)
     rna = wire.s4(
         [
             ("counts", _counts_matrix(wire, _gene_counts(n_cells), cells, sparse)),
@@ -783,33 +787,33 @@ def test_a_shuffled_import_names_one_budget_for_a_bucket_and_one_cell(
     source = _write_object(tmp_path / "object.rds", n_cells=n_cells)
     attempts = iter(range(100))
 
-    def refusal(budget: int) -> MemoryBudgetError | None:
+    def refusal(budget: int, *, dump: bool = False) -> MemoryBudgetError | None:
         with SeuratReader(source, temp_dir=tmp_path) as reader:
             try:
-                SeuratToZarr(
+                writer = SeuratToZarr(
                     reader,
                     str(tmp_path / f"store-{next(attempts)}.zarr"),
                     mem_budget=budget,
                     nthreads=1,
                     shuffle_cells=True,
                 )
+                if dump:
+                    writer.dump()
             except MemoryBudgetError as error:
                 return error
         return None
 
-    # The refusals of the earlier steps lead from 900 bytes to the shuffle's.
+    # The bytes that the refusals of the earlier steps need lead from 900
+    # bytes to the shuffle's.
     refused = refusal(900)
     while refused is not None and refused.item != "shuffling one cell of assay 'RNA'":
         refused = refusal(refused.needed_bytes)
     assert refused is not None
-    named = refused.needed_bytes
     # Beside ADT's source, RNA's prefix sums and the order and its inverse, as
     # the three-cell import holds them, a bucket reads the longest cell: every
     # gene of RNA, float64 values of 3 * 8 + 32 bytes each as they are read,
     # and 112 bytes for the cell's piece and pointers. Forty cells and more
-    # need more to read one cell and send it, and the first refusal names
-    # that budget: the least, though a larger budget sizes larger buckets,
-    # which need less beside them.
+    # need more to read one cell and send it.
     names = [*_PROTEINS, *_cells(n_cells)]
     adt = (
         sum(len(name.encode()) + 8 for name in names)
@@ -817,19 +821,71 @@ def test_a_shuffled_import_names_one_budget_for_a_bucket_and_one_cell(
         + 8 * len(_members(n_cells))
     )
     held = adt + 8 * (n_cells + 1) + 16 * n_cells
-    assert named > held + 4 * (len(_GENES) * (3 * 8 + 32) + 112)
-    # With the budget it names, the import reads and spills one cell, and a
-    # later step refuses for itself; one byte less is refused again, naming
-    # the same budget.
-    later = refusal(named)
+    assert refused.needed_bytes > held + 4 * (len(_GENES) * (3 * 8 + 32) + 112)
+    # With a quarter more than it needs, which the budget it names rounds up,
+    # the import reads and spills one cell, and a later step refuses for
+    # itself, if at all.
+    named_budget(refused)
+    later = refusal(headroom_budget(refused), dump=True)
     assert later is None or "one cell of assay" not in later.item
-    below = refusal(named - 1)
-    assert below is not None
-    assert (below.item, below.needed_bytes) == (
-        "shuffling one cell of assay 'RNA'",
-        named,
-    )
     assert not list(tmp_path.glob("cytearc-sparse-*"))
+
+
+def _climb(source: Path, tmp_path: Path, *, start: int = 1) -> list[MemoryBudgetError]:
+    """Climb a shuffled import of ``source`` from ``start`` bytes through the budgets that its refusals name, and return the refusals."""
+    from tests.memory_helpers import climb_refusals
+
+    attempts = iter(range(20))
+
+    def at_budget(budget: int) -> None:
+        with SeuratReader(source, temp_dir=tmp_path) as reader:
+            SeuratToZarr(
+                reader,
+                str(tmp_path / f"store-{next(attempts)}.zarr"),
+                mem_budget=budget,
+                nthreads=1,
+                shuffle_cells=True,
+            ).dump()
+
+    refusals, _ = climb_refusals(at_budget, start=start)
+    assert not list(tmp_path.glob("cytearc-sparse-*"))
+    return refusals
+
+
+def test_a_shuffled_import_of_3000_cells_is_refused_once_at_most_by_each_step(
+    tmp_path,
+) -> None:
+    # The cell IDs and the coordinates of the PCA reduction, written in
+    # shuffled order, and the count layout each refused the budget that its
+    # own refusal named, up to four times in a row (#621). Climbing from a
+    # byte, each refusal names a budget that passes its step.
+    source = _write_object(tmp_path / "object.rds", n_cells=3000)
+    items = [refusal.item for refusal in _climb(source, tmp_path)]
+    assert len(set(items)) == len(items) >= 2
+    assert "the default count-matrix policy" in items
+
+
+@pytest.mark.slow
+def test_long_cell_ids_are_refused_once_for_their_shuffled_rows(tmp_path) -> None:
+    # Blocks of the shuffled cell IDs are sized at 64 bytes a row and hold
+    # 4 bytes a character, 280 bytes for IDs of 70 characters, so what the
+    # IDs' rows need grows faster with the budget than the quarter beside a
+    # refusal's need covers: their check names a need at which it passes its
+    # own block.
+    n_cells = 30_000
+    source = _write_object(tmp_path / "object.rds", n_cells=n_cells, id_width=70)
+    refusals = _climb(source, tmp_path, start=900)
+    ids = [
+        refusal
+        for refusal in refusals
+        if refusal.item == "the cell IDs in shuffled order"
+    ]
+    assert len(ids) == 1
+    # The IDs and a block of them hold at most twice 280 bytes a cell beside
+    # what the import holds, which the refusal names.
+    found = re.search(r"beside the (\d+) bytes", str(ids[0]))
+    assert found is not None
+    assert ids[0].needed_bytes <= int(found[1]) + 2 * 280 * n_cells
 
 
 @pytest.mark.parametrize("shuffle_cells", [False, True], ids=["object", "shuffled"])
@@ -874,7 +930,7 @@ def test_a_seurat_import_charges_its_counts_t_write_with_its_sources(
     assert set(charged) == {held}
 
 
-def test_a_shuffled_import_names_the_least_budget_of_its_count_layout(
+def test_a_shuffled_import_names_a_budget_that_writes_its_count_layout(
     tmp_path,
 ) -> None:
     from tests.test_memory_refusals import named_budget_runs
@@ -902,15 +958,16 @@ def test_a_shuffled_import_names_the_least_budget_of_its_count_layout(
         if refused is not None and refused.item == layout:
             raise refused
 
-    # The refusals of the earlier steps lead from 900 bytes to the layout's.
+    # The bytes that the refusals of the earlier steps need lead from 900
+    # bytes to the layout's.
     budget = 900
     refused = refusal(budget)
     while refused is not None and refused.item != layout:
         budget = refused.needed_bytes
         refused = refusal(budget)
-    # The layout's writes take shares that grow with the budget, so the need
-    # computed at the refused budget is refused again at itself; the refusal
-    # names the least budget that writes the layout.
+    # The layout's writes take shares that grow with the budget, so a budget
+    # of the bytes that they need at the refused budget is refused again; the
+    # refusal names a budget that writes the layout.
     named_budget_runs(at_budget, budget, item=layout)
 
 
@@ -1129,11 +1186,15 @@ def test_the_check_of_rows_held_in_memory_charges_every_row_and_one_block(
         # Rows of 40 bytes beside 300 held throughout: every cell's row and a
         # block of four, or of every row when a block holds more rows than
         # there are; a reduction of 20 cells holds its own rows alone.
-        for block_rows, n_rows, needed in (
+        for rows, n_rows, needed in (
             (4, None, (_N_CELLS + 4) * 40 + 300),
             (100, None, 2 * _N_CELLS * 40 + 300),
             (100, 20, 2 * 20 * 40 + 300),
         ):
+
+            def block_rows(_budget: int, rows: int = rows) -> int:
+                return rows
+
             writer.resources = dataclasses.replace(writer.resources, memoryBytes=needed)
             writer._check_shuffled_rows_memory(
                 40, block_rows, "rows", 300, n_rows=n_rows
@@ -1146,6 +1207,25 @@ def test_the_check_of_rows_held_in_memory_charges_every_row_and_one_block(
                     40, block_rows, "rows", 300, n_rows=n_rows
                 )
             assert (caught.value.needed_bytes, caught.value.item) == (needed, "rows")
+
+        # Twenty rows of 1 MB, a reduction of 20 cells, in blocks of a row for
+        # every 2 MB of the budget: at 1 MB they need 20,000,300 bytes, whose
+        # suggested budget, 24 MiB, holds blocks of 12 rows and needs
+        # 32,000,300; at that need's, 39 MiB, the blocks hold every row.
+        def growing(budget: int) -> int:
+            return budget // 2_000_000
+
+        writer.resources = dataclasses.replace(writer.resources, memoryBytes=1_000_000)
+        with pytest.raises(MemoryBudgetError) as grown:
+            writer._check_shuffled_rows_memory(
+                1_000_000, growing, "rows", 300, n_rows=20
+            )
+        assert grown.value.needed_bytes == 32_000_300
+        assert named_budget(grown.value) == 39 * 1024**2
+        writer.resources = dataclasses.replace(
+            writer.resources, memoryBytes=39 * 1024**2
+        )
+        writer._check_shuffled_rows_memory(1_000_000, growing, "rows", 300, n_rows=20)
         writer._release_shuffled_rows()
 
 
@@ -1348,7 +1428,7 @@ def test_repeated_coordinates_sum_as_the_objects_order_sums_them(
     )
 
 
-def test_an_import_names_the_least_budget_that_prepares_one_cell_of_each_assay(
+def test_an_import_names_a_budget_that_prepares_one_cell_of_each_assay(
     tmp_path,
 ) -> None:
     from tests.test_memory_refusals import named_budget_runs
@@ -1376,17 +1456,16 @@ def test_an_import_names_the_least_budget_that_prepares_one_cell_of_each_assay(
 
         return at_budget
 
-    # The resident data of the sources refuse first, naming the budget at
-    # which RNA's preparation is checked.
+    # The resident data of the sources refuse first, and the bytes they need
+    # are where RNA's preparation is checked.
     with pytest.raises(MemoryBudgetError) as resident:
         attempt(1)
     assert resident.value.item == "the resident data of the Seurat sources"
     # Each assay's sources size their block from the budget, so reading one
     # of their cells needs more at a larger budget; ADT's two sources, a
     # dense layer and the stitch of its layers, are both checked. Each
-    # refusal names the least budget at which every source of its assay
-    # reads one cell: there the assay passes, and one byte less is refused,
-    # naming the same budget.
+    # refusal names a budget at which every source of its assay reads one
+    # cell, checked there: the assay passes at it.
     rna = named_budget_runs(
         preparing("RNA"),
         resident.value.needed_bytes,
@@ -1396,9 +1475,11 @@ def test_an_import_names_the_least_budget_that_prepares_one_cell_of_each_assay(
         preparing("ADT"), rna.needed_bytes, item="preparing one cell of assay 'ADT'"
     )
     assert adt.needed_bytes > rna.needed_bytes
-    # At ADT's budget the count layout refuses next, and its budget passes.
+    # At a quarter more than ADT's refusal needs, the count layout refuses
+    # next, and a quarter more than the layout needs runs the import.
     with pytest.raises(MemoryBudgetError) as layout:
-        attempt(adt.needed_bytes)
+        attempt(headroom_budget(adt))
     assert layout.value.item == "the default count-matrix policy"
-    attempt(layout.value.needed_bytes)
+    named_budget(layout.value)
+    attempt(headroom_budget(layout.value))
     assert not list(tmp_path.glob("cytearc-sparse-*"))

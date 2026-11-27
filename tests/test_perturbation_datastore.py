@@ -1179,12 +1179,12 @@ def test_the_other_screen_steps_refuse_their_budgets_with_memory_budget_error() 
             9,
             "The profiles of 3 targets in 2 features hold about",
             beside=" with the read of one feature",
-            remedy="Raise mem_budget to at least 10 bytes.",
+            remedy="pass fewer features",
         )
     assert str(refused.value) == (
         "The profiles of 3 targets in 2 features hold about 10 bytes with the read "
         "of one feature, more than the memory budget of 9 bytes. Raise mem_budget "
-        "to at least 10 bytes."
+        "to at least 1 MiB, or pass fewer features."
     )
     assert (
         refused.value.needed_bytes,

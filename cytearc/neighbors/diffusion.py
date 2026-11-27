@@ -157,11 +157,11 @@ def bounded_diffusion_operator(
         if needed >= memory_bytes:
             raise MemoryBudgetError(
                 f"Diffusion step with {exact} operator entries needs about "
-                f"{needed} bytes, but the memory budget is {memory_bytes} bytes; "
-                "increase the memory budget or use a smaller diffusion power t.",
+                f"{needed} bytes, but the memory budget is {memory_bytes} bytes.",
                 needed_bytes=needed + 1,
                 budget_bytes=int(memory_bytes),
                 item=f"a diffusion step of {exact} operator entries",
+                remedy="use a smaller diffusion power t",
             )
 
     diagonal = _row_degree_diagonal(graph)

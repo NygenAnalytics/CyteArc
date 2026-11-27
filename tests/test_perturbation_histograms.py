@@ -253,10 +253,11 @@ def _rows_left(error: BaseException) -> int:
 
 
 def _refusal(count: Callable[[], object]) -> tuple[str, int]:
-    """Return a refused count's message and the bytes it names."""
+    """Return a refused count's message and the bytes it needs, which it names the suggested budget of."""
     with pytest.raises(MemoryError) as refused:
         count()
-    return str(refused.value), named_budget(refused.value)
+    assert named_budget(refused.value) == refused.value.suggested_budget_bytes
+    return str(refused.value), refused.value.needed_bytes
 
 
 def test_histograms_raise_before_they_outgrow_their_memory() -> None:
@@ -313,7 +314,7 @@ def test_histograms_refuse_memory_below_their_least_before_reading() -> None:
         guide_count_histograms(
             unread(), samples, n_samples=2, n_guides=3, ledger=_ledger(least // 2)
         )
-    assert named_budget(refused.value) == least
+    assert refused.value.needed_bytes == least
     assert "for the guide count histograms of 0 distinct counts, while 4 of 4" in str(
         refused.value
     )
@@ -328,7 +329,7 @@ def test_histograms_refuse_memory_below_their_least_before_reading() -> None:
             n_guides=3,
             ledger=_ledger(least),
         )
-    assert named_budget(refused.value) == least + 32
+    assert refused.value.needed_bytes == least + 32
     counts = np.zeros((4, 3), dtype=np.uint8)
     found = guide_count_histograms(
         [counts], samples, n_samples=2, n_guides=3, ledger=_ledger(least)
@@ -358,12 +359,13 @@ def test_a_refusal_says_how_many_rows_remain_to_be_read() -> None:
     assert isinstance(error, MemoryBudgetError)
     assert error.item.startswith("the guide count histograms of ")
     assert error.budget_bytes == least + 1
+    named = named_budget(error)
     assert str(error) == (
         f"Counting guide UMIs holds about {error.needed_bytes} bytes for "
         f"{error.item}, more than the memory budget of {least + 1} bytes. Raise "
-        f"mem_budget to at least {error.needed_bytes} bytes, or pass fewer cells."
+        f"mem_budget to at least {named // 1024**2} MiB, or pass fewer cells."
     )
-    assert named_budget(error) == error.needed_bytes
+    assert named == error.suggested_budget_bytes > error.needed_bytes
 
 
 def test_a_merge_refusal_names_the_dense_and_larger_counts_of_the_rows_read() -> None:

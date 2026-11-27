@@ -20,7 +20,7 @@ import numpy as np
 from scipy.sparse import csr_matrix
 
 from ..utils.count_values import scan_window_bytes, scan_window_values
-from ..utils.memory_budget import MemoryBudgetError, least_admitted_budget
+from ..utils.memory_budget import MemoryBudgetError, admitted_need
 from ._sparse import ROW_BYTES, SparseRowStore, encoded_entry_bytes
 
 __all__ = [
@@ -330,6 +330,7 @@ def row_spill_plan(
             needed_bytes=needed,
             budget_bytes=int(maxBytes),
             item="the row spill of a cell shuffle",
+            setting=None,
         )
     return plan
 
@@ -344,20 +345,20 @@ def admitted_spill_plan(
 
     Raises:
         MemoryBudgetError: If ``maxBytes`` does not admit the spill, naming
-            the least budget that does, which :func:`least_admitted_budget`
-            finds: a larger budget sizes larger buckets, which need less
-            beside them.
+            a need whose suggested budget does, which :func:`admitted_need`
+            finds.
     """
     try:
         return planned(int(maxBytes))
     except MemoryBudgetError as error:
-        needed = least_admitted_budget(planned, error)
+        needed = admitted_need(planned, error)
         raise MemoryBudgetError(
             "Shuffling cells exceeds the memory limit. Reading the rows and "
             f"sending them to their buckets needs at least {needed} bytes.",
             needed_bytes=needed,
             budget_bytes=int(maxBytes),
             item=error.item,
+            setting=None,
         ) from error
 
 

@@ -27,8 +27,9 @@ from cytearc.storage.count_matrix import (
 )
 from cytearc.storage.identity import CountSummary
 from cytearc.storage.sharding import CountLayoutMemoryError, fit_count_layout
-from cytearc.utils.memory_budget import MemoryBudgetError
+from cytearc.utils.memory_budget import MemoryBudgetError, refusal_words
 from cytearc.writers import H5adToZarr, SparseToZarr
+from tests.memory_helpers import headroom_budget, named_budget
 from tests.storage_helpers import write_count_store
 
 
@@ -73,7 +74,7 @@ def test_fit_uses_an_explicit_policy_exactly():
         _fit(refuse, requested=explicit)
     assert isinstance(refused.value, MemoryError)
     assert type(refused.value.__cause__) is MemoryBudgetError
-    assert str(refused.value.__cause__) == "does not fit"
+    assert refusal_words(refused.value.__cause__) == "does not fit"
 
 
 def test_fit_halves_the_default_policy_until_the_counts_write_fits():
@@ -109,7 +110,7 @@ def test_fit_names_the_largest_halving_of_a_requested_policy_that_fits():
         _fit(admit, requested=DEFAULT_COUNT_MATRIX_POLICY)
     assert isinstance(refused.value, MemoryError)
     assert type(refused.value.__cause__) is MemoryBudgetError
-    assert str(refused.value.__cause__) == "band too tall"
+    assert refusal_words(refused.value.__cause__) == "band too tall"
     # The same halving that a fit without a policy chooses.
     assert _named_policy(refused.value) == _fit(admit)
 
@@ -278,8 +279,8 @@ def test_a_count_layout_refusal_states_the_producer_apart_from_resident_data(
     # The matrix's resident data is a small part of what the plan refuses.
     assert 0 < resident < producer
     # The producer's share grows with the budget, so both parts and one task
-    # at the refused budget are refused again; the refusal names a budget
-    # that writes the layout.
+    # at the refused budget are refused again at a budget of their bytes; the
+    # refusal names a budget that writes the layout.
     needed = refused.value.needed_bytes
     assert needed > resident + producer + 1
 
@@ -291,7 +292,8 @@ def test_a_count_layout_refusal_states_the_producer_apart_from_resident_data(
         except MemoryError:
             pass
 
-    layout_at(needed)
+    named_budget(refused.value)
+    layout_at(headroom_budget(refused.value))
 
 
 @pytest.fixture(scope="module")

@@ -1108,7 +1108,6 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             self.memoryBytes,
             f"The counts of one feature over {n_tested} tested cells hold about",
             beside=" with the tests and their random sets",
-            remedy=f"Raise mem_budget to at least {needed} bytes.",
         )
         # The random sets of the other threads and the statistics may each
         # take a quarter of the rest, and the counts take what they leave.
@@ -1406,7 +1405,6 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             f"Counting the cells of each {counted_codes} over {n_cells} labeled "
             "cells holds about",
             beside=" with the cells' guides read a stored chunk at a time",
-            remedy=f"Raise mem_budget to at least {counting_bytes} bytes.",
         )
         guide_cells = code_counts(_code_blocks(guide_codes), len(guide_names))
         # The control guides that some labeled cell carries make up the
@@ -1532,7 +1530,6 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
                 " with the tests, their random sets and the cells' guides, read "
                 "a stored chunk at a time"
             ),
-            remedy=f"Raise mem_budget to at least {needed} bytes.",
         )
         self._require_writable(operation)
         row_members, row_offsets = cells_by_code(

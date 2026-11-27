@@ -740,6 +740,7 @@ class SparseRowStore:
                 needed_bytes=least,
                 budget_bytes=self._bucketLimit,
                 item=f"reading one entry of the {self.operation}",
+                setting=None,
             )
         self._nnzError = nnz_error
         self._directory = tempfile.TemporaryDirectory(
@@ -1259,6 +1260,7 @@ class SparseRowStore:
                 needed_bytes=widest,
                 budget_bytes=self._bucketLimit,
                 item=f"one row of the {self.operation}",
+                setting=None,
             )
         self._split_buckets()
         np.savez(
@@ -2051,6 +2053,7 @@ class SparseRowStore:
                 needed_bytes=least,
                 budget_bytes=int(max_bytes),
                 item=f"the row pointers and one entry of the {operation}",
+                setting=None,
             )
         half = (int(max_bytes) - fixed) // 2
         per_entry = _bucket_bytes(2, 2, 0, itemsize, sum_duplicates) - _bucket_bytes(
@@ -2102,6 +2105,7 @@ class SparseRowStore:
                     needed_bytes=needed,
                     budget_bytes=int(max_bytes),
                     item=error.item,
+                    setting=None,
                 ) from error
         except BaseException:
             store.close()

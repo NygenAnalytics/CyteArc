@@ -419,8 +419,7 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
             self.memoryBytes,
             f"The values of {n_controls} control cells in {n_features} features "
             f"and the neighbors of {n_cells} cells hold about",
-            remedy=f"Raise mem_budget to at least {needed} bytes, or pass fewer "
-            "features.",
+            remedy="pass fewer features",
         )
         self._require_writable(arguments.operation)
         values = np.asarray(data[:, :resolved_dims], dtype=np.float64)
@@ -600,8 +599,7 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
             f"The signatures of {n_cells} cells in {len(columns)} features hold about",
             beside=" with the IDs of the cells and their neighbors and a stored "
             "chunk of signatures read",
-            remedy=f"Pass fewer features, or raise mem_budget to at least {n_bytes} "
-            "bytes.",
+            remedy="pass fewer features",
         )
         values = np.empty((n_cells, len(columns)), dtype=np.float32)
         _read_signature_rows(stored, np.arange(n_cells), columns, values, slice(None))
@@ -973,7 +971,6 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
             self.memoryBytes,
             f"The values of one feature over {n_members} cells hold about",
             beside=" with the cells' classes and neighbors and the read of its counts",
-            remedy=f"Raise mem_budget to at least {needed} bytes.",
         )
         # The DE genes, from one pass over bands of every feature: a row's
         # genes are tested on its cells and the control cells of its split,

@@ -37,7 +37,6 @@ from cytearc.perturbation.mixscape import (
 from cytearc.perturbation.signature import normalize_counts
 from cytearc.storage.artifacts import artifact_group, inspect_artifact
 from cytearc.utils.logging import logger
-from tests.memory_helpers import named_budget
 from tests.perturbation_helpers import memory_screen, use_python_kernels, write_screen
 from tests.storage_helpers import by_cell_id, copy_store, open_store, written
 
@@ -294,11 +293,9 @@ def test_mixscape_refuses_inputs_and_budgets_it_cannot_use(
     budgeted = open_store(store.zarr_loc, nthreads=2, mem_budget=1_000)
     with pytest.raises(MemoryError, match="one feature over 302 cells") as low:
         budgeted.perturbation.mixscape(signature)
-    # The budget that this names fits the DE tests, but not GENE_A's
+    # The bytes that this needs fit the DE tests, but not GENE_A's
     # classification.
-    budgeted = open_store(
-        store.zarr_loc, nthreads=2, mem_budget=named_budget(low.value)
-    )
+    budgeted = open_store(store.zarr_loc, nthreads=2, mem_budget=low.value.needed_bytes)
     with pytest.raises(
         MemoryError, match="90 cells of GENE_A and of the 150 control cells in its 12"
     ):

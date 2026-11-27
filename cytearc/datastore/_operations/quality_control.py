@@ -1953,11 +1953,11 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
                 f"{estimated_peak_bytes / (1024**2):.1f} MiB for its exact "
                 "whole-matrix clustering algorithm, which exceeds the datastore "
                 f"memory budget of {self.memoryBytes / (1024**2):.1f} MiB. "
-                "Use a smaller explicit cell selection or a larger memory budget. "
                 f"It needs at least {estimated_peak_bytes} bytes.",
                 needed_bytes=estimated_peak_bytes,
                 budget_bytes=int(self.memoryBytes),
                 item="the whole-matrix clustering of HTO demultiplexing",
+                remedy="use a smaller explicit cell selection",
             )
         counts = pd.DataFrame(
             controlled_compute(assay.rawData[cell_index, :], self.nthreads),

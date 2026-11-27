@@ -22,7 +22,7 @@ from tests.storage_helpers import (
     open_store,
     write_count_store,
 )
-from tests.memory_helpers import held_within_charge
+from tests.memory_helpers import NEEDS_NAMING_ONE_MIB, held_within_charge
 
 N_CELLS = 8
 # Natural order puts s2 before s10.
@@ -351,11 +351,11 @@ def test_a_label_artifact_too_large_for_the_budget_is_refused_in_the_ledgers_wor
     with pytest.raises(MemoryBudgetError) as refused:
         _group(store, groups=long, ledger=MemoryLedger(budget, "Grouping cells"))
     error = refused.value
+    assert error.needed_bytes <= NEEDS_NAMING_ONE_MIB
     assert str(error) == (
         f"Grouping cells holds about {error.needed_bytes} bytes for reading "
         "'values' of the cluster_labels artifact for 8 cells, more than the "
-        f"memory budget of {budget} bytes. Raise mem_budget to at least "
-        f"{error.needed_bytes} bytes."
+        f"memory budget of {budget} bytes. Raise mem_budget to at least 1 MiB."
     )
     assert error.budget_bytes == budget < error.needed_bytes
     # The budget that the refusal names groups the cells as the short labels

@@ -17,7 +17,6 @@ from cytearc.storage.artifacts import artifact_group
 from tests.clone_helpers import every_cell, write_truth_store
 from tests.clone_truth import N_CELLS, clone_truth, number_label
 from cytearc.utils.memory_budget import MemoryLedger
-from tests.memory_helpers import named_budget
 
 TRUTH = clone_truth()
 # A ledger without a budget, which every write of these tests fits.
@@ -201,7 +200,7 @@ def test_the_save_check_counts_the_probabilities(store) -> None:
             planned,
             given,
             {"n_clones": len(given.clone_ids)},
-            ledger=_holding(named_budget(refused.value), 0),
+            ledger=_holding(refused.value.needed_bytes, 0),
         )
     assert not store.artifacts.inspect(planned.ref).exists
 
@@ -210,8 +209,8 @@ def test_a_save_one_byte_over_its_budget_is_refused_before_it_writes(store) -> N
     arguments = _arguments(store)
     assignment = _assignment()
     planned = _plan(store, arguments)
-    # Beside 5,000 bytes that the caller holds, the save names the budget
-    # that passes it; a byte less is refused before anything is written.
+    # Beside 5,000 bytes that the caller holds, the save names the bytes
+    # that pass it; a byte less is refused before anything is written.
     with pytest.raises(MemoryError) as refused:
         write_clones(
             store.zw,
@@ -220,7 +219,7 @@ def test_a_save_one_byte_over_its_budget_is_refused_before_it_writes(store) -> N
             {"n_clones": len(assignment.clone_ids)},
             ledger=_holding(5_001, 5_000),
         )
-    needed = named_budget(refused.value)
+    needed = refused.value.needed_bytes
     with pytest.raises(MemoryError, match=f"holds about {needed} bytes"):
         write_clones(
             store.zw,

@@ -1965,6 +1965,7 @@ class H5adReader:
                     needed_bytes=least,
                     budget_bytes=int(maxBytes),
                     item="the pointers and one entry of the CSC row conversion",
+                    setting=None,
                 )
             # Worded and named as the conversion refuses its widest row.
             raise MemoryBudgetError(
@@ -1974,6 +1975,7 @@ class H5adReader:
                 needed_bytes=needed,
                 budget_bytes=int(maxBytes),
                 item=f"one row of the {operation}",
+                setting=None,
             )
         indptr = np.asarray(group["indptr"][:], dtype=np.int64)
         shape = (self.nCells, self.nFeatures)
@@ -2025,6 +2027,7 @@ class H5adReader:
                 needed_bytes=needed,
                 budget_bytes=int(maxBytes),
                 item=error.item,
+                setting=None,
             ) from error
         if destinations is not None:
             self._shuffledRows = True

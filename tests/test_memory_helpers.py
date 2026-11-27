@@ -4,6 +4,7 @@ import pytest
 
 from tests.memory_helpers import (
     TracedPipeEnd,
+    climb_refusals,
     held_within_charge,
     named_budget,
     traced_charge,
@@ -26,40 +27,48 @@ def test_a_peak_stays_within_its_charge_up_to_a_tenth_of_it_and_128_kib() -> Non
 
 
 def test_named_budget_reads_the_budget_that_a_refusal_closes_with() -> None:
+    from cytearc.utils.memory_budget import MemoryBudgetError, memory_refusal
+
+    # 5,000 bytes and a quarter are within one MiB.
     assert (
         named_budget(
             MemoryError(
                 "Counting guides holds about 5000 bytes, more than the memory budget "
-                "of 100 bytes. Raise mem_budget to at least 5000 bytes."
+                "of 100 bytes. Raise mem_budget to at least 1 MiB."
             )
         )
-        == 5000
+        == 1024**2
     )
+    # 4,000,000 bytes and a quarter are 4.77 MiB; a remedy may hold periods.
     assert (
         named_budget(
             MemoryError(
-                "Labeling holds about 812 bytes. Raise mem_budget to at least 812 "
-                "bytes, or pass a smaller cell_selection."
+                "Labeling holds about 4000000 bytes. Raise mem_budget to at least 5 "
+                "MiB, or pass policy=CountMatrixPolicy(unitBytes=8) from "
+                "cytearc.storage.count_matrix."
             )
         )
-        == 812
+        == 5 * 1024**2
     )
-    # A refusal that names no budget asks for the bytes it holds.
-    assert (
-        named_budget(MemoryError("A batch holds about 77 bytes. Raise mem_budget."))
-        == 77
+    # A refusal of its own words names its suggested budget.
+    error = MemoryBudgetError(
+        "One row does not fit", needed_bytes=3_000_000, budget_bytes=10, item="a row"
     )
+    assert named_budget(error) == error.suggested_budget_bytes == 4 * 1024**2
+    assert named_budget(memory_refusal("Labeling", "the labels", 812, 10)) == 1024**2
 
 
 @pytest.mark.parametrize(
     "message",
     [
-        # A budget other than the bytes the call holds.
-        "Labeling holds about 812 bytes. Raise mem_budget to at least 900 bytes.",
+        # A budget other than the suggested budget of the bytes the call holds.
+        "Labeling holds about 4000000 bytes. Raise mem_budget to at least 4 MiB.",
         # No closing budget.
         "Labeling holds about 812 bytes, more than the budget.",
-        # A closing request that says nothing of what the call holds.
-        "Labeling does not fit. Raise mem_budget.",
+        # A closing request without a budget.
+        "Labeling holds about 812 bytes. Raise mem_budget.",
+        # A budget in bytes rather than in whole MiB.
+        "Labeling holds about 812 bytes. Raise mem_budget to at least 812 bytes.",
     ],
 )
 def test_named_budget_refuses_a_refusal_that_names_no_budget_it_holds(
@@ -67,6 +76,62 @@ def test_named_budget_refuses_a_refusal_that_names_no_budget_it_holds(
 ) -> None:
     with pytest.raises(AssertionError):
         named_budget(MemoryError(message))
+
+
+def test_named_budget_refuses_a_message_that_names_another_budget_than_its_field() -> (
+    None
+):
+    from cytearc.utils.memory_budget import MemoryBudgetError
+
+    class Misnamed(MemoryBudgetError):
+        def __str__(self) -> str:
+            return "One row does not fit. Raise mem_budget to at least 9 MiB."
+
+    with pytest.raises(AssertionError):
+        named_budget(
+            Misnamed("One row", needed_bytes=3_000_000, budget_bytes=10, item="a row")
+        )
+
+
+def test_a_climb_refuses_a_step_that_refuses_the_budget_that_it_named() -> None:
+    from cytearc.utils.memory_budget import MemoryBudgetError
+
+    def refusing(item: str, needed: int, budget: int) -> MemoryBudgetError:
+        return MemoryBudgetError(
+            "It does not fit.", needed_bytes=needed, budget_bytes=budget, item=item
+        )
+
+    # Two steps that need 1,000 and 2,000 bytes whatever the budget refuse
+    # once each: the climb goes on at a quarter more than each need, 1,250
+    # and 2,500 bytes, unrounded.
+    budgets: list[int] = []
+
+    def two_steps(budget: int) -> int:
+        budgets.append(budget)
+        if budget < 1_000:
+            raise refusing("the first step", 1_000, budget)
+        if budget < 2_000:
+            raise refusing("the second step", 2_000, budget)
+        return budget
+
+    refusals, ran = climb_refusals(two_steps)
+    assert [error.item for error in refusals] == ["the first step", "the second step"]
+    assert budgets == [1, 1_250, 2_500]
+    assert ran == 2_500
+    # To each need instead, the climb runs at 2,000 bytes.
+    budgets.clear()
+    _refusals, ran = climb_refusals(two_steps, at_needs=True)
+    assert budgets == [1, 1_000, 2_000] and ran == 2_000
+
+    # A step whose need grows faster than a quarter of the budget refuses
+    # the budget that its refusal gave, which the climb refuses.
+    def growing(budget: int) -> int:
+        if budget < 3 * 1024**2:
+            raise refusing("the step", 2 * budget + 1, budget)
+        return budget
+
+    with pytest.raises(AssertionError, match="the step is refused again"):
+        climb_refusals(growing)
 
 
 def test_traced_reruns_call_once_untraced_before_the_traced_calls() -> None:

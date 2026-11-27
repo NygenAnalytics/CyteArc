@@ -25,7 +25,7 @@ from ..storage.profiles import (
 from ..utils.digest import file_sha256
 from ..utils.logging import logger
 
-from ..utils.memory_budget import MemoryBudgetError, memory_refusal
+from ..utils.memory_budget import MemoryBudgetError, admitted_need, memory_refusal
 from ..utils.progress import iter_progress
 from ..utils.arguments import bool_argument, quoted_value
 from ..utils.matrix_values import ImportValues, MatrixValuesKind
@@ -1651,19 +1651,21 @@ class H5adToZarr:
         requested: int | None,
         *,
         row_bytes: int,
+        budget: int | None = None,
     ) -> int:
         """Return the rows of each block of an imported embedding or cluster labels.
 
-        A block takes an eighth of what the budget leaves beside what the
-        import holds, as :meth:`_resident_bytes` counts it, and at least one
-        row.
+        A block takes an eighth of what the budget, the import's own unless
+        ``budget`` names another, leaves beside what the import holds, as
+        :meth:`_resident_bytes` counts it, and at least one row.
         """
         from ._store import bounded_block_rows
 
+        memory = int(self.resources.memoryBytes if budget is None else budget)
         return bounded_block_rows(
             requested,
             row_bytes=row_bytes,
-            memory_bytes=int(self.resources.memoryBytes) - self._resident_bytes(),
+            memory_bytes=memory - self._resident_bytes(),
         )
 
     def _check_shuffled_holds(self) -> None:
@@ -1691,7 +1693,9 @@ class H5adToZarr:
             row_bytes = int(source.shape[1]) * int(dtype.itemsize)
             self._check_shuffled_rows_memory(
                 row_bytes,
-                self._analysis_block_rows(n_cells, row_bytes=row_bytes),
+                lambda budget: self._analysis_block_rows(
+                    n_cells, row_bytes=row_bytes, budget=budget
+                ),
                 f"the rows of embedding {key!r} in shuffled order",
                 resident,
             )
@@ -1702,7 +1706,9 @@ class H5adToZarr:
             self._clusterDtypes[key] = (dtype, has_missing)
             self._check_shuffled_rows_memory(
                 dtype.itemsize + 1,
-                self._analysis_block_rows(n_cells, row_bytes=64),
+                lambda budget: self._analysis_block_rows(
+                    n_cells, row_bytes=64, budget=budget
+                ),
                 f"the cluster labels of {key!r} in shuffled order",
                 resident,
             )
@@ -1721,35 +1727,51 @@ class H5adToZarr:
         return resident
 
     def _check_shuffled_rows_memory(
-        self, row_bytes: int, block_rows: int, item: str, resident: int
+        self,
+        row_bytes: int,
+        block_rows: Callable[[int], int],
+        item: str,
+        resident: int,
     ) -> None:
         """Check that the budget holds a per-cell array of ``row_bytes`` per cell in memory.
 
         A shuffled import holds the file's rows of an embedding or of
         cluster labels, with one gathered block of them, beside the
         ``resident`` bytes it holds throughout, to write them in shuffled
-        order.
+        order. ``block_rows`` gives the rows of a block at a budget. A block
+        grows with the budget, so a refusal names a need whose suggested
+        budget holds a block of its own size, which :func:`admitted_need`
+        finds.
 
         Raises:
             MemoryBudgetError: If they do not fit in the import's budget.
         """
         assert self._cellOrder is not None
         n_cells = int(self._cellOrder.size)
-        needed = int(resident) + (n_cells + min(int(block_rows), n_cells)) * int(
-            row_bytes
-        )
-        budget = int(self.resources.memoryBytes)
-        if needed > budget:
-            raise MemoryBudgetError(
+
+        def refusal(needed: int, budget: int) -> MemoryBudgetError:
+            return MemoryBudgetError(
                 f"Writing {item} exceeds the memory limit. A shuffled import "
                 "holds the file's rows to write them in shuffled order, beside "
                 f"the {int(resident)} bytes of its cell order, IDs, names and "
-                f"other arrays, which needs {needed} bytes; raise "
-                "mem_budget or import with shuffle_cells=False.",
+                f"other arrays, which needs {needed} bytes.",
                 needed_bytes=needed,
                 budget_bytes=budget,
                 item=item,
+                remedy="import with shuffle_cells=False",
             )
+
+        def admit(budget: int) -> None:
+            block = min(int(block_rows(budget)), n_cells)
+            needed = int(resident) + (n_cells + block) * int(row_bytes)
+            if needed > budget:
+                raise refusal(needed, budget)
+
+        budget = int(self.resources.memoryBytes)
+        try:
+            admit(budget)
+        except MemoryBudgetError as error:
+            raise refusal(admitted_need(admit, error), budget) from None
 
     def _shuffled_blocks(
         self, arrays: tuple[np.ndarray, ...], block_rows: int

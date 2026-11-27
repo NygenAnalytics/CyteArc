@@ -55,7 +55,7 @@ from cytearc.writers import (
 )
 from tests.storage_helpers import drawn_shuffles, shuffle_refusal
 from tests.variant_truth import tapestri_truth, write_tapestri
-from tests.memory_helpers import held_within_charge
+from tests.memory_helpers import NEEDS_NAMING_ONE_MIB, held_within_charge
 
 _N_CELLS = 157
 _N_FEATURES = 12
@@ -894,10 +894,11 @@ def test_a_10x_budget_without_room_for_the_spill_is_refused_with_the_bytes_it_ne
         assert caught.value.needed_bytes == needed
         assert caught.value.budget_bytes == budget
         assert caught.value.item == item
+        assert needed <= NEEDS_NAMING_ONE_MIB
         assert str(caught.value) == (
             f"Importing the counts of {rows} cells holds about {needed} bytes for "
             f"{item}, more than the memory budget of {budget} bytes. Raise "
-            f"mem_budget to at least {needed} bytes."
+            "mem_budget to at least 1 MiB."
         )
         assert reader._shuffledRows is None
         # With that much, the spill fits; a later step of so small a budget
@@ -1138,7 +1139,7 @@ def _many_cell_import(
 
 @pytest.mark.slow
 @pytest.mark.parametrize("kind", ["10x", "mtx", "tapestri"])
-def test_a_shuffled_import_names_the_least_budget_that_writes_its_count_layout(
+def test_a_shuffled_import_names_a_budget_that_writes_its_count_layout(
     tmp_path, kind
 ) -> None:
     from tests.test_memory_refusals import named_budget_runs
@@ -1156,7 +1157,8 @@ def test_a_shuffled_import_names_the_least_budget_that_writes_its_count_layout(
                 assert not destination.exists()
                 raise
 
-    # The refusals before the layout lead to the budget of the spill.
+    # The bytes that the refusals before the layout need lead to the budget
+    # of the spill.
     budget = 1
     while True:
         try:
@@ -1170,9 +1172,8 @@ def test_a_shuffled_import_names_the_least_budget_that_writes_its_count_layout(
             budget = error.needed_bytes
     # The spill sizes its buckets from the budget, and the counts write reads
     # a bucket at a time, so the layout needs more at a larger budget. Its
-    # refusal names the budget whose own spill's buckets the layout fits:
-    # the import passes the layout there, and one byte less is refused,
-    # naming the same budget.
+    # refusal names a budget whose own spill's buckets the layout fits: the
+    # import passes the layout there.
     refusal = named_budget_runs(at_budget, budget, item=layout)
     assert refusal.needed_bytes > budget
     assert _no_temporary_files(tmp_path)
@@ -1445,12 +1446,13 @@ def test_a_tapestri_scan_in_the_files_order_names_the_budget_beside_its_strings(
     assert found is not None
     needed = int(found[1]) + 72 * features
     assert caught.value.needed_bytes == needed
+    assert needed <= NEEDS_NAMING_ONE_MIB
     assert str(caught.value) == (
         f"Importing the counts of {n_cells} cells holds about {needed} bytes for "
         f"{item}, more than the memory budget of 1 bytes. Raise mem_budget to at "
-        f"least {needed} bytes."
+        "least 1 MiB."
     )
-    # With the budget it names, the scan runs.
+    # With the bytes it needs, the scan runs.
     at_budget(needed)
 
 
@@ -1484,12 +1486,13 @@ def test_a_shuffled_csv_import_names_one_budget_that_passes_its_spill(
         named.add(caught.value.needed_bytes)
     (needed,) = named
     assert needed > 40_000
+    assert needed <= NEEDS_NAMING_ONE_MIB
     assert str(caught.value) == (
         f"Importing the counts of {_N_CELLS} cells holds about {needed} bytes for "
         f"{caught.value.item}, more than the memory budget of 40000 bytes. "
-        f"Raise mem_budget to at least {needed} bytes."
+        "Raise mem_budget to at least 1 MiB."
     )
-    # With the budget it names, the spill fits.
+    # With the bytes it needs, and so with the budget it names, the spill fits.
     at_budget(needed)
     assert _no_temporary_files(tmp_path)
 

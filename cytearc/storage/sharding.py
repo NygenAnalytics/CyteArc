@@ -51,7 +51,7 @@ from ..utils.arrays import (
 from ..utils.logging import logger
 from ..utils.memory_budget import (
     MemoryBudgetError,
-    least_admitted_budget,
+    admitted_need,
     refusal_words,
 )
 
@@ -62,9 +62,10 @@ if TYPE_CHECKING:
 class CountLayoutMemoryError(MemoryBudgetError):
     """A requested count layout cannot be written within its memory budget.
 
-    Its ``needed_bytes`` is the smallest budget that admits the requested
-    layout at the step that refused it, and its message names the largest
-    halving of the layout that fits.
+    Its ``needed_bytes`` is what the requested layout's writes need at the
+    largest budget that their check refused, its ``suggested_budget_bytes`` a
+    budget at which they pass, and its message names the largest halving of
+    the layout that fits.
 
     Attributes:
         fittingPolicy: The largest halving of the requested layout that fits
@@ -81,9 +82,14 @@ class CountLayoutMemoryError(MemoryBudgetError):
         budget_bytes: int,
         item: str,
         fittingPolicy: CountMatrixPolicy | None,
+        remedy: str | None = None,
     ) -> None:
         super().__init__(
-            message, needed_bytes=needed_bytes, budget_bytes=budget_bytes, item=item
+            message,
+            needed_bytes=needed_bytes,
+            budget_bytes=budget_bytes,
+            item=item,
+            remedy=remedy,
         )
         self.fittingPolicy = fittingPolicy
 
@@ -476,8 +482,8 @@ def _resolve_sparse_import_geometries(
             raise MemoryBudgetError(
                 "Automatic sparse import cannot fit one source row and one "
                 f"complete destination row band in {resources.memoryBytes} "
-                f"bytes. Increase mem_budget. {refusal_words(exc).rstrip('.')}. It needs "
-                f"at least {exc.needed_bytes} bytes.",
+                f"bytes. {refusal_words(exc).rstrip('.')}. It needs at least "
+                f"{exc.needed_bytes} bytes.",
                 needed_bytes=exc.needed_bytes,
                 budget_bytes=int(resources.memoryBytes),
                 item="one source row and one complete destination row band",
@@ -1878,13 +1884,13 @@ def fit_count_layout(
                 policy=policy,
             )
 
-    def least_budget(policy: CountMatrixPolicy, error: MemoryBudgetError) -> int:
-        """Return the least budget that writes ``policy``, which ``error`` refused.
+    def admitted(policy: CountMatrixPolicy, error: MemoryBudgetError) -> int:
+        """Return the need of ``policy``, which ``error`` refused, whose suggested budget writes it.
 
-        The writes' shares grow with the budget, so the need that a refusal
-        names can be refused again.
+        The writes' shares grow with the budget, so a budget of the need that
+        a refusal names can be refused again.
         """
-        return least_admitted_budget(lambda budget: admit(policy, budget), error)
+        return admitted_need(lambda budget: admit(policy, budget), error)
 
     row_bytes = max(
         [1, *(width * np.dtype(dtype).itemsize for width, dtype in assays.values())]
@@ -1897,12 +1903,11 @@ def fit_count_layout(
                 admit(policy)
             except MemoryBudgetError as error:
                 if policy.unitBytes < 2 * row_bytes:
-                    needed = least_budget(policy, error)
+                    needed = admitted(policy, error)
                     raise MemoryBudgetError(
                         f"{subject} does not fit mem_budget even with count "
-                        f"shards of one row. Increase mem_budget. "
-                        f"{refusal_words(error).rstrip('.')}. It needs at least "
-                        f"{needed} bytes.",
+                        f"shards of one row. {refusal_words(error).rstrip('.')}. "
+                        f"It needs at least {needed} bytes.",
                         needed_bytes=needed,
                         budget_bytes=int(memoryBytes),
                         item="count shards of one row",
@@ -1923,26 +1928,29 @@ def fit_count_layout(
                 smaller = largest_fit(requested)
             except MemoryBudgetError:
                 smaller = None
-                advice = "Increase mem_budget; even count shards of one row do not fit."
+                advice = "; even count shards of one row do not fit"
+                remedy = None
             else:
-                advice = (
-                    "Increase mem_budget, or pass policy=CountMatrixPolicy("
+                advice = ""
+                remedy = (
+                    "pass policy=CountMatrixPolicy("
                     f"unitBytes={smaller.unitBytes}, chunkBytes={smaller.chunkBytes})"
                     " from cytearc.storage.count_matrix, the largest smaller layout "
-                    "that fits. Smaller layouts make every later countsT read slower."
+                    "that fits; smaller layouts make every later countsT read slower"
                 )
             kind = (
                 "default" if requested == DEFAULT_COUNT_MATRIX_POLICY else "requested"
             )
-            needed = least_budget(requested, error)
+            needed = admitted(requested, error)
             raise CountLayoutMemoryError(
                 f"The {kind} count-matrix policy (unitBytes={requested.unitBytes}, "
                 f"chunkBytes={requested.chunkBytes}) does not fit mem_budget. "
-                f"{refusal_words(error).rstrip('.')}. {advice} It needs at least "
+                f"{refusal_words(error).rstrip('.')}{advice}. It needs at least "
                 f"{needed} bytes.",
                 needed_bytes=needed,
                 budget_bytes=int(memoryBytes),
                 item=f"the {kind} count-matrix policy",
+                remedy=remedy,
                 fittingPolicy=smaller,
             ) from error
         return requested

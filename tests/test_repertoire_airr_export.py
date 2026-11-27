@@ -42,7 +42,7 @@ from tests.clone_helpers import (
     write_lines,
 )
 from cytearc.utils.memory_budget import MemoryLedger
-from tests.memory_helpers import climb_refusals, named_budget
+from tests.memory_helpers import climb_refusals, headroom_budget, named_budget
 from tests.perturbation_helpers import use_python_kernels
 from tests.row_store_helpers import asked_bytes, finalized_bytes, free_disk
 from tests.storage_helpers import by_cell_id, open_store
@@ -1228,7 +1228,7 @@ def test_packing_text_counts_each_slice_and_their_join() -> None:
             ledgers[-1], array, None, 1, item="the values"
         )
 
-    refusals, (packed, longest) = climb_refusals(pack)
+    refusals, (packed, longest) = climb_refusals(pack, at_needs=True)
     # The offsets are refused first, then each slice as it is packed beside
     # the slices before it, and then their join, so the climb passes a step
     # for each slice.
@@ -1294,7 +1294,7 @@ def test_hashing_the_ids_is_checked_with_the_hashes(tmp_path) -> None:
     # The hashes of the ten contigs are held first, then a block of all ten
     # IDs is checked as they are decoded and hashed beside the window of
     # their offsets and a stored chunk of the IDs' arrays.
-    refusals, (hashes, _block_rows) = climb_refusals(scan)
+    refusals, (hashes, _block_rows) = climb_refusals(scan, at_needs=True)
     assert [error.item for error in refusals] == [
         "the hashes of the contigs' IDs",
         "hashing a block of the contigs' IDs",
@@ -1635,13 +1635,14 @@ def test_measuring_counts_the_codes_of_values_that_hold_forbidden_characters(
     # measuring finds the three values. The climb starts at the bytes that
     # the held text takes, so that the codes refuse by their own charge.
     held = contigs_within(10**9).ledger.held_bytes
-    refusals, _ = climb_refusals(run, start=held)
+    refusals, _ = climb_refusals(run, start=held, at_needs=True)
     assert [error.item for error in refusals] == [
         "the codes of the v_call values that the format forbids",
         "measuring the widest value of each field",
     ]
     # Reading the ID of the V call's first contig, x_contig_1, is checked too,
-    # and the budget that its refusal names reads it.
+    # and a quarter more than its refusal needs, which the budget it names
+    # rounds up, reads it.
     contigs = contigs_within(10**9)
     with pytest.raises(ValueError):
         contigs.measure(10**9, cells=_CELLS, clones=None)
@@ -1651,7 +1652,8 @@ def test_measuring_counts_the_codes_of_values_that_hold_forbidden_characters(
     assert refused.value.item == (
         "the sequence_id of a contig whose value the format forbids"
     )
-    contigs.ledger.budget = named_budget(refused.value)
+    named_budget(refused.value)
+    contigs.ledger.budget = headroom_budget(refused.value)
     assert contigs._contig_id(0) == "x_contig_1"
 
 

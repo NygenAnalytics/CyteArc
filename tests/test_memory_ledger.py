@@ -55,7 +55,7 @@ def test_a_refusal_names_the_step_the_bytes_it_needs_and_the_budget() -> None:
     assert str(error) == (
         "Importing contigs for 8 selected cells holds about 1001 bytes for the "
         "cells' IDs, more than the memory budget of 1000 bytes. Raise mem_budget "
-        "to at least 1001 bytes."
+        "to at least 1 MiB."
     )
     assert (error.needed_bytes, error.budget_bytes, error.item) == (
         1001,
@@ -63,7 +63,8 @@ def test_a_refusal_names_the_step_the_bytes_it_needs_and_the_budget() -> None:
         "the cells' IDs",
     )
     assert isinstance(error, MemoryError)
-    assert named_budget(error) == 1001
+    # 1,001 bytes and a quarter fit in one MiB.
+    assert named_budget(error) == error.suggested_budget_bytes == 1024**2
     # 400 more fit exactly, and nothing was charged by the refusal.
     ledger.peak("the cells' IDs", 400)
     assert ledger.held_bytes == 600
@@ -74,12 +75,15 @@ def test_a_refusal_names_the_remedy_of_the_charge_or_of_the_ledger() -> None:
     with pytest.raises(MemoryBudgetError) as refused:
         ledger.hold("a block", 11)
     assert str(refused.value).endswith(
-        "Raise mem_budget to at least 11 bytes, or pass fields= with fewer fields."
+        "Raise mem_budget to at least 1 MiB, or pass fields= with fewer fields."
     )
+    assert refused.value.remedy == "pass fields= with fewer fields"
     with pytest.raises(MemoryBudgetError) as refused:
         ledger.peak("the IDs", 12, remedy="label fewer clonotypes")
-    assert str(refused.value).endswith(", or label fewer clonotypes.")
-    assert named_budget(refused.value) == 12
+    assert str(refused.value).endswith(
+        "Raise mem_budget to at least 1 MiB, or label fewer clonotypes."
+    )
+    assert named_budget(refused.value) == 1024**2
 
 
 def test_the_refusal_builder_reads_as_the_ledger_refuses() -> None:
@@ -88,7 +92,7 @@ def test_the_refusal_builder_reads_as_the_ledger_refuses() -> None:
     with pytest.raises(MemoryBudgetError) as refused:
         ledger.peak("one row band", 5_000)
     assert str(built) == str(refused.value)
-    assert named_budget(built) == 5_000
+    assert named_budget(built) == 1024**2
 
 
 @pytest.mark.parametrize(
@@ -112,7 +116,7 @@ def test_the_refusal_builder_takes_numpy_integers_as_bytes() -> None:
     built = memory_refusal("Planning", "one band", np.int64(11), np.uint32(10))
     assert (built.needed_bytes, built.budget_bytes) == (11, 10)
     assert type(built.needed_bytes) is int and type(built.budget_bytes) is int
-    assert named_budget(built) == 11
+    assert named_budget(built) == 1024**2
 
 
 def test_a_refusal_keeps_its_fields_through_a_pickle() -> None:

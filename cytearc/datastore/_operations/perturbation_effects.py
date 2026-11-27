@@ -401,7 +401,6 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
             needed,
             self.memoryBytes,
             f"Comparing {n_features} target genes over {n_compared} cells holds about",
-            remedy=f"Raise mem_budget to at least {needed} bytes.",
         )
         library = cell_totals(expression, compared.cells, measured, held_bytes=held)
         if not np.any(library > 0):
@@ -665,7 +664,6 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
             needed,
             self.memoryBytes,
             f"The E-distances of {n_kept} cells in {n_dims} dimensions hold about",
-            remedy=f"Raise mem_budget to at least {needed} bytes.",
         )
         self._require_writable(arguments.operation)
         values = _float64_rows(data, coordinate_rows)

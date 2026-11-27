@@ -14,6 +14,7 @@ import pickle
 import threading
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -131,18 +132,19 @@ SAMPLES: dict[type[BaseException], Callable[[], BaseException]] = {
         budget_bytes=10**9,
         item="the requested count-matrix policy",
         fittingPolicy=CountMatrixPolicy(unitBytes=125_000_000, chunkBytes=12_500_000),
+        remedy="pass policy=CountMatrixPolicy(unitBytes=125000000, chunkBytes=12500000)",
     ),
     HistogramMemoryError: lambda: HistogramMemoryError(
         "Counting guide UMIs holds about 4096 bytes for the guide count histograms "
         "of 128 distinct counts, while 10 of 20 rows of counts remain to be read, "
-        "more than the memory budget of 1024 bytes. Raise mem_budget to at least "
-        "4096 bytes.",
+        "more than the memory budget of 1024 bytes.",
         needed_bytes=4096,
         budget_bytes=1024,
         item="the guide count histograms of 128 distinct counts, while 10 of 20 "
         "rows of counts remain to be read",
         n_distinct=128,
         estimated_needed_bytes=8192,
+        remedy="pass a smaller cell_selection",
     ),
     MemoryBudgetError: lambda: memory_refusal(
         "Importing contigs for 8 selected cells",
@@ -284,6 +286,94 @@ def test_exception_survives_a_pickle_round_trip(
     assert restored.args == error.args
     assert str(restored) == str(error)
     assert vars(restored) == vars(error)
+
+
+class _PickledBy140:
+    """An object that pickles as 1.4.0 pickled an error: its restore function, its arguments and its state."""
+
+    def __init__(self, *reduced: Any) -> None:
+        self.reduced = reduced
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        return self.reduced
+
+
+def test_memory_refusals_pickled_by_1_4_0_load() -> None:
+    from cytearc.perturbation.histograms import _restore_histogram_memory_error
+    from cytearc.utils.memory_budget import _restore_memory_budget_error
+
+    # 1.4.0's MemoryBudgetError.__reduce__ passed the type, the message,
+    # needed_bytes, budget_bytes and item, with its __dict__ as the state.
+    words = (
+        "Reading holds about 4096 bytes for the IDs, more than the memory "
+        "budget of 1024 bytes. Raise mem_budget to at least 4096 bytes."
+    )
+    state = {"needed_bytes": 4096, "budget_bytes": 1024, "item": "the IDs"}
+    plain = pickle.loads(
+        pickle.dumps(
+            _PickledBy140(
+                _restore_memory_budget_error,
+                (MemoryBudgetError, words, 4096, 1024, "the IDs"),
+                state,
+            )
+        )
+    )
+    assert type(plain) is MemoryBudgetError
+    assert (plain.needed_bytes, plain.budget_bytes, plain.item) == (
+        4096,
+        1024,
+        "the IDs",
+    )
+    assert (plain.remedy, plain.setting) == (None, "mem_budget")
+    # Words that close with their own budget, as 1.4.0 worded them, are
+    # followed by the closing too.
+    assert plain.args == (words,)
+    assert str(plain) == f"{words} Raise mem_budget to at least 1 MiB."
+
+    # CountLayoutMemoryError pickled through the same function, its policy in
+    # its state. 8 GB and a quarter are 10 GB, 9,536.7 MiB.
+    policy = CountMatrixPolicy(unitBytes=125_000_000, chunkBytes=12_500_000)
+    layout = pickle.loads(
+        pickle.dumps(
+            _PickledBy140(
+                _restore_memory_budget_error,
+                (CountLayoutMemoryError, "countsT needs 8 GB", 8 * 10**9, 10**9, "x"),
+                {"needed_bytes": 8 * 10**9, "fittingPolicy": policy},
+            )
+        )
+    )
+    assert type(layout) is CountLayoutMemoryError
+    assert layout.fittingPolicy == policy
+    assert str(layout) == "countsT needs 8 GB. Raise mem_budget to at least 9537 MiB."
+
+    # 1.4.0's HistogramMemoryError.__reduce__ passed n_distinct, rows_read and
+    # n_rows after item; it held no estimate for every row.
+    histogram = pickle.loads(
+        pickle.dumps(
+            _PickledBy140(
+                _restore_histogram_memory_error,
+                (
+                    HistogramMemoryError,
+                    "Counting guide UMIs",
+                    4096,
+                    1024,
+                    "x",
+                    128,
+                    10,
+                    20,
+                ),
+                {"n_distinct": 128, "rows_read": 10, "n_rows": 20},
+            )
+        )
+    )
+    assert type(histogram) is HistogramMemoryError
+    assert (histogram.needed_bytes, histogram.budget_bytes, histogram.n_distinct) == (
+        4096,
+        1024,
+        128,
+    )
+    assert (histogram.estimated_needed_bytes, histogram.remedy) == (None, None)
+    assert str(histogram) == "Counting guide UMIs. Raise mem_budget to at least 1 MiB."
 
 
 def _raised_from(cause: BaseException) -> PipelineExecutionError:

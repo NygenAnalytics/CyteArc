@@ -47,37 +47,64 @@ def held_within_charge(held: int, charged: int) -> bool:
     return held <= allowed
 
 
-def named_budget(refusal: BaseException) -> int:
-    """Return the memory budget that a refusal names in its closing ``raise mem_budget to at least N bytes``.
+#: The most bytes that a step can need for its refusal to name 1 MiB: they and
+#: a quarter more, 838,861 and 209,715 bytes, make 1,048,576.
+NEEDS_NAMING_ONE_MIB = 838_861
 
-    A refusal that says the call holds about M bytes must name M. A refusal
-    that closes with ``Raise mem_budget.`` names no budget, as Mixscape's
-    refusal of a classification batch does, and asks for the M bytes the call
-    holds.
+
+def named_budget(refusal: BaseException) -> int:
+    """Return the budget in bytes that a refusal names in its closing ``Raise mem_budget to at least N MiB``.
+
+    A MemoryBudgetError names its ``suggested_budget_bytes`` there, and its
+    ``setting`` in place of ``mem_budget`` when that is another limit. A
+    refusal that says the call holds about M bytes must name the suggested
+    budget of M, a quarter more rounded up to a whole MiB.
     """
+    from cytearc.utils.memory_budget import suggested_budget
+
     message = str(refusal)
-    held = re.search(r"holds? about (\d+) bytes", message)
-    if message.endswith(" Raise mem_budget."):
-        assert held is not None, f"The refusal names no budget: {message}"
-        return int(held.group(1))
     named = re.search(
-        r"[Rr]aise mem_budget to at least (\d+) bytes(?:, or [^.]*)?\.$", message
+        r"Raise (\w+) to at least (\d+) MiB(?:, or .+)?\.$", message, re.DOTALL
     )
     assert named is not None, f"The refusal does not end naming a budget: {message}"
-    assert held is None or held.group(1) == named.group(1), (
-        f"The refusal names a budget other than what it holds: {message}"
+    setting = getattr(refusal, "setting", "mem_budget")
+    assert named.group(1) == setting, f"The refusal names {named.group(1)}: {message}"
+    budget = int(named.group(2)) * 1024**2
+    suggested = getattr(refusal, "suggested_budget_bytes", budget)
+    assert suggested == budget, (
+        f"The refusal names {budget} bytes, not its suggested {suggested}: {message}"
     )
-    return int(named.group(1))
+    held = re.search(r"holds? about (\d+) bytes", message)
+    assert held is None or suggested_budget(int(held.group(1))) == budget, (
+        f"The refusal names a budget other than that of what it holds: {message}"
+    )
+    return budget
+
+
+def headroom_budget(refusal: Any) -> int:
+    """Return the bytes that a refusal needs and a quarter more, the budget that its named budget rounds up to a whole MiB.
+
+    Where a MiB is small beside the need, the named budget is this one. A
+    rerun at it checks that the quarter covers what the step and those after
+    it need more at a larger budget, which a whole MiB hides on small data.
+    """
+    return int(refusal.needed_bytes) + int(refusal.needed_bytes) // 4
 
 
 def climb_refusals(
-    run: Callable[[int], Any], *, start: int = 1
+    run: Callable[[int], Any], *, start: int = 1, at_needs: bool = False
 ) -> tuple[list[Any], Any]:
-    """Run ``run`` at a budget of ``start`` bytes, then at each budget that its refusal names, until it runs.
+    """Run ``run`` at a budget of ``start`` bytes, then at the budget that each refusal guarantees, until it runs.
 
-    Each refusal must name a budget above the one it refused, so each step
-    that refuses is passed at the next budget. The budgets come from the
-    refusals alone, so the climb holds whatever the steps charge.
+    Each refusal must name a budget in MiB, which :func:`named_budget`
+    checks, and the climb goes on at its :func:`headroom_budget`, a quarter
+    more than it needs, which that budget rounds up. Each step refuses at
+    most once: the budget passes the step that named it, so a refusal after
+    it comes from a later step. With ``at_needs``, the climb goes to the
+    bytes that each refusal needs instead, so that each step that needs more
+    than the steps before it refuses in turn, and a step whose need grows
+    with the budget can refuse again. The budgets come from the refusals
+    alone, so the climb holds whatever the steps charge.
 
     Returns:
         Each refusal, a ``MemoryBudgetError``, in order, and what the run at
@@ -91,10 +118,18 @@ def climb_refusals(
         try:
             return refusals, run(budget)
         except MemoryBudgetError as error:
-            named = named_budget(error)
-            assert named > budget, f"A refusal at {budget} bytes names {named}: {error}"
+            named_budget(error)
+            assert error.needed_bytes > budget, (
+                f"A refusal at {budget} bytes needs {error.needed_bytes}: {error}"
+            )
             refusals.append(error)
-            budget = named
+            if at_needs:
+                budget = error.needed_bytes
+                continue
+            assert all(earlier.item != error.item for earlier in refusals[:-1]), (
+                f"{error.item} is refused again at {budget} bytes: {error}"
+            )
+            budget = headroom_budget(error)
     raise AssertionError(f"1,000 refusals named no budget that runs: {refusals[-1]}")
 
 

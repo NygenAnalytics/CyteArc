@@ -19,7 +19,7 @@ from cytearc.metadata.selection import (
 from cytearc.plotting._data import _fetch_cell_column, _resolve_grouping
 from cytearc.storage.categorical import CategoricalColumn
 from cytearc.utils.memory_budget import MemoryLedger
-from tests.memory_helpers import climb_refusals, named_budget, recording_ledger
+from tests.memory_helpers import climb_refusals, recording_ledger
 from tests.storage_helpers import by_cell_id, open_store, write_count_store
 
 N_CELLS = 60
@@ -164,11 +164,12 @@ def test_coding_a_categorical_charges_its_codes_not_a_hash_table_of_labels() -> 
         refusals, (coded, names) = climb_refusals(
             lambda budget, values=values: category_codes(
                 values, ledger=MemoryLedger(budget, "Coding labels")
-            )
+            ),
+            at_needs=True,
         )
         assert names == categories
         np.testing.assert_array_equal(coded, codes)
-        least[name] = named_budget(refusals[-1])
+        least[name] = refusals[-1].needed_bytes
 
     # A categorical holds which values hold a category, the codes gathered
     # and each value's code: at most 26 bytes a value beside its categories.
@@ -219,9 +220,10 @@ def test_numbering_a_categorical_charges_its_categories_not_a_text_per_label() -
                 n_values,
                 reason="r",
                 ledger=MemoryLedger(budget, "Numbering samples"),
-            )
+            ),
+            at_needs=True,
         )
-        least[name] = named_budget(refusals[-1])
+        least[name] = refusals[-1].needed_bytes
         assert result[1] == [{"sample": text} for text in sorted(categories)]
 
     # The numbering of the labels makes a text of 62 characters per label and
@@ -313,8 +315,8 @@ def test_reading_a_cell_column_as_its_codes_plans_and_charges_no_label() -> None
                 categorical=coded,
             )[0]
 
-        refusals, values = climb_refusals(read)
-        least[coded] = named_budget(refusals[-1])
+        refusals, values = climb_refusals(read, at_needs=True)
+        least[coded] = refusals[-1].needed_bytes
         if coded:
             assert (np.asarray(values.codes) == np.arange(n_rows) % 6).all()
         else:

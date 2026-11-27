@@ -377,7 +377,7 @@ def test_cluster_pairs_are_checked_against_the_memory_left() -> None:
         assign_clonotype_clusters(sequences, texts, ledger=_ledger(127), **options)
     assert (refused.value.needed_bytes, refused.value.budget_bytes) == (128, 127)
     assert str(refused.value).endswith(
-        "Raise mem_budget to at least 128 bytes, or require the same V and J "
+        "Raise mem_budget to at least 1 MiB, or require the same V and J "
         "genes, or lower max_distance."
     )
     with pytest.raises(MemoryError, match="for the 2 pairs of chains within"):

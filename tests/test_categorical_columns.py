@@ -976,7 +976,7 @@ def test_a_scattered_read_charges_the_codes_chunk_rather_than_a_text_chunk() -> 
 
 
 def test_a_budgeted_column_read_plans_codes_and_categories() -> None:
-    from tests.memory_helpers import climb_refusals, named_budget
+    from tests.memory_helpers import climb_refusals
 
     n_rows = 4_000
     rows, categories = _long_labels(n_rows)
@@ -1001,9 +1001,9 @@ def test_a_budgeted_column_read_plans_codes_and_categories() -> None:
             )
             return values
 
-        refusals, values = climb_refusals(read)
+        refusals, values = climb_refusals(read, at_needs=True)
         assert values.tolist() == rows.tolist()
-        least[name] = named_budget(refusals[-1])
+        least[name] = refusals[-1].needed_bytes
 
     # Both return the labels at 480 bytes a row. The text read also decodes
     # the chunk of 4,000 stored labels beside its stored copy; the

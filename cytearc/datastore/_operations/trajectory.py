@@ -1051,11 +1051,11 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             raise MemoryBudgetError(
                 f"Writing and checking a diffusion operator of {nnz} entries "
                 f"needs about {needed} bytes, more than the memory budget of "
-                f"{self.memoryBytes} bytes; increase the memory budget or use a "
-                "smaller diffusion power t.",
+                f"{self.memoryBytes} bytes.",
                 needed_bytes=needed,
                 budget_bytes=int(self.memoryBytes),
                 item=f"writing a diffusion operator of {nnz} entries",
+                remedy="use a smaller diffusion power t",
             )
         with artifact_transaction(self.zw, planned) as store:
             write_diffusion_payload(store, diff_op)
@@ -1290,12 +1290,12 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         )
         if resident_bytes >= self.memoryBytes:
             raise MemoryBudgetError(
-                "Imputed output and diffusion operator exceed the memory budget; "
-                "increase the memory budget or request fewer features per call. "
+                "Imputed output and diffusion operator exceed the memory budget. "
                 f"They need at least {resident_bytes + 1} bytes.",
                 needed_bytes=resident_bytes + 1,
                 budget_bytes=int(self.memoryBytes),
                 item="the imputed output and the diffusion operator",
+                remedy="request fewer features per call",
             )
         result = np.zeros((len(cell_indices), len(keys)), dtype=np.float64)
         for slot in metadata_slots:
@@ -2725,11 +2725,11 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             raise MemoryBudgetError(
                 f"Fate mapping needs about {needed} bytes of memory with the graph "
                 "of its mapped cells, which exceeds the memory budget of "
-                f"{self.memoryBytes} bytes. Increase the memory budget, or compute "
-                "the pseudotime or the direction score on fewer cells.",
+                f"{self.memoryBytes} bytes.",
                 needed_bytes=needed,
                 budget_bytes=int(self.memoryBytes),
                 item="the fate solver",
+                remedy="compute the pseudotime or the direction score on fewer cells",
             )
         retained_scores = scores[mapped]
         retained_sink_values = sink_values[mapped]
@@ -3763,10 +3763,11 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             raise MemoryBudgetError(
                 f"Lineage curves need about {working_bytes} bytes of working "
                 f"memory, which exceeds the memory budget of {self.memoryBytes} "
-                "bytes. Increase the memory budget or fit fewer lineages.",
+                "bytes.",
                 needed_bytes=working_bytes + 1,
                 budget_bytes=int(self.memoryBytes),
                 item="the lineages' weights, ranks and placement writes",
+                remedy="fit fewer lineages",
             )
         # The coordinates hold every cell of the selection; unscored cells
         # carry no weight and no rank.
@@ -4287,10 +4288,11 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             raise MemoryBudgetError(
                 f"The lineage tree needs about {resident_bytes} bytes of working "
                 f"memory, which exceeds the memory budget of {self.memoryBytes} "
-                "bytes. Use coordinates with fewer dimensions.",
+                "bytes.",
                 needed_bytes=resident_bytes + 1,
                 budget_bytes=int(self.memoryBytes),
                 item="the cluster moments of the lineage tree",
+                remedy="use coordinates with fewer dimensions",
             )
         counts, means, covariances = _cluster_moments_impl(
             self._lineage_coordinate_blocks(
@@ -7367,11 +7369,11 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             raise MemoryBudgetError(
                 f"Binning {len(axes.cell_indices)} cells along {n_lineages} "
                 f"lineages needs about {operator_bytes} bytes, which exceeds the "
-                f"memory budget of {self.memoryBytes} bytes. Increase the memory "
-                "budget or profile fewer lineages.",
+                f"memory budget of {self.memoryBytes} bytes.",
                 needed_bytes=operator_bytes + 1,
                 budget_bytes=int(self.memoryBytes),
                 item="the bin operator beside the fate weights",
+                remedy="profile fewer lineages",
             )
         operator, bin_ordering, lineage_weight = _equal_mass_bin_operator_impl(
             axes.ordering, axes.weights, n_bins

@@ -21,7 +21,7 @@ from .._sparse import ROW_BYTES, SparseRowStore
 from ...utils.arrays import cumulative_nnz, has_duplicates
 from ...utils.memory_budget import (
     MemoryBudgetError,
-    least_admitted_budget,
+    admitted_need,
     refusal_words,
 )
 
@@ -177,11 +177,11 @@ def prepare_matrix_sources(
     resident data leave of it. The read of one cell of every source is
     checked before any is prepared, beside the row pointers that each
     source before it that converts its cells keeps beside the resident
-    data, and again before each is prepared. A refusal of one cell names the
-    least budget at which
-    every source still to be prepared reads one cell, since the block limit
-    that the budget sets grows with it, and with it the read of one cell
-    that a source converting its cells estimates.
+    data, and again before each is prepared. A refusal of one cell names a
+    budget at which every source still to be prepared reads one cell,
+    checked at that budget, since the block limit that the budget sets grows
+    with it, and with it the read of one cell that a source converting its
+    cells estimates.
 
     Args:
         source: The matrix, whose sources are prepared in turn.
@@ -218,6 +218,7 @@ def prepare_matrix_sources(
                     needed_bytes=needed,
                     budget_bytes=int(max_bytes),
                     item="the resident data of the Seurat sources",
+                    setting=None,
                 )
             _admit_one_cell_of_each(
                 sources[index:], source.resident_bytes, int(max_bytes), item
@@ -241,16 +242,16 @@ def prepare_matrix_sources(
 def _admit_one_cell_of_each(
     sources: Sequence["BaseMatrixSource"], resident: int, max_bytes: int, item: str
 ) -> None:
-    """Check that ``max_bytes`` reads one cell of each of ``sources``, naming the least budget that does.
+    """Check that ``max_bytes`` reads one cell of each of ``sources``, naming a budget that does.
 
     Each source reads beside the ``resident`` bytes and the row pointers
     of the sources before it that convert their cells, as they are
     prepared in turn.
 
     Raises:
-        MemoryBudgetError: Naming the least budget at which every source
-            reads one cell beside them, found from the need of the first
-            that refuses at ``max_bytes``.
+        MemoryBudgetError: Naming a budget at which every source reads one
+            cell beside them, which :func:`admitted_need` finds from the
+            need of the first that refuses at ``max_bytes``.
     """
 
     def admit(budget: int) -> None:
@@ -265,12 +266,13 @@ def _admit_one_cell_of_each(
     try:
         admit(max_bytes)
     except MemoryBudgetError as error:
-        needed = least_admitted_budget(admit, error)
+        needed = admitted_need(admit, error)
         raise MemoryBudgetError(
             f"Seurat source preparation exceeds mem_budget. It needs at least {needed} bytes.",
             needed_bytes=needed,
             budget_bytes=max_bytes,
             item=item,
+            setting=None,
         ) from error
 
 
@@ -314,6 +316,7 @@ def _admit_one_cell(source: "BaseMatrixSource", resident: int, max_bytes: int) -
             needed_bytes=needed,
             budget_bytes=int(max_bytes),
             item="preparing one cell",
+            setting=None,
         )
 
 
@@ -341,6 +344,7 @@ def _budget_block_refusal(
         needed_bytes=needed,
         budget_bytes=max_bytes,
         item=cause.item,
+        setting=None,
     )
 
 
@@ -782,12 +786,20 @@ class BaseMatrixSource(ABC):
                     temp_dir=self._tempDir,
                 )
             except MemoryBudgetError as error:
-                # The cause names the conversion limit that passes, which
+                # The cause names the block limit that passes, the
+                # conversion's need beside the source's own bytes, which
                 # prepare_matrix_sources restates when the budget set it.
+                words = refusal_words(error).removesuffix(".")
+                limit = error.needed_bytes + source_bytes
                 raise ResourceLimitError(
-                    f"{refusal_words(error).removesuffix('.')}; "
-                    f"maxBlockBytes={self._limits.maxBlockBytes}"
-                ) from error
+                    f"{words}; maxBlockBytes={self._limits.maxBlockBytes}"
+                ) from MemoryBudgetError(
+                    f"{words}. It needs at least {limit} bytes.",
+                    needed_bytes=limit,
+                    budget_bytes=self._limits.maxBlockBytes,
+                    item=error.item,
+                    setting="maxBlockBytes",
+                )
         return self._rowStore
 
     @abstractmethod
@@ -1270,6 +1282,7 @@ class TransposeMatrixSource(BaseMatrixSource):
                         needed_bytes=limit,
                         budget_bytes=self._limits.maxBlockBytes,
                         item="a tile of one source column of the transpose",
+                        setting="maxBlockBytes",
                     )
                 width = max(1, width // 2)
             yield start, start + width, estimate

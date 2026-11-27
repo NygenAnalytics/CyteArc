@@ -501,7 +501,7 @@ def _gene_major_schedule(
         raise MemoryBudgetError(
             f"Marker search needs at least {needed(1, 1)} bytes to rank "
             f"{n_cells} cells with one thread, but the operation limit is "
-            f"{memory_bytes} bytes. Increase mem_budget.",
+            f"{memory_bytes} bytes.",
             needed_bytes=needed(1, 1),
             budget_bytes=int(memory_bytes),
             item="ranking one read group with one thread",

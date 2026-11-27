@@ -532,8 +532,7 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
             self.memoryBytes,
             f"The profiles of {n_kept} {by}s in {n_features} features hold about",
             beside=" with one feature's sums and the read of its counts",
-            remedy=f"Raise mem_budget to at least {needed} bytes, or pass fewer "
-            "features.",
+            remedy="pass fewer features",
         )
         bands = _count_bands(
             _resident_ledger(self, held),
@@ -892,7 +891,7 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
             needed,
             self.memoryBytes,
             f"Clustering {n_chosen} perturbations in {n_features} features holds about",
-            remedy="Pass fewer perturbations, or raise mem_budget.",
+            remedy="pass fewer perturbations",
         )
         self._require_writable(arguments.operation)
         values = np.asarray(stored.oindex[chosen, :])

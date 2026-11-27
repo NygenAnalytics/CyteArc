@@ -883,11 +883,14 @@ def test_merge_resume_refuses_feature_metadata_without_its_selection(
 
 
 def _counting_refusal(needed: int, budget: int, item: str) -> str:
-    """Return how a merge refuses to count the nonzero values of each merged RNA cell."""
+    """Return how a merge refuses to count the nonzero values of each merged RNA cell, naming the budget that ``needed`` suggests."""
+    from cytearc.utils.memory_budget import suggested_budget
+
     return (
         "Counting the nonzero values of each merged cell of assay 'RNA' holds about "
         f"{needed} bytes for each merged cell's count and {item}, more than the "
-        f"memory budget of {budget} bytes. Raise mem_budget to at least {needed} bytes."
+        f"memory budget of {budget} bytes. Raise mem_budget to at least "
+        f"{suggested_budget(needed) // 1024**2} MiB."
     )
 
 
