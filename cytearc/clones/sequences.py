@@ -73,9 +73,6 @@ DISTANCE_METRICS: tuple[str, ...] = ("hamming", "normalized_hamming", "levenshte
 #: expected by chance under ``levenshtein``, whose cost grows about eightfold
 #: with every two edits more.
 MAX_CHANCE_EDITS = 8
-# The bytes of an array's object beside its values, for the arrays that each
-# length or block, and each pass of keys, keeps until the search returns.
-_ARRAY_BYTES = 192
 # The bytes of each group of texts of one length and block: its start, end
 # and length, and under levenshtein its block and its block's start and end.
 _GROUP_BYTES = 48
@@ -187,8 +184,8 @@ def _check(ledger: MemoryLedger, needed: int, what: str) -> None:
 
 
 def _found_bytes(n_pairs: int) -> int:
-    """What the pairs of a length or block hold until the search returns: ``_FOUND_PAIR_BYTES`` each and their two arrays, nothing for none."""
-    return _FOUND_PAIR_BYTES * n_pairs + 2 * _ARRAY_BYTES if n_pairs else 0
+    """What the pairs of a length or block hold until the search returns: ``_FOUND_PAIR_BYTES`` each."""
+    return _FOUND_PAIR_BYTES * n_pairs
 
 
 def _hold(ledger: MemoryLedger, nbytes: int, what: str) -> None:
@@ -1092,7 +1089,7 @@ def _keyed_pairs(
         # The pairs kept are copied out while the pass's pairs are still held.
         _check(
             ledger,
-            held_pairs + _KEPT_PAIR_BYTES * kept + _ARRAY_BYTES,
+            held_pairs + _KEPT_PAIR_BYTES * kept,
             "the pairs found",
         )
         found.append(pairs[:kept].copy())
@@ -1100,13 +1097,13 @@ def _keyed_pairs(
         n_kept += kept
         _charge_to(
             ledger,
-            held + _KEPT_PAIR_BYTES * n_kept + _ARRAY_BYTES * len(found),
+            held + _KEPT_PAIR_BYTES * n_kept,
             "the pairs found",
         )
     del packed
     ledger.release(packed_bytes)
     # The two arrays of the pairs are then held until the search returns.
-    _check(ledger, _JOINED_PAIR_BYTES * n_kept + 2 * _ARRAY_BYTES, "the pairs found")
+    _check(ledger, _JOINED_PAIR_BYTES * n_kept, "the pairs found")
     if n_parts == 1:
         near = found[0]
     else:
@@ -1567,8 +1564,7 @@ def _edits_keyed(sizes: np.ndarray, lengths: np.ndarray, limit: int) -> bool:
 class _Found:
     """The pairs found so far, each holding ``_FOUND_PAIR_BYTES`` of ``ledger``.
 
-    The pairs of each length or block that has any are kept as two arrays,
-    which hold ``_ARRAY_BYTES`` each beside their values.
+    The pairs of each length or block that has any are kept as two arrays.
     """
 
     ledger: MemoryLedger
@@ -1577,7 +1573,7 @@ class _Found:
 
     def most(self) -> int:
         """The most pairs that a compiled loop may collect in the memory left."""
-        return max(0, _room(self.ledger) - 2 * _ARRAY_BYTES) // _LOOP_PAIR_BYTES
+        return _room(self.ledger) // _LOOP_PAIR_BYTES
 
     def add(self, first: np.ndarray, second: np.ndarray) -> None:
         """Keep the pairs of a length or block, if it has any, which the search that found them charged."""
@@ -1595,7 +1591,7 @@ class _Found:
             # A loop stops short only within a budget, which refuses the pairs.
             _check(
                 self.ledger,
-                _LOOP_PAIR_BYTES * (self.most() + 1) + 2 * _ARRAY_BYTES,
+                _LOOP_PAIR_BYTES * (self.most() + 1),
                 "the pairs found",
             )
             raise AssertionError("A search without a budget stopped collecting pairs")

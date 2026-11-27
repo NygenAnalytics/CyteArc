@@ -4,7 +4,8 @@ An operation creates one :class:`MemoryLedger` with its budget and charges it
 before each step allocates: an estimate of what the step keeps, and of the
 transient peak of what it builds and lets go. The estimates count the arrays
 that grow with the data, such as blocks, coordinates, graphs and per-cell IDs
-and labels. They leave out the interpreter, the objects and buffers of the
+and labels, and ``READ_ALLOWANCE_BYTES`` for each read of stored arrays in
+flight. They leave out the interpreter, the other objects and buffers of the
 libraries, and other allocations that do not grow with the data, so a step can
 hold a little more than its charge. The ledger refuses a charge that would pass
 the budget with a :class:`MemoryBudgetError` that names the step, the bytes
@@ -14,8 +15,10 @@ Planners that size work outside any ledger raise the same error with the same
 fields in their own words, and :func:`memory_refusal` words the refusal of a
 step that has none.
 
-The shared costs below estimate the structures that many steps build: Python
-strings, fixed-width text, object arrays, sorts and hash tables.
+The shared costs below estimate the structures that many steps build, at a
+cost for each item that bounds what the structure holds at any size, with the
+growth of pandas' and NumPy's buffers: Python strings, fixed-width text,
+object arrays, sorts, hash tables and index lookups.
 """
 
 import sys
@@ -25,11 +28,14 @@ from typing import Any
 import numpy as np
 
 __all__ = [
+    "READ_ALLOWANCE_BYTES",
     "MemoryBudgetError",
     "MemoryLedger",
     "fixed_text_bytes",
+    "factorize_bytes",
     "hash_table_bytes",
     "held_array_bytes",
+    "index_lookup_bytes",
     "least_admitted_budget",
     "memory_refusal",
     "object_array_bytes",
@@ -37,6 +43,20 @@ __all__ = [
     "refusal_words",
     "sort_bytes",
 ]
+
+
+#: What one read of stored arrays in flight holds beside the arrays that grow
+#: with the data: the objects of Zarr's read and of the chunks it decodes,
+#: NumPy's buffers of a read that takes values by index arrays, and the
+#: buffer of a file read in part, as a read of part of a shard is, which
+#: Python sizes by the block of the file system. On a local file system, a
+#: read that decodes up to 10 chunks at once, Zarr's default async
+#: concurrency, held at most 50 KB of these on Python 3.13 and 97 KB on
+#: Python 3.14, whose buffer of a file read in part is larger; a file system
+#: with larger blocks gives each read a larger buffer. Each further chunk
+#: that a read decodes at once holds up to 12.1 KB more, which the read
+#: geometry charges as ``READ_DECODE_BYTES``.
+READ_ALLOWANCE_BYTES = 128 * 1024
 
 
 class MemoryBudgetError(MemoryError):
@@ -264,25 +284,27 @@ def _bytes(nbytes: int) -> int:
     return resolved
 
 
-# CPython's compact strings: the bytes of a string beside one character
-# width for each character, by the widest code point the string holds. An
-# ASCII string keeps its trailing NUL in its header.
-_STRING_KINDS = ((0x7F, 41, 1), (0xFF, 57, 1), (0xFFFF, 58, 2), (0x10FFFF, 60, 4))
+#: The bytes of a Python string beside its characters: 41 for ASCII text, and
+#: at most 60 for text beyond ASCII.
+_ASCII_STRING_BYTES = 41
+_STRING_BYTES = 60
 
 
 def python_text_bytes(n_values: int, characters: int, *, widest: int = 0x7F) -> int:
     """Return the bytes of ``n_values`` Python strings that hold ``characters`` characters in all.
 
-    Each string takes a header and one, two or four bytes per character,
-    by the widest code point among its characters: ASCII strings 41 bytes
-    and one per character, strings up to U+00FF 57 and one, up to U+FFFF 58
-    and two, and beyond 60 and four. Every string is counted at the kind of
-    ``widest``, the widest code point of any of them.
+    An ASCII string takes 41 bytes beside its characters, a byte each. Where
+    ``widest``, the widest code point of any string, is beyond ASCII, a
+    string takes at most 60 bytes beside its characters, which take a byte
+    each, two when ``widest`` is beyond U+00FF and four when it is beyond
+    U+FFFF.
     """
-    for limit, header, width in _STRING_KINDS:
-        if widest <= limit:
-            return int(n_values) * header + width * int(characters)
-    raise ValueError(f"A code point cannot exceed U+10FFFF, not {widest:#x}")
+    if widest > 0x10FFFF:
+        raise ValueError(f"A code point cannot exceed U+10FFFF, not {widest:#x}")
+    if widest <= 0x7F:
+        return int(n_values) * _ASCII_STRING_BYTES + int(characters)
+    width = 1 if widest <= 0xFF else 2 if widest <= 0xFFFF else 4
+    return int(n_values) * _STRING_BYTES + width * int(characters)
 
 
 def fixed_text_bytes(n_values: int, width: int) -> int:
@@ -365,56 +387,73 @@ def sort_bytes(
 ) -> int:
     """Return the bytes that sorting ``n_values`` values of ``itemsize`` bytes holds, beside them.
 
-    ``np.sort`` returns a copy, and its stable sort holds half as much again
-    while it merges, or, on values of one or two bytes, which it sorts by
-    radix, as much again; with ``order``, ``np.argsort`` returns the order as
-    int64, and its stable sort holds half of that again, or by radix as much
-    again.
+    ``np.sort`` returns a copy, and with ``order`` ``np.argsort`` returns the
+    order as int64; a stable sort holds as much again while it merges.
     """
     n_values, itemsize = int(n_values), int(itemsize)
-    radix = itemsize <= 2
-    if order:
-        if not stable:
-            return 8 * n_values
-        return (16 if radix else 12) * n_values
-    copy = n_values * itemsize
-    if not stable:
-        return copy
-    return 2 * copy if radix else copy + copy // 2
+    held = 8 * n_values if order else n_values * itemsize
+    return 2 * held if stable else held
 
 
-def _power_of_two(n: int) -> int:
-    """The smallest power of two of at least ``n``, and at least 4."""
-    return max(4, 1 << max(0, int(n) - 1).bit_length())
-
-
-def _buckets(n_keys: int) -> int:
-    """The buckets of a khash table that holds ``n_keys`` keys at most 77% full: a power of two."""
-    candidate = _power_of_two(n_keys)
-    return 2 * candidate if candidate * 0.77 + 0.5 < n_keys else candidate
-
-
-#: pandas sizes a hash table for at most this many keys before it hashes
-#: them, and grows it from there as distinct keys arrive.
-_SIZE_HINT_LIMIT = (1 << 20) + 7
+#: pandas' hash table of strings takes 24 bytes and a bit of flags a bucket,
+#: and a table of other values 16 bytes and the bit, as each table's
+#: ``sizeof`` gives them.
+_HASH_BUCKET_BYTES = 24
+#: The most values that pandas sizes a hash table for before it hashes them.
+_HASH_SIZE_HINT_LIMIT = (1 << 20) + 7
+#: pandas infers the type of an object array that it makes an index of, or
+#: looks up, from arrays of each type that the values could take, 42 bytes a
+#: value.
+_INDEX_INFERENCE_BYTES = 42
 
 
 def hash_table_bytes(n_values: int, *, n_distinct: int | None = None) -> int:
-    """Return the bytes of the hash table that pandas builds to hash ``n_values`` values.
+    """Return the bytes of the hash table that pandas builds to hash ``n_values`` values, ``n_distinct`` of them distinct.
 
-    ``pd.factorize``, ``pd.unique`` and ``Index.get_indexer`` hash their
-    values into a khash table of 16 bytes per bucket, a key and a position,
-    and a bit per bucket for whether it is empty, with a power of two of
-    buckets that are at most 77% full. pandas sizes it
-    for every value given, up to about a million, whether or not the values
-    repeat, and doubles it in place while its distinct keys outgrow it.
-    ``n_distinct`` bounds the distinct values, all of them when None. Beside the table, pandas
-    returns codes, and the distinct values, which it gathers in a buffer
-    that grows four times over when it fills, and an object array hashes the
-    values' strings, which fixed-width text becomes first.
+    pandas sizes the table for the values given, at most about a million,
+    and the table grows as the distinct values fill it, as all of the values
+    do unless ``n_distinct`` says fewer. khash keeps a power of two of
+    buckets, at most 77% full, as pandas' ``kh_needed_n_buckets`` gives them:
+    1.3 to 2.6 buckets a value. Each bucket is charged the 24 bytes that a
+    table of strings takes; a table of other values takes 16.
     """
-    n_values = int(n_values)
+    n_values = max(0, int(n_values))
     distinct = n_values if n_distinct is None else min(int(n_distinct), n_values)
-    initial = _power_of_two(min(_buckets(n_values), _SIZE_HINT_LIMIT))
-    buckets = max(initial, _buckets(distinct))
-    return 16 * buckets + buckets // 8
+    filled = max(min(n_values, _HASH_SIZE_HINT_LIMIT), distinct)
+    buckets = next(
+        b for b in (1 << k for k in range(2, 64)) if int(b * 0.77 + 0.5) >= filled
+    )
+    return _HASH_BUCKET_BYTES * buckets + buckets // 8
+
+
+def factorize_bytes(n_values: int, *, n_distinct: int | None = None) -> int:
+    """Return the bytes that ``pd.factorize`` or ``pd.unique`` holds for ``n_values`` values, beside the codes and distinct values that it returns.
+
+    Beside its hash table, as :func:`hash_table_bytes` counts it, pandas
+    works with two arrays of 8 bytes a value, and gathers the distinct
+    values in a buffer that doubles for objects and grows four times over
+    for numbers before pandas trims it: up to 24 bytes for each distinct
+    value beside the 8 of each that it returns. The values are all distinct
+    unless ``n_distinct`` says fewer.
+    """
+    n_values = max(0, int(n_values))
+    distinct = n_values if n_distinct is None else min(int(n_distinct), n_values)
+    return (
+        hash_table_bytes(n_values, n_distinct=n_distinct)
+        + 16 * n_values
+        + 24 * distinct
+    )
+
+
+def index_lookup_bytes(n_index: int, n_lookups: int, *, objects: bool = True) -> int:
+    """Return the bytes that finding ``n_lookups`` values in a pandas index of ``n_index`` distinct values holds, beside the values given.
+
+    pandas copies the values that it makes the index of, 8 bytes each, and
+    hashes them into a table, as :func:`hash_table_bytes` counts it. It
+    copies the lookups and returns each one's position, 8 bytes each. Before
+    it hashes ``objects``, values or lookups in object arrays, it infers
+    their type, holding 42 bytes a value.
+    """
+    n_index, n_lookups = max(0, int(n_index)), max(0, int(n_lookups))
+    inferring = _INDEX_INFERENCE_BYTES * max(n_index, n_lookups) if objects else 0
+    return 8 * n_index + max(inferring, hash_table_bytes(n_index)) + 16 * n_lookups

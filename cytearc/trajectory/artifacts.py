@@ -27,7 +27,7 @@ from .parameters import (
     AGGREGATION_ANN_STATIC_PARAMETER_NAMES,
 )
 from ..utils.arguments import RANDOM_STATE_MAX, bool_argument, integer_argument
-from ..utils.memory_budget import MemoryBudgetError
+from ..utils.memory_budget import READ_ALLOWANCE_BYTES, MemoryBudgetError
 
 PSEUDOTIME_INPUTS = frozenset({"connectivity_map", "source_sink", "cell_selection"})
 # The potentials that a pseudotime records as its method. A record without a
@@ -623,12 +623,6 @@ def _diffusion_payload_arrays(group: zarr.Group, *, n_cells: int) -> list[zarr.A
 _DIFFUSION_BLOCK_ENTRIES = 1_000_000
 
 
-#: What writing a diffusion operator and checking it hold whatever its size:
-#: Zarr's buffers and the objects of reading the stored arrays back twice,
-#: measured after a full collection has emptied CPython's free lists.
-_DIFFUSION_CHECK_OBJECT_BYTES = 128 * 1024
-
-
 def diffusion_load_bytes(nnz: int, n_cells: int, imputed_features: int = 0) -> int:
     """Return the peak bytes needed to load a persisted diffusion operator.
 
@@ -654,13 +648,13 @@ def diffusion_write_bytes(nnz: int, n_cells: int) -> int:
     :func:`write_diffusion_payload` fingerprints the stored arrays, and the
     check before the operator is published fingerprints them again; each
     reads the arrays back as :func:`diffusion_load_bytes` states, beside a
-    stored chunk of 8-byte values, at most one of ``nnz`` entries, and
-    Zarr's buffers and objects of both reads, whatever the operator's size.
+    stored chunk of 8-byte values, at most one of ``nnz`` entries, and the
+    allowance of a read in flight, ``READ_ALLOWANCE_BYTES``.
     """
     return (
         diffusion_load_bytes(nnz, n_cells)
         + 8 * min(int(nnz), _DIFFUSION_BLOCK_ENTRIES)
-        + _DIFFUSION_CHECK_OBJECT_BYTES
+        + READ_ALLOWANCE_BYTES
     )
 
 
@@ -907,11 +901,6 @@ def fate_payload_is_valid(
     return True
 
 
-#: What checking and loading a stored state search holds whatever its cells:
-#: Zarr's and pandas' objects, and the record and the small arrays.
-_STATES_LOAD_FIXED_BYTES = 2**20
-
-
 def stored_states_bytes(group: Any, *, n_cells: int, n_states: int) -> int:
     """Return the most bytes that checking and loading the stored state search in ``group`` holds.
 
@@ -923,7 +912,8 @@ def stored_states_bytes(group: Any, *, n_cells: int, n_states: int) -> int:
     a row, the labels' text ``width`` characters wide. Loading then holds
     the labels' text beside the codes that :func:`listed_labels` makes of
     them, or the float32 memberships and their read-only copy, beside 6
-    bytes a cell for the codes, the valid cells and their copy. The width
+    bytes a cell for the codes, the valid cells and their copy. Either holds
+    the allowance of a read in flight, ``READ_ALLOWANCE_BYTES``. The width
     and the rows of a chunk are read from the stored arrays' metadata.
     """
     n, m = int(n_cells), int(n_states)
@@ -942,7 +932,7 @@ def stored_states_bytes(group: Any, *, n_cells: int, n_states: int) -> int:
     )
     checking = 2 * n + rows * (33 * m + 12 * width + 152)
     loading = max(4 * width * n, 8 * n * m) + 6 * n
-    return max(checking, loading) + _STATES_LOAD_FIXED_BYTES
+    return max(checking, loading) + READ_ALLOWANCE_BYTES
 
 
 def states_payload_is_valid(
@@ -1904,12 +1894,6 @@ def lineage_aggregation_payload_is_valid(
 
 # What checking and loading a saved feature analysis holds
 
-#: What checking a saved feature analysis holds whatever its size: Zarr's
-#: buffers and the objects of opening its arrays, fingerprinting them and
-#: checking its record, measured after a full collection has emptied
-#: CPython's free lists.
-_FEATURE_CHECK_OBJECT_BYTES = 192 * 1024
-
 
 @dataclass
 class _Steps:
@@ -1964,7 +1948,7 @@ def _row_bytes(array: zarr.Array) -> int:
 
 
 def _check_bytes(arrays: Mapping[str, zarr.Array], *steps: int) -> int:
-    """What a check of a saved feature analysis holds: the most of its steps, which it takes in turn, beside its objects.
+    """What a check of a saved feature analysis holds: the most of its steps, which it takes in turn.
 
     Every check first fingerprints the payload's arrays, one array's scan
     band at a time as ``fingerprint_stored_arrays`` reads them, and stamps
@@ -1990,7 +1974,7 @@ def _check_bytes(arrays: Mapping[str, zarr.Array], *steps: int) -> int:
         ),
         default=0,
     )
-    return _FEATURE_CHECK_OBJECT_BYTES + max(fingerprint, stamps, *steps)
+    return max(fingerprint, stamps, *steps)
 
 
 def _selection_bytes(rows: int) -> int:

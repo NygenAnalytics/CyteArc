@@ -19,6 +19,7 @@ import pytest
 
 from cytearc.datastore._operations import perturbation_guides as operations
 from cytearc.datastore.datastore import DataStore
+from cytearc.metadata.rows import text_size, text_strings_bytes
 from cytearc.perturbation import MULTIPLE, NEGATIVE, GuideThresholds
 from cytearc.perturbation.guide_thresholds import call_thresholds
 from cytearc.perturbation.histograms import (
@@ -1281,10 +1282,10 @@ def test_the_cells_ids_are_charged_as_their_strings_and_values() -> None:
 
     # Python strings are counted at least by their characters, beside a
     # reference to each.
-    every = operations._strings_bytes(ids)
+    every = text_strings_bytes(ids)
     assert every >= sum(map(len, strings)) + 8 * len(strings)
     # A table entry's ID, under pyarrow, holds the longest ID's UTF-8 bytes.
-    assert operations._text_size(ids) == (
+    assert text_size(ids) == (
         sum(map(len, strings)),
         len(longest.encode("utf-8")),
         ord("é"),
@@ -1300,12 +1301,12 @@ def test_fixed_width_ids_are_counted_at_the_widest_character_of_any() -> None:
     # two characters of three bytes each in UTF-8, and of two in Python.
     ids = np.asarray(["ab", "c中"])
 
-    characters, longest, widest = operations._text_size(ids)
+    characters, longest, widest = text_size(ids)
 
     assert widest == ord("中")
     assert longest >= len("中中".encode("utf-8"))
     assert characters >= sum(map(len, ids.tolist()))
-    assert operations._strings_bytes(ids) >= len(ids) * (2 * 2 + 8)
+    assert text_strings_bytes(ids) >= len(ids) * (2 * 2 + 8)
 
 
 def test_each_call_of_a_table_is_charged_its_ids_reference_and_bytes() -> None:

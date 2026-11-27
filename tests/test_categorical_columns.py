@@ -969,9 +969,10 @@ def test_a_scattered_read_charges_the_codes_chunk_rather_than_a_text_chunk() -> 
         assert charged[name] <= read_rows_bytes(array, len(few))
 
     # The text column decodes its chunk of 4,000 labels of 480 bytes; the
-    # codes decode a chunk of 4,000 bytes beside three labels.
+    # codes decode a chunk of 4,000 bytes beside three labels and the
+    # allowance of a read, 128 KiB and 4 KiB for the chunk.
     assert charged["text"] >= n_rows * 4 * 120
-    assert charged["categorical"] <= 64 * 1024
+    assert charged["categorical"] <= 192 * 1024
 
 
 def test_a_budgeted_column_read_plans_codes_and_categories() -> None:

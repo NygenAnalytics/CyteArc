@@ -8,7 +8,7 @@ from typing import Any, Literal
 import numpy as np
 
 from ..utils.arrays import has_duplicates
-from .geometry import _BAND_LEFTOVER_LIMIT_BYTES, ArrayGeometry, array_geometry
+from .geometry import ArrayGeometry, array_geometry
 
 type Fits = Callable[[int], bool]
 
@@ -274,15 +274,7 @@ def index_band_bytes(
     one row of shards, so its read touches the column shards of
     ``columns``. At Zarr's async ``concurrency``, a band read decodes up to
     that many chunks of a shard at once and reads up to that many of the
-    shards it touches at once. The reads of the earlier bands leave their
-    objects while the last one runs, as
-    :meth:`~cytearc.storage.geometry.ArrayGeometry.chunksLeftoverBytes`
-    counts them for the chunks those reads took, up to the limit that
-    :meth:`~cytearc.storage.geometry.ArrayGeometry.bandsLeftoverBytes` takes
-    for an array of more axes: a chunk in
-    each row chunk that the rows lie in for each earlier band of columns, and
-    each selected column chunk for each earlier band of rows, one band to a
-    row chunk that the rows lie in. A read of no columns reads nothing.
+    shards it touches at once. A read of no columns reads nothing.
     """
     if columns.size == 0:
         return 0, 0
@@ -290,10 +282,9 @@ def index_band_bytes(
     (column_fixed, column_per_row), (row_fixed, row_per_row) = _index_band_parts(
         geometry, columns, row_span=row_span, concurrency=concurrency, shards=shards
     )
-    column_left, row_left = _band_leftovers(geometry, columns, rows=rows, shards=shards)
     return (
-        column_fixed + rows * column_per_row + column_left,
-        row_fixed + rows * row_per_row + row_left,
+        column_fixed + rows * column_per_row,
+        row_fixed + rows * row_per_row,
     )
 
 
@@ -305,7 +296,7 @@ def _index_band_parts(
     concurrency: int,
     shards: int,
 ) -> tuple[tuple[int, int], tuple[int, int]]:
-    """Return the bytes fixed and the bytes a row that a read in bands of columns, and in bands of rows, holds in its last band, beside what the earlier bands leave.
+    """Return the bytes fixed and the bytes a row that a read in bands of columns, and in bands of rows, holds in its largest band.
 
     They are the band's Zarr read and the reader's ordering of the indices
     of the axis that the bands slice, as :func:`index_band_bytes` states.
@@ -351,35 +342,6 @@ def _index_band_parts(
     )
 
 
-def _band_leftovers(
-    geometry: ArrayGeometry, columns: np.ndarray, *, rows: int, shards: int
-) -> tuple[int, int]:
-    """Return what the reads of the earlier bands leave of their objects while the last one runs, read in bands of columns, and in bands of rows.
-
-    ``rows`` rows in ``shards`` rows of shards lie in no more row chunks
-    than they have rows, nor than those rows of shards and the array hold. A
-    band of columns takes a chunk in each of those row chunks, and a band of
-    rows each selected column chunk of one of them, as
-    :meth:`~cytearc.storage.geometry.ArrayGeometry.chunksLeftoverBytes`
-    counts what they leave, up to the limit at which what reads in bands of
-    an array of more axes leave levels off.
-    """
-    row_chunks = min(
-        max(0, int(rows)),
-        max(1, int(shards)) * -(-geometry.axisShard(0) // geometry.axisChunk(0)),
-        geometry.bandCount(),
-    )
-    column_chunks = int(np.unique(geometry.binOf(1, columns)).size)
-    return (
-        geometry.chunksLeftoverBytes(
-            (column_chunks - 1) * row_chunks, limit=_BAND_LEFTOVER_LIMIT_BYTES
-        ),
-        geometry.chunksLeftoverBytes(
-            (row_chunks - 1) * column_chunks, limit=_BAND_LEFTOVER_LIMIT_BYTES
-        ),
-    )
-
-
 def indexed_read_parts(
     geometry: ArrayGeometry,
     columns: np.ndarray,
@@ -394,10 +356,8 @@ def indexed_read_parts(
     :func:`index_band_bytes` counts them for its rows, and the rows of a row
     chunk span no more than the chunk. So the bands of either axis, at a
     chunk's rows, bound the read of a block of up to ``block_rows`` rows,
-    beside what the earlier bands of such a block leave, which a block of
-    fewer rows leaves no more of, and the bound that is smaller for
-    ``block_rows`` rows is charged. The selected rows are not scanned, so a
-    plan holds no copy of them.
+    and the bound that is smaller for ``block_rows`` rows is charged. The
+    selected rows are not scanned, so a plan holds no copy of them.
     """
     if columns.size == 0:
         return 0, 0
@@ -409,9 +369,6 @@ def indexed_read_parts(
         concurrency=concurrency,
         shards=shards,
     )
-    column_left, row_left = _band_leftovers(geometry, columns, rows=rows, shards=shards)
-    column_fixed += column_left
-    row_fixed += row_left
     if column_fixed + rows * column_per_row <= row_fixed + rows * row_per_row:
         return int(column_fixed), int(column_per_row)
     return int(row_fixed), int(row_per_row)

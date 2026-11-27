@@ -46,10 +46,9 @@ else:
 __all__ = ["lineage_curves", "lineage_heatmap", "lineage_trends", "lineage_tree"]
 
 
-#: What drawing a lineage heatmap holds whatever its size, and for each
-#: lineage it draws: matplotlib's figure, its axes, images and text,
-#: measured after a full collection has emptied CPython's free lists.
-_LINEAGE_HEATMAP_FIGURE_BYTES = 512 * 1024
+#: What drawing a lineage heatmap holds for each lineage it draws:
+#: matplotlib's axes, image and text, measured after a full collection had
+#: emptied CPython's free lists.
 _LINEAGE_PANEL_BYTES = 640 * 1024
 
 
@@ -64,14 +63,15 @@ def lineage_heatmap_bytes(
     all. The drawing holds three more copies of the profiles: of the drawn
     lineages in the order drawn, as matplotlib keeps each lineage's image,
     and as the profile table. It copies the names and IDs three times and
-    makes a Python string of each name twice, beside matplotlib's figure.
+    makes a Python string of each name twice, beside each lineage's panel.
+    Matplotlib's figure, whatever its size, is left out.
     """
     n_features, label_bytes = int(n_features), int(label_bytes)
     profiles = 8 * n_features * int(n_values)
     kept = profiles + n_features * (16 + label_bytes)
     labels = n_features * (3 * label_bytes + 2 * (STRING_BYTES + label_bytes))
-    figure = _LINEAGE_HEATMAP_FIGURE_BYTES + int(n_lineages) * _LINEAGE_PANEL_BYTES
-    return kept + 3 * profiles + labels + figure
+    panels = int(n_lineages) * _LINEAGE_PANEL_BYTES
+    return kept + 3 * profiles + labels + panels
 
 
 def _require_loaded(loaded: ArtifactRef, requested: ArtifactRef, label: str) -> None:

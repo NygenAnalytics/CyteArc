@@ -901,16 +901,11 @@ def test_a_repack_at_a_tight_budget_reads_each_band_within_its_reserve(
 
     monkeypatch.setattr(repack_module, "write_dense_in_shard_rows", traced)
     output = tmp_path / "output.zarr"
-    # Each read of part of a source shard also holds the buffer of its file,
-    # 128 KiB from Python 3.14, which the budget leaves room for.
-    from tests.storage_helpers import local_read_buffer
-
-    buffer = local_read_buffer(f"{source}/zarr.json", ranged=True)
     repack_store(
         str(source),
         str(output),
         data_only=True,
-        mem_budget=budget + buffer,
+        mem_budget=budget,
         nthreads=1,
     )
     # The first read also fills Zarr's own buffers.

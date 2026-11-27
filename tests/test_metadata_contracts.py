@@ -1724,14 +1724,14 @@ def test_reads_of_variable_width_text_hold_what_they_charge(
         # One row decodes its chunk, which holds at least the known bytes of
         # the chunk's values, its stored bytes as compressed among them, and
         # is charged no more than twice their most, beside the row itself and
-        # the tens of KiB of objects of Zarr's read.
+        # the allowance of a read of one chunk, 128 KiB and 4 KiB.
         chunk = values[(one[0] // chunks) * chunks :][:chunks].tolist()
         key = stored.metadata.encode_chunk_key((int(one[0]) // chunks,))
         compressed = os.path.getsize(tmp_path / "ids.zarr" / "ids" / key)
         least, most = _chunk_bytes(chunk)
         row = 3 * (16 + _sized_bytes(len(values[one[0]].encode("utf-8"))) * 5 // 4 + 1)
         assert traced["one row"].held >= compressed + least
-        assert traced["one row"].charged <= 2 * most + row + 64 * 1024
+        assert traced["one row"].charged <= 2 * most + row + 132 * 1024
 
 
 def test_a_read_of_variable_width_labels_is_charged_by_their_characters(

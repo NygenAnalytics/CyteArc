@@ -2347,26 +2347,23 @@ def test_a_matrix_market_parse_of_the_largest_values_holds_no_more_than_its_char
             handle.write(text)
         return path
 
-    # Lines of about 60 characters: 6,000 of them, more than the 256 KiB
-    # that pandas reads at a time, in chunks of 10, where pandas' buffers
-    # outweigh the lines; and 120,000 in chunks of 10,000 and 40,000, where
-    # the lines outweigh them.
-    small = matrix_market_header(write(tmp_path / "small.mtx", 6_000))
+    # 120,000 lines of about 60 characters in chunks of 40,000 and 120,000,
+    # where the lines outweigh the buffers that pandas' reader holds whatever
+    # the chunk, which the charge leaves out: about 1.2 MB with pandas 2.2,
+    # more than a tenth of the charge of 10,000 lines.
     large = matrix_market_header(write(tmp_path / "large.mtx", 120_000))
     peaks = {
-        (header.n_entries, chunk_rows): _traced_parse(header, chunk_rows)
-        for header, chunk_rows in ((small, 10), (large, 10_000), (large, 40_000))
+        chunk_rows: _traced_parse(large, chunk_rows) for chunk_rows in (40_000, 120_000)
     }
-    for (n_entries, chunk_rows), peak in peaks.items():
-        header = small if n_entries == small.n_entries else large
-        assert held_within_charge(
-            peak, matrix_market_parse_bytes(header, chunk_rows)
-        ), chunk_rows
+    for chunk_rows, peak in peaks.items():
+        assert held_within_charge(peak, matrix_market_parse_bytes(large, chunk_rows)), (
+            chunk_rows
+        )
     # The charge grows with the lines of a chunk at least as fast as the parse.
     assert held_within_charge(
-        peaks[120_000, 40_000] - peaks[120_000, 10_000],
-        matrix_market_parse_bytes(large, 40_000)
-        - matrix_market_parse_bytes(large, 10_000),
+        peaks[120_000] - peaks[40_000],
+        matrix_market_parse_bytes(large, 120_000)
+        - matrix_market_parse_bytes(large, 40_000),
     )
 
 
@@ -2374,16 +2371,15 @@ def test_a_matrix_market_parse_of_the_largest_values_holds_no_more_than_its_char
     ("order", "shape", "lines"),
     [
         # 150,000 entries, 225,000 once the unordered file splits its counts,
-        # parsed 1,000 lines at a time, where pandas' buffers outweigh the
-        # lines, and in five chunks or more of 30,000, where the lines
-        # outweigh them and each chunk is parsed beside the last one's arrays.
-        ("featureMajor", (1_500, 400), 1_000),
+        # parsed in five chunks or more of 30,000 lines, where the lines
+        # outweigh the buffers that pandas' reader holds whatever the chunk,
+        # which the charge leaves out, and each chunk is parsed beside the
+        # last one's arrays.
         ("featureMajor", (1_500, 400), 30_000),
-        ("unordered", (1_500, 400), 1_000),
         ("unordered", (1_500, 400), 30_000),
-        # Cells of one entry or two, whose map and free slots outweigh the
-        # room that the charge of pandas' buffers leaves.
-        ("featureMajor", (100_000, 4), 1_000),
+        # Cells of one entry or two, whose map and free slots the sort holds
+        # beside the parse.
+        ("featureMajor", (100_000, 4), 30_000),
         # Cells of one entry or two, whose arrays the sort holds beside each
         # block of entries, outweighing the parse.
         pytest.param("unordered", (400_000, 2), 2_000, marks=pytest.mark.slow),

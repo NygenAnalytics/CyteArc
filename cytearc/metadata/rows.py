@@ -144,6 +144,38 @@ def text_width(array: Any, *, ledger: MemoryLedger | None = None) -> int:
     return text_extent(array, None, ledger).characters
 
 
+def text_size(
+    values: np.ndarray, ledger: MemoryLedger | None = None
+) -> tuple[int, int, int]:
+    """Return the characters of NumPy text ``values``, the UTF-8 bytes of the longest value and the widest code point.
+
+    Fixed-width text counts each value at the stored width, which bounds its
+    characters, and its UTF-8 bytes at the widest character stored.
+    Variable-width text counts them as
+    :func:`~cytearc.storage.geometry.text_extent` measures them, charged to
+    ``ledger``.
+    """
+    if values.dtype.kind == "T":
+        extent = text_extent(values, None, ledger)
+        return extent.characterTotal, extent.utf8Bytes, extent.widest
+    width = max(1, values.dtype.itemsize // 4)
+    widest = int(values.view(np.uint32).max()) if values.size else 0
+    utf8 = 1 if widest < 0x80 else 2 if widest < 0x800 else 3 if widest < 0x10000 else 4
+    return len(values) * width, width * utf8, widest
+
+
+def text_strings_bytes(values: np.ndarray, ledger: MemoryLedger | None = None) -> int:
+    """Return the bytes of NumPy text ``values`` as Python strings and their references, as :func:`text_size` measures them.
+
+    pandas makes them of fixed-width and variable-width text before it hashes
+    it, as ``astype(object)`` does.
+    """
+    characters, _, widest = text_size(values, ledger)
+    return object_array_bytes(len(values)) + python_text_bytes(
+        len(values), characters, widest=widest
+    )
+
+
 def text_row_selection_parts(
     array: Any, *, ledger: MemoryLedger | None = None
 ) -> tuple[int, int]:
@@ -328,16 +360,12 @@ def _kept_bytes(
 
     NumPy counts a value of variable-width text at its 16-byte element; the
     geometry counts its characters too, as ``ArrayGeometry.rowsBytes`` counts
-    rows, beside what the read leaves of its objects once it returns, as
-    ``ArrayGeometry.leftoverBytes`` counts them, which the strings that such
-    a read makes, charged by their characters, leave no room for; text read
-    from an array without chunks is measured itself.
+    rows; text read from an array without chunks is measured itself.
     """
     if values.dtype.kind != "T":
         return int(values.nbytes)
     if geometry is not None:
-        rows = values.shape[0] if values.ndim else 1
-        return geometry.rowsBytes(rows) + geometry.leftoverBytes(rows)
+        return geometry.rowsBytes(values.shape[0] if values.ndim else 1)
     return text_extent(values, None, ledger).keptBytes()
 
 
@@ -375,8 +403,7 @@ def row_read_bytes(geometry: ArrayGeometry | None, n_rows: int) -> int:
     n_rows = int(n_rows)
     if geometry is None:
         return n_rows * ROW_INDEX_BYTES
-    # Each band is a read of its own, of a block of its rows, and what the
-    # earlier bands' reads leave stays while the last one runs.
+    # Each band is a read of its own, of a block of its rows.
     bands = min(n_rows, geometry.bandCount())
     ordering = n_rows * ROW_INDEX_BYTES + bands * ROW_BLOCK_BYTES
     band_rows = min(n_rows, geometry.axisChunk(0))
@@ -391,7 +418,6 @@ def row_read_bytes(geometry: ArrayGeometry | None, n_rows: int) -> int:
         + bands * ROW_BLOCK_BYTES
         + geometry.bandReadBytes(returned_rows, operation_concurrency())
         + (geometry.rowsBytes(band_rows) if geometry.shards is None else 0)
-        + geometry.bandsLeftoverBytes(bands - 1)
     )
     return max(ordering, reading)
 

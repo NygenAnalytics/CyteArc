@@ -97,7 +97,7 @@ from ..storage.types import as_zarr_array, as_zarr_group
 from ..storage.virtual_arrays import run_array_read
 from ..utils.arguments import bool_argument
 from ..utils.logging import logger
-from ..utils.memory_budget import MemoryBudgetError
+from ..utils.memory_budget import READ_ALLOWANCE_BYTES, MemoryBudgetError
 from .source_cache import CachedSourceStore, SourceCache, new_source_cache
 
 if TYPE_CHECKING:
@@ -418,12 +418,11 @@ def _prefetch_counts(
     Up to ``read_workers`` fetches run at once, and each one that ends lets
     the next start, so a slow shard holds back nothing but itself. Shards
     start in order, each when the cache has room for it beside the fetches in
-    flight and the fetches fit ``memory_bytes``.
+    flight and the fetches fit ``memory_bytes``: each fetch in flight holds
+    its shard twice and the allowance of a read in flight, and each shard
+    fetched keeps its key and entry.
     """
     from .reader import shard_prefetch_plan
-
-    if memory_bytes <= 4096:
-        return
 
     def requests() -> Iterator[tuple[CachedSourceStore, str, int]]:
         for segment in segments:
@@ -451,7 +450,7 @@ def _prefetch_counts(
     async def prefetch() -> None:
         pending = requests()
         seen: set[tuple[int, str]] = set()
-        descriptor_bytes = 4096
+        descriptor_bytes = 0
         in_flight = 0
         flight_memory = 0
         taken = started = 0
@@ -485,7 +484,7 @@ def _prefetch_counts(
             while not stopped and (request := take()) is not None:
                 turn, store, key, limit = request
                 retained_bytes = 4 * len(key) + 512
-                task_bytes = 2 * (limit + 1) + 1024
+                task_bytes = 2 * (limit + 1) + READ_ALLOWANCE_BYTES
                 async with changed:
                     # Shards start in their order, each once it fits beside the
                     # fetches in flight; with none in flight, one that does not

@@ -269,6 +269,7 @@
   "tests/test_paris_persistence_helpers.py": 0.1,
   "tests/test_paris_quality_gate.py": 0.3,
   "tests/test_pca_reduction.py": 1.2,
+  "tests/test_per_item_memory_costs.py": 46.7,
   "tests/test_perturbation_associations.py": 34.1,
   "tests/test_perturbation_call_guides.py": 19.9,
   "tests/test_perturbation_calling.py": 0.5,

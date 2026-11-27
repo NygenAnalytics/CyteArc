@@ -880,11 +880,8 @@ class StoredFragmentSource:
                 f"fragment metadata exceeds maxMetadataBytes={limits.maxMetadataBytes}"
             )
         self.metadataBytes = metadata_bytes
-        overhead = 4096 if compression == "packed" else 0
         bytes_per_record = 128
-        minimum_block_bytes = (
-            overhead + bytes_per_record * _FRAGMENT_BLOCK_SAFETY_FACTOR
-        )
+        minimum_block_bytes = bytes_per_record * _FRAGMENT_BLOCK_SAFETY_FACTOR
         if limits.maxBlockBytes < minimum_block_bytes:
             raise ResourceLimitError(
                 "fragment decoding requires at least "
@@ -894,12 +891,12 @@ class StoredFragmentSource:
             limits.compressedChunkNnz,
             max(
                 1,
-                (limits.maxBlockBytes - overhead)
+                limits.maxBlockBytes
                 // (bytes_per_record * _FRAGMENT_BLOCK_SAFETY_FACTOR),
             ),
             max(1, self._recordCount),
         )
-        self._blockWorkingBytes = overhead + self.blockRecords * bytes_per_record
+        self._blockWorkingBytes = self.blockRecords * bytes_per_record
         self._validate_records()
 
     def _validate_pointers(self) -> None:

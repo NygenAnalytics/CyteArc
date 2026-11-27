@@ -342,12 +342,9 @@ def test_a_label_artifact_too_large_for_the_budget_is_refused_in_the_ledgers_wor
     every_cell = store.snapshot_cell_selection("every_cell")
     short = store.snapshot_cluster_labels("cluster", cell_selection=every_cell)
     long = store.snapshot_cluster_labels("long", cell_selection=every_cell)
-    # Room for the short labels beside the objects of Zarr's read of each
-    # array, 52 KiB, and the buffer of its file where Python reads it through
-    # one, and not for the long ones.
-    from tests.storage_helpers import local_read_buffer
-
-    budget = 4_096 + 53_248 + local_read_buffer(path / "zarr.json", ranged=False)
+    # Room for the short labels beside the allowance of a read of one chunk,
+    # 128 KiB and 4 KiB for the chunk, and not for the long ones.
+    budget = 4_096 + 132 * 1024
     grouped = _group(store, groups=short, ledger=MemoryLedger(budget, "Grouping cells"))
     assert grouped.codes.tolist() == [0, 1] * 4
 
@@ -489,7 +486,7 @@ def test_variable_width_labels_group_and_sample_cells_as_fixed_width_labels_do(
     )
     np.testing.assert_array_equal(with_variable.codes, with_fixed.codes)
     assert with_variable.names == with_fixed.names
-    assert held_while_numbered[-1] >= strings
+    assert held_within_charge(strings, held_while_numbered[-1])
     with_numbers = cell_samples.read_cell_samples(
         store, MemoryLedger(None, "Samples"), "numbers", every, reason="r"
     )

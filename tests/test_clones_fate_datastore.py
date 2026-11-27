@@ -801,11 +801,13 @@ def test_fate_bias_refuses_a_small_budget_before_it_writes(copied, monkeypatch) 
     n_early, n_late = int(EARLY.sum()), int(LATE.sum())
     # A fate of its own for each late cell, named by three characters, makes
     # the measurement the largest step, about 72 kB, which 64 kB cannot hold
-    # beside the steps before it, about 55 kB at most with the objects of
-    # Zarr's reads; nothing is written.
+    # beside the steps before it; nothing is written. The allowance of each
+    # read, which outweighs so few cells, is set aside, so the arrays that
+    # grow with them decide.
     fates = _own_labels(store, LATE)
     options = {"groups": fates, "early": early, "late": late}
     listed = store.artifacts.list(kind="clone_fate_bias", scope="datastore")
+    monkeypatch.setattr("cytearc.storage.geometry.READ_ALLOWANCE_BYTES", 0)
     monkeypatch.setattr(store, "memoryBytes", 64_000)
     with pytest.raises(MemoryBudgetError, match="into fewer fates") as refused:
         store.clones.fate_bias(clones, **options)

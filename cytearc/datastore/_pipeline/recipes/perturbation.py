@@ -18,7 +18,11 @@ import numpy as np
 import pandas as pd
 
 from ....assay import RNAassay
-from ....metadata.rows import read_metadata_rows_chunkwise, read_rows
+from ....metadata.rows import (
+    read_metadata_rows_chunkwise,
+    read_rows,
+    text_strings_bytes,
+)
 from ....perturbation.associations import covariate_columns
 from ....perturbation.guide_calls import validated_guide_ids
 from ....perturbation.labels import GuideTargets, guide_targets, label_settings
@@ -27,7 +31,7 @@ from ....storage.artifacts import ArtifactRef, inspect_artifact
 from ....storage.types import as_zarr_group
 from ....utils.memory_budget import (
     MemoryLedger,
-    hash_table_bytes,
+    index_lookup_bytes,
 )
 from ..._operations.cell_barcodes import BarcodeFile, barcode_files, derived_id_bytes
 from ..._operations.perturbation_guides import (
@@ -36,7 +40,6 @@ from ..._operations.perturbation_guides import (
     _parse_call_file,
     _read_guide_ids,
     _refuse_shared_cells,
-    _strings_bytes,
 )
 from ..._operations.cell_samples import require_cell_column
 from ..executor import COORDINATES, PlannedStage, RecipePlan, RunState
@@ -579,14 +582,14 @@ def _check_call_file(
             + CALL_FROM_COUNTS
         )
     n_rows = len(calls.barcodes)
-    # The cells' IDs as Python strings in pandas' hash table of them, the
-    # cell ID that each barcode names, and each barcode's cell.
+    # The cells' IDs as Python strings in a pandas index of them, the cell
+    # ID that each barcode names, and each barcode's cell, which the index
+    # finds.
     ledger.peak(
         "finding the call file's barcodes among the run's cells",
-        _strings_bytes(cell_ids, ledger)
-        + hash_table_bytes(len(cell_ids))
-        + derived_id_bytes(call_file, n_rows, size.n_bytes)
-        + 8 * n_rows,
+        text_strings_bytes(cell_ids, ledger)
+        + index_lookup_bytes(len(cell_ids), n_rows)
+        + derived_id_bytes(call_file, n_rows, size.n_bytes),
     )
     file_ids, named = call_file.cell_ids(calls.barcodes)
     row_cells = pd.Index(cell_ids).get_indexer(file_ids)

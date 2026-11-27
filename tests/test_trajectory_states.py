@@ -1510,8 +1510,8 @@ def test_a_search_on_a_branching_graph_holds_no_more_than_its_estimate() -> None
     held, charged = _traced_search(graph, direction, 3, 10.0)
 
     assert held_within_charge(held, charged)
-    # Beside its fixed mebibyte, the estimate stays close to what is held.
-    assert held >= 0.6 * (charged - states_module._SMALL_ARRAY_BYTES)
+    # The estimate stays close to what is held.
+    assert held >= 0.6 * charged
 
 
 def test_the_costliest_eigen_solve_grows_no_faster_than_its_estimate() -> None:
@@ -1535,8 +1535,8 @@ def test_the_costliest_eigen_solve_grows_no_faster_than_its_estimate() -> None:
 
     for held, charged in traced:
         assert held_within_charge(held, charged)
-    # The growth from 2,400 to 7,200 cells leaves out the fixed mebibyte, so
-    # every per-cell term of the eigen-solve counts.
+    # The growth from 2,400 to 7,200 cells leaves out what a search holds
+    # whatever its cells, so every per-cell term of the eigen-solve counts.
     (small_held, small_charged), (large_held, large_charged) = traced
     assert held_within_charge(large_held - small_held, large_charged - small_charged)
 
@@ -1578,9 +1578,5 @@ def test_the_simplex_of_many_states_stays_within_the_estimate(
     # the estimate of a graph without entries beside its 64 bytes a cell.
     simplex = 8 * 226 * 225
     assert held > simplex + 2 * basis.nbytes
-    charged = (
-        search_bytes(n_cells, 0, 0, n_states, 1)
-        - 64 * n_cells
-        - states_module._SMALL_ARRAY_BYTES
-    )
+    charged = search_bytes(n_cells, 0, 0, n_states, 1) - 64 * n_cells
     assert held_within_charge(held, charged)

@@ -129,13 +129,8 @@ def _listed(collapsed: CollapsedPhylogeny, kinds: np.ndarray) -> np.ndarray:
 
 
 def _drawing_bytes(collapsed: CollapsedPhylogeny) -> int:
-    """What drawing ``collapsed`` holds: its rows, legend entries and texts."""
-    kinds = _kinds(collapsed)
-    return tree_drawing_bytes(
-        len(collapsed.nodes),
-        n_entries=len(_listed(collapsed, kinds)),
-        n_texts=int(np.count_nonzero(_counted(collapsed, kinds))),
-    )
+    """What drawing ``collapsed`` holds for its rows."""
+    return tree_drawing_bytes(len(collapsed.nodes))
 
 
 def _cut_words(collapsed: Any) -> str:

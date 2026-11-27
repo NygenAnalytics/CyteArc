@@ -117,7 +117,7 @@ from ...utils.digest import file_sha256
 from ...utils.logging import logger
 from ...utils.memory_budget import (
     MemoryLedger,
-    hash_table_bytes,
+    index_lookup_bytes,
     object_array_bytes,
     python_text_bytes,
 )
@@ -1618,15 +1618,12 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         own = read_whole_text(
             ledger, group, "clonotype_ids", item="the clonotypes' own labels"
         )
-        # pandas' hash table of the labels, each name's place among them, a
-        # flag for each clonotype, and for each clonotype within a type the
-        # flag of its clonotype and its position.
+        # A pandas index of the labels, which finds each name's place among
+        # them, a flag for each clonotype, and for each clonotype within a
+        # type the flag of its clonotype and its position.
         ledger.peak(
             "finding the clonotypes named",
-            hash_table_bytes(len(own))
-            + 8 * len(unknown)
-            + len(own)
-            + 9 * len(clonotypes),
+            index_lookup_bytes(len(own), len(unknown)) + len(own) + 9 * len(clonotypes),
         )
         named = pd.Index(own, dtype=object).get_indexer(unknown)
         wanted = np.zeros(len(own), dtype=bool)
@@ -1740,9 +1737,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             )
             what = f"the IDs of {n_clonotypes} clonotypes"
             stored = read_whole_text(ledger, group, "clonotype_ids", item=what)
-        ledger.peak(
-            f"the index of {what}", hash_table_bytes(len(stored)) + 8 * len(given)
-        )
+        ledger.peak(f"the index of {what}", index_lookup_bytes(len(stored), len(given)))
         codes = np.asarray(
             pd.Index(stored, dtype=object).get_indexer(given), dtype=np.int64
         )
@@ -1890,16 +1885,16 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             item="the positions of the clones' cells",
         )
         n_measured = len(measured)
-        # Each measured cell's place among the clones' cells, found through
-        # pandas' hash table of their positions and its copy of them; and
-        # each measured cell's clone and labels.
+        # Each measured cell's place among the clones' cells, found through a
+        # pandas index of their positions; and each measured cell's clone and
+        # labels.
         ledger.hold(
             "each measured cell's clone and the labels its clone keeps apart",
             (9 + 8 * len(kept_apart)) * n_measured,
         )
         ledger.peak(
             "matching the clones' cells to the measured cells",
-            hash_table_bytes(len(held)) + 8 * len(held) + 8 * n_measured,
+            index_lookup_bytes(len(held), n_measured, objects=False),
         )
         at = pd.Index(held).get_indexer(measured)
         found = at >= 0

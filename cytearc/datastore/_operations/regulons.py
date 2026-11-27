@@ -30,7 +30,7 @@ from ...utils.arguments import (
 )
 from ...utils.arrays import array_digest
 from ...utils.logging import logger
-from ...utils.memory_budget import MemoryBudgetError, MemoryLedger, hash_table_bytes
+from ...utils.memory_budget import MemoryBudgetError, MemoryLedger, factorize_bytes
 
 if TYPE_CHECKING:
     from ...features.enrichment.results import EnrichmentResult
@@ -98,6 +98,46 @@ def _grn_slot_matches(group: zarr.Group, attrs: dict[str, Any]) -> bool:
 
 # Bytes of one int64 row or position.
 _INDEX_BYTES = np.dtype(np.int64).itemsize
+
+
+def _group_codes(
+    ledger: MemoryLedger, labels: np.ndarray, missing_mask: np.ndarray | None
+) -> tuple[list[Any], np.ndarray]:
+    """Return the groups in the natural order of their labels and each cell's group, keeping the groups charged.
+
+    pandas makes a Python string of each label of NumPy text, fixed or
+    variable in width, before it hashes the labels to find the distinct
+    ones.
+
+    Raises:
+        ValueError: If a cell has no label.
+        MemoryBudgetError: If coding the labels does not fit the budget.
+    """
+    from ...clustering.connectivity import label_codes
+    from ...metadata.rows import text_strings_bytes
+    from ...metadata.selection import valid_category_mask
+    from ...utils.arrays import sort_categories
+
+    n_cells = len(labels)
+    strings = text_strings_bytes(labels, ledger) if labels.dtype.kind in "UT" else 0
+    # Whether each label is missing, the labels as Python strings, what pandas
+    # holds to find the distinct labels, and the distinct labels or each
+    # label's code.
+    ledger.peak(
+        f"coding the labels of {n_cells} cells",
+        n_cells + strings + factorize_bytes(n_cells) + _INDEX_BYTES * n_cells,
+    )
+    missing = ~valid_category_mask(labels, missing_mask=missing_mask)
+    if missing.any():
+        raise ValueError(
+            f"groups holds no label for {int(missing.sum())} of the "
+            f"{n_cells} cells to score; pass a cell_selection of the "
+            "labeled cells"
+        )
+    categories = sort_categories(pd.unique(labels).tolist())
+    codes = label_codes(labels, categories)
+    ledger.hold(f"the groups of {n_cells} cells", codes.nbytes)
+    return categories, codes
 
 
 def _scored_rows(
@@ -699,14 +739,8 @@ class _RegulonOperationsMixin(_RegulonOperationsBase):
                 positions, labels, and codes, the sums, and a block of one
                 cell's scores beside one stored chunk's decode.
         """
-        from ...clustering.connectivity import label_codes
-        from ...metadata.selection import (
-            CellField,
-            resolve_grouping,
-            valid_category_mask,
-        )
+        from ...metadata.selection import CellField, resolve_grouping
         from ...regulons.specificity import specificity_bytes, specificity_scores
-        from ...utils.arrays import sort_categories
 
         if not isinstance(groups, ArtifactRef | str):
             raise TypeError("groups must be an ArtifactRef or a cell column name")
@@ -727,24 +761,9 @@ class _RegulonOperationsMixin(_RegulonOperationsBase):
                 "cells to score; compute it on cells that include them, or pass "
                 "a cell_selection of the cells that it labels"
             ) from error
-        labels = np.asarray(resolved.labels)
-        n_cells = len(labels)
-        # Whether each label is missing, pandas' hash table of the labels,
-        # and each label's code.
-        ledger.peak(
-            f"coding the labels of {n_cells} cells",
-            n_cells + hash_table_bytes(n_cells) + _INDEX_BYTES * n_cells,
+        categories, codes = _group_codes(
+            ledger, np.asarray(resolved.labels), resolved.missing_mask
         )
-        missing = ~valid_category_mask(labels, missing_mask=resolved.missing_mask)
-        if missing.any():
-            raise ValueError(
-                f"groups holds no label for {int(missing.sum())} of the "
-                f"{n_cells} cells to score; pass a cell_selection of the "
-                "labeled cells"
-            )
-        categories = sort_categories(pd.unique(labels).tolist())
-        codes = label_codes(labels, categories)
-        ledger.hold(f"the groups of {n_cells} cells", codes.nbytes)
         rows = (
             None
             if cell_selection is None

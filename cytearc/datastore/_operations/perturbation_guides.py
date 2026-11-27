@@ -16,7 +16,13 @@ from ...metadata.arguments import (
 )
 from ...metadata.artifacts import cell_data_write_bytes, write_cell_data_artifact
 from ...metadata.membership import cell_sources_column
-from ...metadata.rows import read_rows, read_text_rows, read_whole
+from ...metadata.rows import (
+    read_rows,
+    read_text_rows,
+    read_whole,
+    text_size,
+    text_strings_bytes,
+)
 from ...metadata.selection import (
     CellSelectionRead,
     cell_value_array,
@@ -92,7 +98,7 @@ from ...utils.logging import logger
 from ...utils.memory_budget import (
     MemoryLedger,
     fixed_text_bytes,
-    hash_table_bytes,
+    index_lookup_bytes,
     memory_refusal,
     object_array_bytes,
     python_text_bytes,
@@ -634,34 +640,6 @@ def _warn_guide_calls(
     )
 
 
-def _strings_bytes(values: np.ndarray, ledger: MemoryLedger | None = None) -> int:
-    """Return the bytes of text ``values`` as Python strings and their references, as :func:`_text_size` measures them."""
-    characters, _, widest = _text_size(values, ledger)
-    return object_array_bytes(len(values)) + python_text_bytes(
-        len(values), characters, widest=widest
-    )
-
-
-def _text_size(
-    values: np.ndarray, ledger: MemoryLedger | None = None
-) -> tuple[int, int, int]:
-    """Return the characters of text ``values``, the UTF-8 bytes of the longest value and the widest code point.
-
-    Fixed-width text counts each value at the stored width, which bounds its
-    characters, and its UTF-8 bytes at the widest character stored.
-    Variable-width text, which another tool can store, counts them as
-    :func:`~cytearc.storage.geometry.text_extent` measures them, charged to
-    ``ledger``.
-    """
-    if values.dtype.kind == "T":
-        extent = text_extent(values, None, ledger)
-        return extent.characterTotal, extent.utf8Bytes, extent.widest
-    width = max(1, values.dtype.itemsize // 4)
-    widest = int(values.view(np.uint32).max()) if values.size else 0
-    utf8 = 1 if widest < 0x80 else 2 if widest < 0x800 else 3 if widest < 0x10000 else 4
-    return len(values) * width, width * utf8, widest
-
-
 def _text_copy_bytes(values: np.ndarray, ledger: MemoryLedger | None = None) -> int:
     """Return the bytes of a copy of text ``values``, or of some of them, as NumPy holds it.
 
@@ -693,14 +671,14 @@ def _frame_bytes(
     beside it, and their gathers and copies.
     """
     n_ids = len(cell_ids)
-    characters, longest, widest = _text_size(cell_ids, ledger)
+    characters, longest, widest = text_size(cell_ids, ledger)
     total = object_array_bytes(n_ids) + python_text_bytes(
         n_ids, characters, widest=widest
     )
     entry = 8 + longest
     for values in arrays.values():
         if values.ndim == 1 and values.dtype.kind == "U":
-            total += object_array_bytes(len(values)) + _strings_bytes(values)
+            total += object_array_bytes(len(values)) + text_strings_bytes(values)
         elif values.ndim == 1:
             total += 2 * values.nbytes
     n_entries = int(np.count_nonzero(arrays[entries] >= 0))
@@ -801,12 +779,13 @@ def _guide_positions(
 ) -> np.ndarray:
     """Find each call's guide among the assay's guides, keeping the positions charged.
 
-    The lookup is pandas' hash table of the guide IDs, beside each call's
-    position.
+    The lookup is a pandas index of the guide IDs, as
+    :func:`~cytearc.utils.memory_budget.index_lookup_bytes` counts it, which
+    gives each call's position.
     """
     ledger.peak(
         "finding the called guides",
-        hash_table_bytes(len(guide_ids)) + 8 * len(features),
+        index_lookup_bytes(len(guide_ids), len(features)),
     )
     positions = _called_guide_positions(features, guide_ids, assay)
     ledger.hold("the called guides' positions", positions.nbytes)

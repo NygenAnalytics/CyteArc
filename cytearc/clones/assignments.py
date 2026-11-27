@@ -23,7 +23,7 @@ from ..utils.arrays import sort_categories, sort_categories_bytes
 from ..utils.arguments import quoted_value
 from ..utils.memory_budget import (
     MemoryLedger,
-    hash_table_bytes,
+    factorize_bytes,
     object_array_bytes,
     python_text_bytes,
 )
@@ -90,12 +90,13 @@ _PROBABILITY_BYTES = 8
 # arguments and the labels it keeps: the masks of the rows kept, their cells
 # and labels, the labels' positions and codes, the rows' order and their
 # sorted copies, and the first row, the length, the cell and the clone of
-# each cell's rows, beside pandas' hash table of the labels.
+# each cell's rows, beside pandas' factorization of the labels.
 _ASSIGNMENT_BYTES_PER_ROW = 76
 #: The most bytes that CloneAssigner.add holds for each row, beside its
-#: arguments and the labels it keeps: what it works with, and pandas' hash
-#: table of the labels at its emptiest, 42 bytes a row.
-CLONE_ASSIGNMENT_ROW_BYTES = _ASSIGNMENT_BYTES_PER_ROW + 42
+#: arguments and the labels it keeps: what it works with, and pandas'
+#: factorization of the labels while its hash table is emptiest, 103 bytes a
+#: row.
+CLONE_ASSIGNMENT_ROW_BYTES = _ASSIGNMENT_BYTES_PER_ROW + 103
 # Bytes of each distinct clone label beside its text: its entry in the table
 # that finds its code, its code and its slots in the lists of labels and of
 # their sources, while the table grows.
@@ -304,11 +305,12 @@ class CloneAssignment:
 def clone_assignment_bytes(n_rows: int) -> int:
     """The most bytes that :meth:`CloneAssigner.add` holds for ``n_rows`` rows, beside its arguments and the labels it keeps.
 
-    What it works with for each row, and pandas' hash table of the rows'
-    labels, which pandas sizes for every row.
+    What it works with for each row, and what pandas holds to factorize the
+    rows' labels, as :func:`~cytearc.utils.memory_budget.factorize_bytes`
+    counts it for labels that may all differ.
     """
     n_rows = int(n_rows)
-    return _ASSIGNMENT_BYTES_PER_ROW * n_rows + hash_table_bytes(n_rows)
+    return _ASSIGNMENT_BYTES_PER_ROW * n_rows + factorize_bytes(n_rows)
 
 
 class CloneAssigner:

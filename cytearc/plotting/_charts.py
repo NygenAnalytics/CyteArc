@@ -60,10 +60,8 @@ _NAME_PITCH = 1.4
 _WEDGE_EXTENT = 0.9
 _TREE_LINE_WIDTH = 0.8
 _TREE_POINT_AREA = 9.0
-# What drawing a tree holds: each legend entry; each text; and for each node
-# drawn its branch, wedge and color, and the figure's table and labels of it.
-_TREE_BYTES_PER_ENTRY = 30 * 1024
-_TREE_BYTES_PER_TEXT = 4 * 1024
+# What drawing a tree holds for each node drawn: its branch, wedge and color,
+# and the figure's table and labels of it.
 _TREE_BYTES_PER_ROW = 448
 
 
@@ -781,18 +779,13 @@ def capped_counts(values: Any, cap: int) -> pd.Series:
     )
 
 
-def tree_drawing_bytes(n_rows: int, *, n_entries: int, n_texts: int) -> int:
-    """What :func:`draw_tree` holds to draw ``n_rows`` nodes, with the figure it draws in.
+def tree_drawing_bytes(n_rows: int) -> int:
+    """What :func:`draw_tree` holds to draw ``n_rows`` nodes.
 
-    ``n_entries`` counts the categories of the wedges, of which the legend
-    lists at most ``LEGEND_SIDE_MAX_ENTRIES``, and ``n_texts`` the wedges that
-    say something.
+    Its legend of at most ``LEGEND_SIDE_MAX_ENTRIES`` entries, its texts and
+    the figure it draws in are left out.
     """
-    return (
-        _TREE_BYTES_PER_ENTRY * min(int(n_entries), LEGEND_SIDE_MAX_ENTRIES)
-        + _TREE_BYTES_PER_TEXT * int(n_texts)
-        + _TREE_BYTES_PER_ROW * int(n_rows)
-    )
+    return _TREE_BYTES_PER_ROW * int(n_rows)
 
 
 def draw_tree(

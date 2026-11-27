@@ -29,8 +29,8 @@ from ..utils.arguments import integer_argument
 from ..utils.arrays import sort_categories, sort_categories_bytes
 from ..utils.memory_budget import (
     MemoryLedger,
+    factorize_bytes,
     fixed_text_bytes,
-    hash_table_bytes,
     object_array_bytes,
     python_text_bytes,
 )
@@ -45,6 +45,7 @@ from .rows import (
     read_metadata_rows,
     read_rows,
     read_rows_bytes,
+    text_strings_bytes,
 )
 
 LookupBy = Literal["name", "id", "index"]
@@ -410,9 +411,10 @@ def valid_category_mask(
 #: slots in the lists of the distinct values, their texts and whether they
 #: name a category, and its entry in the table that keeps them in order.
 _NAMING_BYTES_PER_LABEL = 50
-# Coding values holds, beside pandas' hash table, each value's code from
-# pandas, the distinct values' references and, once they are named, whether
-# each value holds a label, the codes and their two gathers.
+# Coding values holds, beside what pandas works with to factorize them, each
+# value's code from pandas, the distinct values' references and, once they
+# are named, whether each value holds a label, the codes and their two
+# gathers.
 _FACTORIZE_BYTES_PER_VALUE = 16
 _CODING_BYTES_PER_VALUE = 33
 
@@ -463,9 +465,12 @@ def category_codes(
     value takes its category's code, with the same result as its labels.
 
     With ``ledger``, what coding holds is charged to it before each step:
-    pandas' hash table of the values, as
-    :func:`~cytearc.utils.memory_budget.hash_table_bytes` counts it for every
-    value, beside each value's code and the distinct values' references; and
+    what pandas holds to factorize the values, as
+    :func:`~cytearc.utils.memory_budget.factorize_bytes` counts it for values
+    that may all differ, beside each value's code, the distinct values'
+    references and, for NumPy text, the Python string that pandas makes of
+    each value, as :func:`~cytearc.metadata.rows.text_strings_bytes` counts
+    it; and
     then the codes beside naming and ordering the distinct labels, from their
     texts' characters and widest character, as
     :func:`~cytearc.utils.memory_budget.python_text_bytes` counts them, and
@@ -496,13 +501,12 @@ def category_codes(
         raise ValueError("category values must be one-dimensional")
     n_values = len(array)
     if ledger is not None:
-        # Distinct values of an object array are gathered as references.
-        gathered = object_array_bytes(n_values) if array.dtype == object else 0
+        # pandas hashes NumPy text, fixed or variable in width, as a Python
+        # string of each value.
+        strings = text_strings_bytes(array, ledger) if array.dtype.kind in "UT" else 0
         ledger.peak(
             f"coding {n_values} labels",
-            hash_table_bytes(n_values)
-            + _FACTORIZE_BYTES_PER_VALUE * n_values
-            + gathered,
+            strings + factorize_bytes(n_values) + _FACTORIZE_BYTES_PER_VALUE * n_values,
         )
     try:
         factorized, distinct = pd.factorize(array, use_na_sentinel=True)
@@ -517,7 +521,7 @@ def category_codes(
                 f"coding {n_values} labels by their text",
                 object_array_bytes(n_values)
                 + python_text_bytes(n_values, characters, widest=0x10FFFF)
-                + hash_table_bytes(n_values)
+                + factorize_bytes(n_values)
                 + (_FACTORIZE_BYTES_PER_VALUE * n_values)
                 + object_array_bytes(n_values),
             )

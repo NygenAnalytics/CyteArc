@@ -89,9 +89,6 @@ _SEPARATION_TOLERANCE = 1e-12
 #: The smallest squared distance from the span of the corners found so far,
 #: in units of the last corner's length, at which a row is a new corner.
 _SPAN_TOLERANCE = 1e-24
-#: What a search holds whatever its cells and states: NumPy's buffers for
-#: reductions and the small arrays of each step, measured at under 0.2 MiB.
-_SMALL_ARRAY_BYTES = 2**20
 #: How close the last eigenvalue kept and the first one left out may come,
 #: relative to the latter's distance from one, before they count as tied.
 #: Identical parts of a walk tie them to 1e-9; on the pancreas walks and the
@@ -664,8 +661,7 @@ def search_bytes(
       ``name_width`` characters written for every cell.
 
     Forming the basis holds at least 104 bytes a cell less than the
-    eigen-solve, so it never decides. A mebibyte more covers NumPy's buffers
-    for reductions and the small arrays of each step.
+    eigen-solve, so it never decides.
     """
     n, m = int(n_cells), int(n_states)
     k = m + 1
@@ -678,4 +674,4 @@ def search_bytes(
     optimizing = 32 * n * m + 8 * n + 24 * free * (free + 1)
     writing = 28 * n * m + 4 * n * int(name_width) + 2 * n
     steps = max(solving, optimizing, writing)
-    return int(graph_bytes) + 64 * n + max(taking, walk + steps) + _SMALL_ARRAY_BYTES
+    return int(graph_bytes) + 64 * n + max(taking, walk + steps)

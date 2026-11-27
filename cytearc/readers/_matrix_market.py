@@ -37,20 +37,6 @@ __all__ = [
 
 # The buffer through which a parse reads its file.
 _FILE_BUFFER_BYTES = 128 * 1024
-# What pandas' C reader holds from its first chunk on, whatever the chunk
-# size: its buffers, the text of the 256 KiB that it reads at a time, decoded,
-# and the buffer through which the parse reads its file. Parsing plain and
-# gzip-compressed files of short and wide lines 10 entries at a time,
-# tracemalloc traced at most 1.33 MB with pandas 2.2.3, the oldest supported
-# release, on Python 3.13, and 1.40 MB with pandas 3.0.6 on Python 3.13 and
-# 3.14, the same with a file system that reports a block of 4 MiB. The charge
-# leaves room for the zlib builds and platforms that differ from the one
-# measured.
-_READER_BYTES = 1_500_000
-# pandas before 3.0 keeps three floats of 24 bytes for each chunk it reads,
-# until the parse ends, in a list of 8-byte slots that grows by up to an
-# eighth more.
-_CHUNK_BYTES = 3 * (24 + 9)
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,16 +206,14 @@ def matrix_market_parse_bytes(header: MatrixMarketHeader, chunk_rows: int) -> in
     """Return what parsing a Matrix Market file ``chunk_rows`` entries at a time
     holds, as a count reader parses it.
 
-    pandas' C reader holds its buffers and the text that it reads at a time
-    from the first chunk on, whatever the chunk size, and pandas before 3.0
-    keeps three floats for each chunk that it has read until the parse ends. A
-    chunk holds at most ``chunk_rows`` entries and never more than the file
+    A chunk holds at most ``chunk_rows`` entries and never more than the file
     declares: for each, an int64 row and column and a uint64 value in four
     copies, as the parse and a reader that sums duplicate coordinates make
     them, a mask, and the Python objects of
-    :func:`matrix_market_entry_object_bytes`. pandas 3.0 keeps no floats and
-    makes no such objects, so these bytes are the worst case of the supported
-    versions.
+    :func:`matrix_market_entry_object_bytes`. pandas 3.0 makes no such
+    objects, so these bytes are the worst case of the supported versions.
+    What pandas' reader holds whatever the chunk size, its buffers and the
+    text that it reads at a time, is left out.
 
     Args:
         header: The matrix's header, from :func:`matrix_market_header`.
@@ -241,9 +225,8 @@ def matrix_market_parse_bytes(header: MatrixMarketHeader, chunk_rows: int) -> in
         + np.dtype(np.bool_).itemsize
         + matrix_market_entry_object_bytes(header)
     )
-    chunks = -(-header.n_entries // int(chunk_rows))
     entries = min(int(chunk_rows), header.n_entries)
-    return _READER_BYTES + _CHUNK_BYTES * chunks + entries * entry_bytes
+    return entries * entry_bytes
 
 
 def _entry_fields(field: str) -> str:

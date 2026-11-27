@@ -51,6 +51,7 @@ from .test_trajectory_record_paths import (
     _trajectory_store,
     _y_graph,
 )
+from tests.memory_helpers import climb_refusals
 from tests.storage_helpers import by_cell_id
 
 _SINKS = ["A", "B"]
@@ -883,11 +884,12 @@ def test_a_map_directed_by_a_score_is_refused_a_small_budget_before_its_graph_is
     }
     maps = _fate_maps(store)
     reads = _count_calls(monkeypatch, store, "_store_to_sparse")
-    # Forming the union of the store's graph of 725 edges holds 63,820 bytes
-    # beside the load's 65,536, more than numbering its components, as the
-    # membership tests derive, beside the positions of its 145 cells, 1,160
-    # bytes, and up to a float64 score and a missing flag a cell, 1,305.
-    needed = 63_820 + 65_536 + 1_160 + 1_305
+    # Loading the store's graph of 725 edges holds 163,556 bytes with the
+    # allowance of its read, more than forming its union or numbering its
+    # components, as the membership tests derive, beside the positions of its
+    # 145 cells, 1,160 bytes, and up to a float64 score and a missing flag a
+    # cell, 1,305.
+    needed = 163_556 + 1_160 + 1_305
     work = {
         "fate": "Mapping fates",
         "lineage_membership": "Calling lineage membership",
@@ -895,12 +897,12 @@ def test_a_map_directed_by_a_score_is_refused_a_small_budget_before_its_graph_is
     # Mapping the fates holds the union of 1,450 entries, 17,984 bytes, 64
     # bytes for each of the 145 cells and the solver's 2 * 1,450 * 12 + 145 *
     # 280 = 75,400, 102,664 bytes in all, less than the graph's load, which
-    # the refusal of fate names too. Calling the membership holds 347,836
+    # the refusal of fate names too. Calling the membership holds 167,612
     # bytes, as the membership tests derive, more than the load, and its
     # refusal names the membership.
     named = "a graph of 725 edges"
     if call == "lineage_membership":
-        needed = 347_836
+        needed = 167_612
         named = "the lineage membership of every cell"
     _set_budget(store, needed // 2)
     with pytest.raises(MemoryBudgetError) as refused:
@@ -929,10 +931,13 @@ def test_fate_names_what_mapping_its_fates_holds_when_that_outweighs_the_load(
     # a float32 weight beside 266 int32 row pointers, 22,264 bytes. Mapping
     # the fates of 2 sinks holds it, 64 bytes for each cell and the solver's
     # 2 * 2,650 * 12 + 265 * 280 = 137,800, more than taking the mapped
-    # cells' graph would, two more copies and 24 bytes a cell. Forming the
-    # union holds 7 * 1,325 * 8 + 5 * 1,064 + 65,536 = 145,056 bytes beside
-    # the cells' positions and their labels' codes or scores, 13 or 17 bytes
-    # a cell, less than mapping.
+    # cells' graph would, two more copies and 24 bytes a cell. Loading the
+    # graph holds its stored pairs and weights and their COO coordinates, 20
+    # bytes an edge, beside the directed matrix and the allowance of a read,
+    # 1,325 * 20 + 11,664 + 131,072 = 169,236 bytes, and forming the union 7 *
+    # 1,325 * 8 + 5 * 1,064 = 79,520, each beside the cells' positions and
+    # their labels' codes or scores, 13 or 17 bytes a cell, less than
+    # mapping.
     branching = _branching(_long_arms(100), neighbors=5)
     store = branching.store
     labels = branching.label_artifact()
@@ -968,9 +973,20 @@ def test_fate_names_what_mapping_its_fates_holds_when_that_outweighs_the_load(
     )
     assert reads == {}
     assert _fate_maps(store) == maps
-    # The budget that the refusal names maps the fates, reading the graph once.
-    _set_budget(store, refused.value.needed_bytes)
-    call()
+
+    # The budget that the refusal names passes the graph's check; the read of
+    # the cells' labels that follows it can name a little more, beside the
+    # allowance of its read, and the fates are mapped at the last budget
+    # named.
+    def mapping(budget: int) -> ArtifactRef:
+        _set_budget(store, budget)
+        return call()
+
+    later, _ = climb_refusals(mapping, start=refused.value.needed_bytes)
+    assert all(error.item != refused.value.item for error in later)
+    # That budget maps the fates reading the graph once.
+    reads.clear()
+    mapping(later[-1].needed_bytes if later else refused.value.needed_bytes)
     assert reads == {"_store_to_sparse": 1}
 
 

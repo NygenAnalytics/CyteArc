@@ -12,8 +12,10 @@ import re
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 import zarr
+from packaging.version import Version
 
 from cytearc.metadata.rows import read_rows, read_text_rows, read_whole, row_read_bytes
 from cytearc.metadata.selection import (
@@ -28,6 +30,7 @@ from cytearc.storage.selections import resolve_generated_selection_artifact
 from cytearc.utils.memory_budget import (
     MemoryBudgetError,
     MemoryLedger,
+    hash_table_bytes,
     memory_refusal,
     python_text_bytes,
     sort_bytes,
@@ -35,6 +38,7 @@ from cytearc.utils.memory_budget import (
 from tests.memory_helpers import (
     held_within_charge,
     named_budget,
+    traced_charge,
 )
 from tests.storage_helpers import by_cell_id
 
@@ -161,21 +165,19 @@ def test_a_ledger_refuses_codec_threads_that_are_not_a_count(threads) -> None:
         # np.sort returns a 1,000-value copy and sorts it in place.
         (np.uint8, False, False, 1_000),
         (np.float32, False, False, 4_000),
-        # A stable sort radix-sorts values of one or two bytes into a second
-        # buffer as large as the copy.
+        # A stable sort holds a second buffer as large as the copy, as its
+        # radix sort of one or two bytes does and more than its merge sort of
+        # wider values holds.
         (np.uint8, True, False, 2_000),
         (np.int16, True, False, 4_000),
-        # Wider values merge through a buffer half the copy's size; 1,000
-        # float32 values hold 4,000 bytes and the buffer 2,000.
-        (np.float32, True, False, 6_000),
-        (np.int64, True, False, 12_000),
+        (np.float32, True, False, 8_000),
+        (np.int64, True, False, 16_000),
         # np.argsort returns 1,000 int64 positions whatever the values' width.
         (np.uint8, False, True, 8_000),
         (np.int64, False, True, 8_000),
-        # Its stable sort holds a radix buffer as large as the positions, or a
-        # merge buffer half their size.
+        # Its stable sort holds as much again.
         (np.int16, True, True, 16_000),
-        (np.float32, True, True, 12_000),
+        (np.float32, True, True, 16_000),
     ],
 )
 def test_sort_bytes_count_the_copy_or_order_and_the_stable_buffer(
@@ -199,6 +201,29 @@ _KINDS = {
 def test_python_text_bytes_refuses_a_character_beyond_unicode() -> None:
     with pytest.raises(ValueError, match="cannot exceed U"):
         python_text_bytes(1, 1, widest=0x110000)
+
+
+@pytest.mark.parametrize(
+    "n_values",
+    [0, 1, 3, 4, 788, 789, 807_404, 807_405, 1_048_583, 1_048_584, 2_000_000],
+)
+def test_hash_table_bytes_counts_the_buckets_of_the_table_pandas_makes(
+    n_values,
+) -> None:
+    from pandas._libs import hashtable
+
+    # pandas makes a table for at most 2**20 + 7 values, of the least power of
+    # two of buckets that holds them at most 77% full, and a table of strings
+    # takes 24 bytes and a bit of flags a bucket from pandas 3.1 on, 16 bytes
+    # and the bit before, beside a few bytes of its own; the table grows from
+    # there as distinct values fill it. The charge counts 3.1's buckets, which
+    # bound the earlier ones.
+    table = hashtable.StringHashTable(n_values)
+    buckets = table.get_state()["n_buckets"]
+    started = hash_table_bytes(n_values, n_distinct=0)
+    assert started == 24 * buckets + buckets // 8
+    bucket_bytes = 24 if Version(pd.__version__) >= Version("3.1") else 16
+    assert 0 <= table.sizeof() - (bucket_bytes * buckets + buckets // 8) <= 64
 
 
 def test_coding_labels_refuses_before_it_hashes_them() -> None:
@@ -242,6 +267,22 @@ def test_coding_unhashable_labels_refuses_before_it_makes_their_texts() -> None:
     assert codes.tolist() == expected_codes.tolist()
     # Label k holds index k % 3, which names sort by.
     assert codes.tolist() == [index % 3 for index in range(1_000)]
+
+
+@pytest.mark.parametrize("kind", ["U", "T"], ids=["fixed width", "variable width"])
+def test_coding_numpy_text_charges_the_strings_that_pandas_makes(kind) -> None:
+    # 50,000 labels of 31 characters in 12 groups, as a text column of fixed
+    # or variable width reads. pandas hashes them as a Python string of each,
+    # 80 bytes a label, more than the rest of what coding holds.
+    names = np.asarray([f"cluster label {k:02d} xxxxxxxxxxxxxx" for k in range(12)])
+    picks = np.random.default_rng(0).integers(0, 12, 50_000)
+    labels = names[picks].astype("U32" if kind == "U" else np.dtypes.StringDType())
+
+    run = traced_charge(lambda ledger: category_codes(labels, ledger=ledger))
+
+    # The codes that coding returns are the caller's to charge.
+    assert held_within_charge(run.held, run.charged + 8 * len(labels))
+    assert run.held >= len(labels) * (8 + 41 + 31)
 
 
 @pytest.mark.parametrize(

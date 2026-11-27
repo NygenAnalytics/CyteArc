@@ -13,10 +13,7 @@ from zarr.storage import LocalStore
 from cytearc.matrix.chunked import ChunkedArray
 from cytearc.storage.budget import ResourceBudget
 from cytearc.storage.execution import execution_report_scope
-from cytearc.storage.geometry import (
-    ArrayGeometry,
-    array_geometry,
-)
+from cytearc.storage.geometry import ArrayGeometry
 from cytearc.storage.partition import row_read_parts
 from tests.memory_helpers import (
     decodes_held_together,
@@ -26,9 +23,9 @@ from tests.memory_helpers import (
 from tests.thread_helpers import blas_threads, raised_threads
 
 
-def _read_objects(chunks: int, decodes: int) -> int:
-    """The objects of one Zarr read: 32 KiB, 4 KiB a chunk and 16 KiB a decode at once."""
-    return 32_768 + chunks * 4_096 + decodes * 16_384
+def _allowance(chunks: int) -> int:
+    """The allowance of one read in flight: 128 KiB, and 4 KiB for each chunk it touches."""
+    return 131_072 + chunks * 4_096
 
 
 def test_read_bytes_follow_what_a_zarr_read_holds() -> None:
@@ -39,13 +36,13 @@ def test_read_bytes_follow_what_a_zarr_read_holds() -> None:
     # The result and Zarr's shard-level copy of it, the compressed bytes of
     # the chunks touched in a shard, each at the bound of its encoded size,
     # here 1,024 bytes beyond the 80 it decodes to, and the chunks decoded at
-    # once, beside the objects of Zarr's read.
+    # once, beside the allowance of the read.
     encoded = 80 + 1_024
     assert sharded.readBytes(1_000, 5) == (
-        2 * 1_000 + 5 * encoded + 5 * nominal + _read_objects(5, 5)
+        2 * 1_000 + 5 * encoded + 5 * nominal + _allowance(5)
     )
     assert sharded.readBytes(1_000, 5, decodes=2) == (
-        2 * 1_000 + 5 * encoded + 2 * nominal + _read_objects(5, 2)
+        2 * 1_000 + 5 * encoded + 2 * nominal + _allowance(5)
     )
     # Zarr's opt-in fused pipeline decodes a shard's chunks one at a time on
     # a plain pool, whatever the concurrency, and the pool's thread may keep
@@ -53,7 +50,7 @@ def test_read_bytes_follow_what_a_zarr_read_holds() -> None:
     plain = replace(sharded, fusedPoolWorkers=2)
     assert plain.poolKeepsDecodedChunk
     assert plain.readBytes(1_000, 5, decodes=2) == (
-        2 * 1_000 + 5 * encoded + nominal + nominal + _read_objects(5, 1)
+        2 * 1_000 + 5 * encoded + nominal + nominal + _allowance(5)
     )
     assert sharded.readBytes(1_000, 5, decodes=9) == sharded.readBytes(1_000, 5)
     # An unsharded read holds its result and each chunk it decodes at once as
@@ -61,36 +58,71 @@ def test_read_bytes_follow_what_a_zarr_read_holds() -> None:
     # bytes, the decoded size plus 1/128 of it, rounded down, and 1,024 bytes.
     unsharded = ArrayGeometry(shape=(100, 40), chunks=(10, 4), shards=None, itemsize=2)
     stored = nominal + nominal + 1_024
-    assert unsharded.readBytes(1_000, 5) == 1_000 + 5 * stored + _read_objects(5, 5)
-    assert unsharded.readBytes(1_000, 5, decodes=1) == (
-        1_000 + stored + _read_objects(5, 1)
-    )
+    assert unsharded.readBytes(1_000, 5) == 1_000 + 5 * stored + _allowance(5)
+    assert unsharded.readBytes(1_000, 5, decodes=1) == (1_000 + stored + _allowance(5))
     # The fused pipeline decodes two of the five chunks at once on a pool of
     # two threads, whose threads may keep the two chunks they decoded before;
     # four at once leave one chunk to decode after them.
     assert replace(unsharded, fusedPoolWorkers=2).readBytes(1_000, 5, decodes=1) == (
-        1_000 + 2 * stored + 2 * nominal + _read_objects(5, 2)
+        1_000 + 2 * stored + 2 * nominal + _allowance(5)
     )
     assert replace(unsharded, fusedPoolWorkers=4).readBytes(1_000, 5, decodes=1) == (
-        1_000 + 4 * stored + 1 * nominal + _read_objects(5, 4)
+        1_000 + 4 * stored + 1 * nominal + _allowance(5)
     )
-    assert unsharded.readBytes(1_000, 1, decodes=1) == (
-        1_000 + stored + _read_objects(1, 1)
-    )
+    assert unsharded.readBytes(1_000, 1, decodes=1) == (1_000 + stored + _allowance(1))
     assert unsharded.readBytes(1_000, 5, decodes=9) == unsharded.readBytes(1_000, 5)
-    # A whole read of the 100 chunks one or ten at a time holds the objects of
-    # that read, and on the fused pipeline's pool of ten threads as many
+    # A whole read of the 100 chunks one or ten at a time holds the allowance
+    # of that read, and on the fused pipeline's pool of ten threads as many
     # previous chunks as it decodes at once, whatever the plan's concurrency.
-    assert unsharded.wholeReadBytes(1) == 100 * 40 * 2 + stored + _read_objects(100, 1)
+    assert unsharded.wholeReadBytes(1) == 100 * 40 * 2 + stored + _allowance(100)
     assert unsharded.wholeReadBytes(10) == (
-        100 * 40 * 2 + 10 * stored + _read_objects(100, 10)
+        100 * 40 * 2 + 10 * stored + _allowance(100)
     )
     assert replace(unsharded, fusedPoolWorkers=10).wholeReadBytes(1) == (
-        100 * 40 * 2 + 10 * (stored + nominal) + _read_objects(100, 10)
+        100 * 40 * 2 + 10 * (stored + nominal) + _allowance(100)
     )
 
 
-def test_a_read_on_cytearcs_pools_holds_its_objects_where_a_plain_pool_keeps_a_chunk() -> (
+@pytest.mark.parametrize("concurrency", [10, 64])
+def test_a_read_that_decodes_more_chunks_at_once_than_zarrs_default_holds_its_charge(
+    tmp_path, concurrency
+) -> None:
+    from cytearc.storage.async_execution import zarr_io_concurrency
+    from cytearc.storage.geometry import array_geometry
+    from tests.memory_helpers import traced_reruns
+
+    # A shard of 64 chunks of 4 KiB of random bytes, read whole at Zarr's
+    # default async concurrency of 10 and at 64, as a plan whose I/O
+    # concurrency is 64 sets it. Each chunk decoded at once beyond ten holds
+    # Zarr's objects of its decode, about 10 KB, as much as its data.
+    location = tmp_path / "objects.zarr"
+    array = zarr.open_group(store=LocalStore(location), mode="w").create_array(
+        "x", shape=(64, 4_096), chunks=(1, 4_096), shards=(64, 4_096), dtype="uint8"
+    )
+    array[:] = np.random.default_rng(0).integers(0, 255, (64, 4_096), dtype=np.uint8)
+    array = zarr.open_array(store=LocalStore(location), path="x", mode="r")
+    geometry = array_geometry(array)
+    assert geometry is not None
+
+    def read() -> int:
+        import tracemalloc
+
+        before, _ = tracemalloc.get_traced_memory()
+        values = array[:]
+        _, peak = tracemalloc.get_traced_memory()
+        del values
+        return peak - before
+
+    with zarr_io_concurrency(concurrency):
+        held = min(traced_reruns(read, runs=3))
+    charged = geometry.readBytes(64 * 4_096, 64, decodes=concurrency)
+    assert held_within_charge(held, charged)
+    # The chunks decoded at once beyond ten are charged 12 KiB each.
+    beyond = geometry.readAllowanceBytes(64, concurrency) - _allowance(64)
+    assert beyond == max(0, concurrency - 10) * 12 * 1_024
+
+
+def test_a_read_on_cytearcs_pools_holds_its_allowance_where_a_plain_pool_keeps_a_chunk() -> (
     None
 ):
     # Chunks of 1,000 by 1,000 uint32 values decode to 4,000,000 bytes and
@@ -101,48 +133,45 @@ def test_a_read_on_cytearcs_pools_holds_its_objects_where_a_plain_pool_keeps_a_c
     decoded = 4_000_000
     encoded = decoded + decoded // 128 + 1_024
     # Ten chunks decoded one at a time hold no previous chunk on CyteArc's
-    # pools, only the objects of Zarr's read: 32 KiB, 4 KiB for each of the
-    # ten chunks and 16 KiB for the one decode under way.
-    objects = 32_768 + 10 * 4_096 + 16_384
-    assert sharded.heldDecodeBytes(10, 1) == objects
-    assert sharded.readBytes(0, 10, decodes=1) == 10 * encoded + decoded + objects
-    # Four at a time hold 48 KiB more for the three more decodes.
-    assert sharded.heldDecodeBytes(10, 4) == objects + 3 * 16_384
+    # pools, only the allowance of the read: 128 KiB, and 4 KiB for each of
+    # the ten chunks.
+    allowance = 131_072 + 10 * 4_096
+    assert sharded.heldDecodeBytes(10, 1) == allowance
+    assert sharded.readBytes(0, 10, decodes=1) == 10 * encoded + decoded + allowance
+    # Four at a time are still one read in flight.
+    assert sharded.heldDecodeBytes(10, 4) == allowance
     # A plain pool's threads, as Zarr's opt-in fused pipeline runs, also keep
     # the chunk that each decoded before, one for each decode under way.
     own_pool = replace(sharded, fusedPoolWorkers=4)
-    assert own_pool.heldDecodeBytes(10, 1) == decoded + objects
-    assert own_pool.heldDecodeBytes(10, 4) == 4 * decoded + objects + 3 * 16_384
+    assert own_pool.heldDecodeBytes(10, 1) == decoded + allowance
+    assert own_pool.heldDecodeBytes(10, 4) == 4 * decoded + allowance
     # A read that decodes every chunk at once has no previous chunk either way.
-    every = 32_768 + 10 * 4_096 + 10 * 16_384
-    assert sharded.heldDecodeBytes(10, 10) == own_pool.heldDecodeBytes(10, 10) == every
+    assert sharded.heldDecodeBytes(10, 10) == own_pool.heldDecodeBytes(10, 10)
+    assert own_pool.heldDecodeBytes(10, 10) == allowance
     # A whole read of an unsharded array of four 40,000,000-byte chunks, two
     # at a time, as the memory ledger plans one, holds the 160,000,000-byte
     # result and the two chunks under way, each as stored and decoded, beside
-    # the read's objects, where a plain pool also keeps one earlier chunk for
-    # each decode under way.
+    # the read's allowance, where a plain pool also keeps one earlier chunk
+    # for each decode under way.
     # A whole read of the sharded array, four decodes at a time, reads a band
     # of 1,000 rows at a time: the 160,000,000-byte result, the band's
     # 40,000,000 bytes twice over, each of its ten chunks as stored and
-    # decoded, and the four chunks under way, beside the objects of that
-    # read; the ten chunks cover any chunk that a plain pool keeps. The reads
-    # of the three earlier bands leave their objects: 32 KiB, and 4 KiB for
-    # each of their thirty chunks.
+    # decoded, and the four chunks under way, beside the allowance of that
+    # read; the ten chunks cover any chunk that a plain pool keeps.
     whole = (
         160_000_000
         + 2 * 40_000_000
         + 10 * (encoded + decoded)
         + 4 * decoded
-        + (32_768 + 10 * 4_096 + 4 * 16_384)
-        + (32_768 + 30 * 4_096)
+        + (131_072 + 10 * 4_096)
     )
     assert sharded.wholeReadBytes(4) == own_pool.wholeReadBytes(4) == whole
     unsharded = replace(sharded, shards=None, chunks=(1_000, 10_000))
     stored = 40_000_000 + 40_000_000 + 40_000_000 // 128 + 1_024
-    read_objects = 32_768 + 4 * 4_096 + 2 * 16_384
-    assert unsharded.wholeReadBytes(2) == 160_000_000 + 2 * stored + read_objects
+    allowance = 131_072 + 4 * 4_096
+    assert unsharded.wholeReadBytes(2) == 160_000_000 + 2 * stored + allowance
     assert replace(unsharded, fusedPoolWorkers=2).wholeReadBytes(2) == (
-        160_000_000 + 2 * stored + 2 * 40_000_000 + read_objects
+        160_000_000 + 2 * stored + 2 * 40_000_000 + allowance
     )
 
 
@@ -162,21 +191,19 @@ def test_a_read_through_zarrs_fused_pipeline_is_charged_at_the_reads_it_runs_at_
     fused = replace(unsharded, fusedPoolWorkers=4)
     assert fused.readsAtOnce(8, 1) == (4, 1)
     assert fused.readBytes(result, 8, decodes=1) == (
-        result + 4 * stored + _read_objects(8, 4) + 4 * decoded
+        result + 4 * stored + _allowance(8) + 4 * decoded
     )
     assert fused.readBytes(result, 8, decodes=10) == fused.readBytes(result, 8, 1)
     assert fused.wholeReadBytes(1) == fused.readBytes(result, 8, decodes=1)
     # One worker reads inline, a chunk at a time.
     inline = replace(unsharded, fusedPoolWorkers=1)
-    assert inline.readBytes(result, 8, decodes=4) == (
-        result + stored + _read_objects(8, 1)
-    )
+    assert inline.readBytes(result, 8, decodes=4) == (result + stored + _allowance(8))
     # On a store that reads asynchronously, it decodes all eight before it
     # places any.
     gathering = replace(fused, fusedReadsAsync=True)
     assert gathering.readsAtOnce(8, 1) == (8, 1)
     assert gathering.readBytes(result, 8, decodes=1) == (
-        result + 8 * stored + _read_objects(8, 8)
+        result + 8 * stored + _allowance(8)
     )
     # Shards of four chunks, of which a read touches four: a synchronous
     # store reads as many shards at once as the pool has threads, each
@@ -188,7 +215,7 @@ def test_a_read_through_zarrs_fused_pipeline_is_charged_at_the_reads_it_runs_at_
     assert fused_shards.readsAtOnce(4, 1, shards=4) == (1, 4)
     # Zarr's async concurrency changes neither.
     assert fused_shards.readsAtOnce(4, 10, shards=4) == (1, 4)
-    one_shard = 4 * (stored - decoded) + decoded + _read_objects(4, 1) + decoded
+    one_shard = 4 * (stored - decoded) + decoded + _allowance(4) + decoded
     assert fused_shards.readBytes(shard_result, 4, decodes=1, shards=4) == (
         2 * shard_result + 4 * one_shard
     )
@@ -201,15 +228,13 @@ def test_a_read_through_zarrs_fused_pipeline_is_charged_at_the_reads_it_runs_at_
     # once on a pool of four threads.
     small = 2 * 262_144 + 262_144 // 128 + 1_024
     banded = ArrayGeometry((2_048, 1_024), (256, 256), None, 4, fusedPoolWorkers=4)
-    assert banded.bandReadBytes(256, 1) == (
-        256 * 1_024 * 4 + 4 * small + _read_objects(4, 4)
-    )
+    assert banded.bandReadBytes(256, 1) == (256 * 1_024 * 4 + 4 * small + _allowance(4))
     # An asynchronous store reads the shards at Zarr's async concurrency,
     # each decoding as many chunks at once as the pool has threads, while
-    # the task that Zarr makes for each shard it does not read yet holds the
-    # objects of a chunk, 4 KiB.
+    # the task that Zarr makes for each shard it does not read yet holds
+    # 4 KiB.
     gathering_shards = replace(fused_shards, fusedReadsAsync=True)
-    gathering_shard = 4 * (stored - decoded) + 4 * decoded + _read_objects(4, 4)
+    gathering_shard = 4 * (stored - decoded) + 4 * decoded + _allowance(4)
     assert gathering_shards.readsAtOnce(4, 1, shards=4) == (4, 1)
     assert gathering_shards.readBytes(shard_result, 4, decodes=1, shards=4) == (
         2 * shard_result + gathering_shard + 3 * 4_096
@@ -223,7 +248,7 @@ def test_a_read_through_zarrs_fused_pipeline_is_charged_at_the_reads_it_runs_at_
     assert sharded.readsAtOnce(4, 2, shards=4) == (2, 2)
     assert sharded.readBytes(shard_result, 4, decodes=2, shards=4) == (
         2 * shard_result
-        + 2 * (4 * (stored - decoded) + 2 * decoded + _read_objects(4, 2))
+        + 2 * (4 * (stored - decoded) + 2 * decoded + _allowance(4))
         + 2 * 4_096
     )
     assert sharded.readsAtOnce(4, None, shards=3) == (4, 3)
@@ -437,7 +462,7 @@ def test_a_band_read_of_a_sharded_array_holds_no_more_than_its_charge(
     # two compressed chunks and one decoded chunk, more than those alone. No
     # pool thread keeps the first chunk once the read has copied it, so the
     # charge for one decode at a time covers all of it with the read's
-    # objects, 88 KiB, in place of the decoded chunk that it reserved before.
+    # allowance, in place of the decoded chunk that it reserved before.
     decoded = 4_096 * 512 * 4
     band_bytes = 8_192 * 512 * 4
     assert held > 2 * band_bytes + 3 * decoded
@@ -478,8 +503,9 @@ def test_a_whole_read_of_an_unsharded_array_holds_no_decoded_chunk_beside_its_de
             tracemalloc.stop()
     decoded = 256 * 1_024 * 4
     # The result and two chunks under way, each compressed and decoded, and
-    # no more than the read's objects beside them: the plan covers it without
-    # the earlier decoded chunk that it reserved for each decode before.
+    # no more than the read's allowance beside them: the plan covers it
+    # without the earlier decoded chunk that it reserved for each decode
+    # before.
     assert values.nbytes == 4 * decoded
     assert peak - base > values.nbytes + 2 * 2 * decoded
     assert held_within_charge(peak - base, geometry.wholeReadBytes(2))
@@ -496,14 +522,13 @@ def test_read_bytes_charge_the_indexers_and_copies_of_reads_by_index_arrays() ->
     assert sharded.indexBytes(1_000) == 64_000
     assert unsharded.indexBytes(1_000) == 40_000
     assert sharded.indexBytes(-5) == 0
-    # A read of slices places views of its chunks. One index array copies
-    # the values it takes from a chunk, here 7 rows of 3 two-byte values;
-    # two also hold NumPy's buffers of 8,192 elements of each array, 8 bytes
-    # each.
+    # A read of slices places views of its chunks. One index array, or two,
+    # copies the values it takes from a chunk, here 7 rows of 3 two-byte
+    # values.
     assert sharded.takenChunkBytes(7, 3, indexedAxes=0) == 0
     assert sharded.takenChunkBytes(7, 3, indexedAxes=1) == 42
-    assert unsharded.takenChunkBytes(7, 3, indexedAxes=2) == 42 + 8_192 * (8 + 8)
-    assert unsharded.takenChunkBytes(0, 3, indexedAxes=2) == 8_192 * 16
+    assert unsharded.takenChunkBytes(7, 3, indexedAxes=2) == 42
+    assert unsharded.takenChunkBytes(0, 3, indexedAxes=2) == 0
     # Every row of a block counts, beyond a chunk's 10 rows, so that a stream
     # that shrinks its blocks to a budget keeps each block's share of the
     # charge no less than its copy.
@@ -514,19 +539,19 @@ def test_read_bytes_charge_the_indexers_and_copies_of_reads_by_index_arrays() ->
     nominal = 10 * 4 * 2
     encoded = 80 + 1_024
     assert sharded.readBytes(1_000, 5, decodes=2, indexes=30, takenBytes=42) == (
-        2 * 1_000 + 5 * encoded + 2 * nominal + _read_objects(5, 2) + 42 + 30 * 64
+        2 * 1_000 + 5 * encoded + 2 * nominal + _allowance(5) + 42 + 30 * 64
     )
     stored = nominal + nominal + 1_024
     assert unsharded.readBytes(1_000, 5, decodes=2, indexes=30, takenBytes=42) == (
-        1_000 + 2 * stored + _read_objects(5, 2) + 42 + 30 * 40
+        1_000 + 2 * stored + _allowance(5) + 42 + 30 * 40
     )
-    # Two of three shards are read at once, and the task of the third holds
-    # the objects of a chunk, 4 KiB, until it is read.
+    # Two of three shards are read at once, each a read in flight, and the
+    # task of the third holds 4 KiB until it is read.
     assert sharded.readBytes(
         1_000, 5, decodes=2, shards=3, indexes=30, takenBytes=42
     ) == (
         2 * 1_000
-        + 2 * (5 * encoded + 2 * nominal + _read_objects(5, 2))
+        + 2 * (5 * encoded + 2 * nominal + _allowance(5))
         + 4_096
         + 42
         + 30 * 64
@@ -540,7 +565,7 @@ def test_read_bytes_charge_the_indexers_and_copies_of_reads_by_index_arrays() ->
         1_000, 5, decodes=2, shards=3, indexes=30, takenBytes=42
     ) == (
         2 * 1_000
-        + 2 * (5 * encoded + nominal + nominal + _read_objects(5, 1))
+        + 2 * (5 * encoded + nominal + nominal + _allowance(5))
         + 4_096
         + 2 * 42
         + 30 * 64
@@ -624,8 +649,7 @@ def test_a_read_of_selected_cells_holds_no_more_than_its_charge(
     # cells or features that it takes by an index array, 64 bytes each in a
     # sharded read and 40 in an unsharded one, and its copy of what it takes
     # from each chunk: 2,000 cells of 128 features, or of the 64 selected
-    # features of a chunk. Two index arrays on an unsharded read also hold
-    # NumPy's buffers of 8,192 elements of each array.
+    # features of a chunk.
     charge = block._read_bytes(read.nbytes)
     assert held_within_charge(peak, charge)
     run = matrix[:2_000, :] if selected == "rows" else matrix[:2_000, 64:192]
@@ -636,9 +660,8 @@ def test_a_read_of_selected_cells_holds_no_more_than_its_charge(
         assert charge >= run._read_bytes(read.nbytes) + 128 * 64 + copy
         return
     indexes = {"rows": 2_000, "columns": 128, "both": 2_128}[selected]
-    buffers = 8_192 * (8 + 8) if selected == "both" else 0
     assert charge - run._read_bytes(read.nbytes) == (
-        indexes * (64 if sharded else 40) + copy + buffers
+        indexes * (64 if sharded else 40) + copy
     )
     if selected == "rows":
         # A plan of a read of some of a matrix's rows by an index array, as
@@ -683,9 +706,9 @@ def test_a_read_of_cells_spread_over_shards_holds_a_task_for_each_shard(
     clustered = np.random.default_rng(7).permutation(touched)
     fewer = ChunkedArray(stored, rows=clustered, block_size=touched)
     # The read takes the shards one at a time, and the task that Zarr makes
-    # for each of the others, in every column shard, holds the objects of a
-    # chunk, 4 KiB, until it is read; as many cells of fewer rows of shards
-    # hold the same indexers and copies.
+    # for each of the others, in every column shard, holds 4 KiB until it is
+    # read; as many cells of fewer rows of shards hold the same indexers and
+    # copies.
     charge = block._read_bytes(read.nbytes)
     filled = -(-touched // 100)
     assert charge - fewer._read_bytes(read.nbytes) == (
@@ -698,12 +721,8 @@ def test_a_read_of_cells_spread_over_shards_holds_a_task_for_each_shard(
     assert tens._read_bytes(0) - ones._read_bytes(0) == 9 * column_shards * 4_096
     assert held_within_charge(peak, charge)
     if column_shards == 1:
-        # Without those tasks the charge would not cover the read, even with
-        # the file buffer that it charges a read of part of a shard, which a
-        # read of whole shards, as here, holds no longer from Python 3.14.
-        geometry = array_geometry(stored)
-        assert geometry is not None
-        assert peak > charge - geometry.readScratchBytes - (touched - 1) * 4_096
+        # Without those tasks the charge would not cover the read.
+        assert peak > charge - (touched - 1) * 4_096
     else:
         # A charge of one shard in each row of shards, without the tasks of
         # the other four column shards, falls short.
@@ -905,9 +924,9 @@ def test_a_row_block_stream_of_an_unsharded_array_reserves_each_stored_chunk() -
     values = np.arange(48, dtype=np.uint16).reshape(12, 4)
     stored = zarr.array(values, chunks=(6, 4))
     # A block of one chunk's six rows, 48 bytes, decodes that chunk, which is
-    # held as stored and decoded, 48 + 48 + 1,024 bytes, beside the objects
-    # of Zarr's read of one chunk.
-    needed = 48 + (48 + 48 + 1_024) + _read_objects(1, 1)
+    # held as stored and decoded, 48 + 48 + 1,024 bytes, beside the allowance
+    # of a read of one chunk.
+    needed = 48 + (48 + 48 + 1_024) + _allowance(1)
     matrix = ChunkedArray(stored, resources=ResourceBudget(needed, 1))
     assert matrix._block_size == 6
     np.testing.assert_array_equal(np.vstack(list(matrix.stream_blocks())), values)
@@ -1027,7 +1046,7 @@ def test_document_frequency_reserves_decode_bytes_when_fitting_blocks() -> None:
 
     # Stored in chunks of 600 rows, a block's read holds a chunk of three
     # times the values it holds in chunks of 200 rows, 640 KB more as stored
-    # and decoded, beyond the objects of the four more chunks that the
+    # and decoded, beyond the allowance of the four more chunks that the
     # smaller ones take, so the budget of one block of every row in the
     # smaller chunks reads the larger ones in several blocks, each reserved
     # with its decode within the budget.
@@ -1181,8 +1200,8 @@ def test_sharded_feature_blocks_reserve_their_read() -> None:
     # and, per decode, the compressed bytes of the two row chunks of each of
     # its two feature chunks in a shard, each at the bound of its encoded
     # size, 1,024 bytes beyond the 40 it decodes to, beside one decoded chunk
-    # and the objects of Zarr's read of those four chunks.
-    needed = 320 + 320 + 2 * 2 * (chunk + 1_024) + chunk + _read_objects(4, 1)
+    # and the allowance of a read of those four chunks.
+    needed = 320 + 320 + 2 * 2 * (chunk + 1_024) + chunk + _allowance(4)
     planned = plan(needed)
     assert [block.bins for block in planned.blocks] == [(0, 1)]
     assert (planned.readWorkers, planned.ioConcurrency) == (1, 1)

@@ -24,7 +24,7 @@ from ...storage.count_matrix import (
     DEFAULT_COUNT_MATRIX_POLICY,
     CountMatrixPolicy,
 )
-from ...storage.layout import array_shard_rows
+from ...storage.layout import _encoded_chunk_bound, array_shard_rows
 from ...storage.schema import (
     NORMALIZED_VALUES_ATTR,
     TF_DENOMINATOR_ATTR,
@@ -62,8 +62,7 @@ def _source_working_bytes(
 def _dest_band_hold_bytes(n_rows: int, n_cols: int, itemsize: int) -> int:
     """Align buffer plus one dense destination write of that band."""
     dense = max(1, int(n_rows)) * max(1, int(n_cols)) * max(1, int(itemsize))
-    encoded = dense + dense // 128 + 1024
-    write_peak = dense + dense + 2 * encoded + 1024
+    write_peak = dense + dense + 2 * _encoded_chunk_bound(dense)
     return dense + write_peak
 
 

@@ -573,9 +573,9 @@ class TestTransposedReads:
 
         counts, counts_t, _ = counts_pair
         # The budget plans two reads at a time, below Zarr's default of 10,
-        # each beside the objects of Zarr's read of one chunk.
+        # each beside the allowance of a read of one chunk.
         matrix = ChunkedArray(
-            counts, nthreads=2, resources=ResourceBudget(10_000 + 2 * 53_248, 2)
+            counts, nthreads=2, resources=ResourceBudget(10_000 + 2 * 135_168, 2)
         ).with_transposed(counts_t)
         selected = matrix[:, [21, 1, 7]]
         before = zarr.config.get("async.concurrency")
