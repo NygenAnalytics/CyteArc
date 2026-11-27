@@ -51,7 +51,7 @@ from .test_trajectory_record_paths import (
     _trajectory_store,
     _y_graph,
 )
-from tests.memory_helpers import named_budget
+from tests.memory_helpers import headroom_budget, named_budget
 from tests.storage_helpers import by_cell_id
 
 _SINKS = ["A", "B"]
@@ -975,11 +975,13 @@ def test_fate_names_what_mapping_its_fates_holds_when_that_outweighs_the_load(
     assert _fate_maps(store) == maps
 
     # The read of the cells' labels that follows the graph's check needs a
-    # little more than mapping, beside the allowance of its read, and the
-    # budget that the refusal names leaves room for it: the fates are mapped
-    # there, reading the graph once.
+    # little more than mapping, beside the allowance of its read, and a
+    # quarter more than the refusal needs, which the budget it names rounds
+    # up, leaves room for it: the fates are mapped there, reading the graph
+    # once.
+    named_budget(refused.value)
     reads.clear()
-    _set_budget(store, named_budget(refused.value))
+    _set_budget(store, headroom_budget(refused.value))
     call()
     assert reads == {"_store_to_sparse": 1}
 

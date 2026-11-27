@@ -101,22 +101,33 @@ def test_a_climb_refuses_a_step_that_refuses_the_budget_that_it_named() -> None:
             "It does not fit.", needed_bytes=needed, budget_bytes=budget, item=item
         )
 
-    # Two steps that each refuse once climb to a budget that runs.
+    # Two steps that need 1,000 and 2,000 bytes whatever the budget refuse
+    # once each: the climb goes on at a quarter more than each need, 1,250
+    # and 2,500 bytes, unrounded.
+    budgets: list[int] = []
+
     def two_steps(budget: int) -> int:
-        if budget < 1024**2:
-            raise refusing("the first step", 10, budget)
-        if budget < 2 * 1024**2:
-            raise refusing("the second step", 1_500_000, budget)
+        budgets.append(budget)
+        if budget < 1_000:
+            raise refusing("the first step", 1_000, budget)
+        if budget < 2_000:
+            raise refusing("the second step", 2_000, budget)
         return budget
 
     refusals, ran = climb_refusals(two_steps)
     assert [error.item for error in refusals] == ["the first step", "the second step"]
-    assert ran == 2 * 1024**2
-    # A step whose need grows past the budget that it named refuses again.
+    assert budgets == [1, 1_250, 2_500]
+    assert ran == 2_500
+    # To each need instead, the climb runs at 2,000 bytes.
+    budgets.clear()
+    _refusals, ran = climb_refusals(two_steps, at_needs=True)
+    assert budgets == [1, 1_000, 2_000] and ran == 2_000
 
+    # A step whose need grows faster than a quarter of the budget refuses
+    # the budget that its refusal gave, which the climb refuses.
     def growing(budget: int) -> int:
         if budget < 3 * 1024**2:
-            raise refusing("the step", budget + 1, budget)
+            raise refusing("the step", 2 * budget + 1, budget)
         return budget
 
     with pytest.raises(AssertionError, match="the step is refused again"):

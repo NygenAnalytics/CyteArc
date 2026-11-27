@@ -218,6 +218,7 @@ def prepare_matrix_sources(
                     needed_bytes=needed,
                     budget_bytes=int(max_bytes),
                     item="the resident data of the Seurat sources",
+                    setting=None,
                 )
             _admit_one_cell_of_each(
                 sources[index:], source.resident_bytes, int(max_bytes), item
@@ -271,6 +272,7 @@ def _admit_one_cell_of_each(
             needed_bytes=needed,
             budget_bytes=max_bytes,
             item=item,
+            setting=None,
         ) from error
 
 
@@ -314,6 +316,7 @@ def _admit_one_cell(source: "BaseMatrixSource", resident: int, max_bytes: int) -
             needed_bytes=needed,
             budget_bytes=int(max_bytes),
             item="preparing one cell",
+            setting=None,
         )
 
 
@@ -341,6 +344,7 @@ def _budget_block_refusal(
         needed_bytes=needed,
         budget_bytes=max_bytes,
         item=cause.item,
+        setting=None,
     )
 
 
@@ -782,12 +786,20 @@ class BaseMatrixSource(ABC):
                     temp_dir=self._tempDir,
                 )
             except MemoryBudgetError as error:
-                # The cause names the conversion limit that passes, which
+                # The cause names the block limit that passes, the
+                # conversion's need beside the source's own bytes, which
                 # prepare_matrix_sources restates when the budget set it.
+                words = refusal_words(error).removesuffix(".")
+                limit = error.needed_bytes + source_bytes
                 raise ResourceLimitError(
-                    f"{refusal_words(error).removesuffix('.')}; "
-                    f"maxBlockBytes={self._limits.maxBlockBytes}"
-                ) from error
+                    f"{words}; maxBlockBytes={self._limits.maxBlockBytes}"
+                ) from MemoryBudgetError(
+                    f"{words}. It needs at least {limit} bytes.",
+                    needed_bytes=limit,
+                    budget_bytes=self._limits.maxBlockBytes,
+                    item=error.item,
+                    setting="maxBlockBytes",
+                )
         return self._rowStore
 
     @abstractmethod
@@ -1270,6 +1282,7 @@ class TransposeMatrixSource(BaseMatrixSource):
                         needed_bytes=limit,
                         budget_bytes=self._limits.maxBlockBytes,
                         item="a tile of one source column of the transpose",
+                        setting="maxBlockBytes",
                     )
                 width = max(1, width // 2)
             yield start, start + width, estimate

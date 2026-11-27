@@ -330,6 +330,7 @@ def row_spill_plan(
             needed_bytes=needed,
             budget_bytes=int(maxBytes),
             item="the row spill of a cell shuffle",
+            setting=None,
         )
     return plan
 
@@ -357,6 +358,7 @@ def admitted_spill_plan(
             needed_bytes=needed,
             budget_bytes=int(maxBytes),
             item=error.item,
+            setting=None,
         ) from error
 
 

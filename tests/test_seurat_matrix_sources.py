@@ -3026,13 +3026,16 @@ def test_source_preparation_names_a_budget_beside_the_row_pointers_of_sources_co
         finally:
             release_temporary_storage(source)
 
-    # The first refusal names a budget at which both convert: the check of
+    # The first refusal gives a budget at which both convert: the check of
     # one cell of each counts the pointers that the first keeps for the
-    # second, as the second's own check before it converts does.
+    # second, as the second's own check before it converts does. Preparing
+    # runs within what an import leaves, which restates the refusal in terms
+    # of its whole budget, so it names no budget of its own.
     named_budget_runs(
         at_budget,
         bound().resident_bytes + 1,
         item="preparing one cell of a Seurat source",
+        setting=None,
     )
     assert list(tmp_path.iterdir()) == []
 
@@ -3196,6 +3199,11 @@ def test_a_block_limit_of_the_source_limits_refuses_as_that_limit(
     cause = limit_error(block_bytes, 1_000_000, block_bytes).__cause__
     assert isinstance(cause, MemoryBudgetError)
     limit = cause.needed_bytes
+    # Its cause names the block limit that passes, the source's own setting,
+    # rather than mem_budget, which did not set it.
+    assert (cause.budget_bytes, cause.setting) == (block_bytes, "maxBlockBytes")
+    assert re.search(r"\. Raise maxBlockBytes to at least \d+ MiB\.$", str(cause))
+    assert "mem_budget" not in str(cause)
     # A budget that sets the limit below the source's one still refuses as a
     # limit when the block that passes it would pass the source's one.
     resident = make().resident_bytes

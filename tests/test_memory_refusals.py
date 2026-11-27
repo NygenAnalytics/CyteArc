@@ -32,7 +32,7 @@ from cytearc.utils.memory_budget import (
     suggested_budget,
 )
 from tests.storage_helpers import by_cell_id
-from tests.memory_helpers import held_within_charge, named_budget
+from tests.memory_helpers import headroom_budget, held_within_charge, named_budget
 
 CYTEARC_ROOT = Path(cytearc.__file__).parent
 
@@ -148,18 +148,31 @@ def refused(call: Callable[[], object]) -> MemoryBudgetError:
 
 
 def named_budget_runs(
-    at_budget: Callable[[int], object], budget: int, *, item: str
+    at_budget: Callable[[int], object],
+    budget: int,
+    *,
+    item: str,
+    setting: str | None = "mem_budget",
 ) -> MemoryBudgetError:
     """Check the refusal of ``at_budget(budget)`` and that the budget it names passes its step.
 
     The refusal names ``budget`` and ``item`` and more bytes than the budget,
-    and closes naming its suggested budget, at which ``at_budget`` runs.
+    and closes naming its suggested budget of ``setting`` in MiB, and
+    ``at_budget`` runs at a quarter more than its need, unrounded, the budget
+    that it names where a MiB is small beside the need. A refusal within a
+    part of the budget, whose caller restates it, names no setting and keeps
+    its own words.
     """
     refusal = refused(lambda: at_budget(budget))
     assert refusal.budget_bytes == budget
     assert refusal.needed_bytes > budget
     assert refusal.item == item
-    at_budget(named_budget(refusal))
+    assert refusal.setting == setting
+    if setting is None:
+        assert str(refusal) == refusal.args[0]
+    else:
+        named_budget(refusal)
+    at_budget(headroom_budget(refusal))
     return refusal
 
 
@@ -231,6 +244,40 @@ def test_every_refusal_closes_naming_its_suggested_budget_after_its_own_words() 
     assert str(outer).endswith("Raise mem_budget to at least 5 MiB.")
 
 
+def test_a_refusal_names_the_setting_of_its_budget_and_none_within_a_part_of_it() -> (
+    None
+):
+    import pickle
+
+    # A Seurat source's block limit is a setting of its own. 3,000,000 bytes
+    # and a quarter are 3,750,000, 3.58 MiB.
+    block = MemoryBudgetError(
+        "Transpose source tile exceeds the block limit. It needs at least "
+        "3000000 bytes.",
+        needed_bytes=3_000_000,
+        budget_bytes=1_000,
+        item="a tile of one source column of the transpose",
+        setting="maxBlockBytes",
+    )
+    assert str(block) == (
+        "Transpose source tile exceeds the block limit. It needs at least 3000000 "
+        "bytes. Raise maxBlockBytes to at least 4 MiB."
+    )
+    # A refusal within a part of the budget, which its caller restates in
+    # terms of the whole, keeps its own words.
+    part = MemoryBudgetError(
+        "Shuffling cells exceeds the memory limit. It needs at least 5000 bytes.",
+        needed_bytes=5_000,
+        budget_bytes=10,
+        item="the row spill of a cell shuffle",
+        setting=None,
+    )
+    assert str(part) == part.args[0]
+    for error in (block, part):
+        restored = pickle.loads(pickle.dumps(error))
+        assert (restored.setting, str(restored)) == (error.setting, str(error))
+
+
 def _growing_step(base: int, share: int) -> Callable[[int], None]:
     """Return a step that needs ``base`` bytes and a ``share``-th of its budget beside them."""
 
@@ -248,21 +295,23 @@ def _growing_step(base: int, share: int) -> Callable[[int], None]:
 
 
 def test_an_admitted_need_climbs_past_needs_that_grow_beyond_the_headroom() -> None:
-    # A step that needs 10 MiB and half of its budget refuses 1 MiB naming
-    # 10.5 MiB, whose suggested budget, 14 MiB, it refuses naming 17 MiB; at
-    # that need's, 22 MiB, it needs 21 MiB and passes. It passes from a byte
-    # below 20 MiB, whose half rounds down.
+    # A step that needs 10 MiB and half of its budget refuses 1 MiB needing
+    # 11,010,048 bytes, and a quarter more, 13,762,560, needing 17,367,040;
+    # at a quarter more than that, 21,708,800, it needs 21,340,160 and
+    # passes, and its suggested budget, 21 MiB, rounds that up. It passes
+    # from a byte below 20 MiB, whose half rounds down.
     admit = _growing_step(10 * _MIB, 2)
     with pytest.raises(MemoryBudgetError) as first:
         admit(_MIB)
-    assert first.value.needed_bytes == 10 * _MIB + _MIB // 2
-    assert first.value.suggested_budget_bytes == 14 * _MIB
-    with pytest.raises(MemoryBudgetError):
-        admit(14 * _MIB)
+    assert first.value.needed_bytes == 11_010_048
+    with pytest.raises(MemoryBudgetError) as second:
+        admit(13_762_560)
+    assert second.value.needed_bytes == 17_367_040
     needed = admitted_need(admit, first.value)
-    assert needed == 17 * _MIB
-    assert suggested_budget(needed) == 22 * _MIB
-    admit(22 * _MIB)
+    assert needed == 17_367_040
+    assert suggested_budget(needed) == 21 * _MIB
+    admit(21_708_800)
+    admit(21 * _MIB)
     admit(20 * _MIB - 1)
     with pytest.raises(MemoryBudgetError):
         admit(20 * _MIB - 2)
@@ -286,6 +335,7 @@ def test_an_admitted_need_is_the_first_when_the_headroom_passes_its_step() -> No
         admit(1_000_000)
     assert first.value.needed_bytes == 29_900_000
     assert admitted_need(admit, first.value) == 29_900_000
+    admit(29_900_000 + 29_900_000 // 4)
     admit(suggested_budget(29_900_000))
 
 
@@ -303,9 +353,10 @@ def test_an_admitted_need_of_a_step_that_never_passes_is_its_first_need() -> Non
         step(10)
     assert admitted_need(admit, first.value) == first.value.needed_bytes == 11
     assert len(checked) == 16
-    # Each check is at the suggested budget of the need before it.
-    assert checked[0] == _MIB
-    assert checked[1:] == [suggested_budget(budget + 1) for budget in checked[:-1]]
+    # Each check is a quarter more than the need before it, unrounded: 11
+    # and 2, then 14 and 3, 18 and 4.
+    assert checked[:3] == [13, 17, 22]
+    assert all(later > earlier for earlier, later in zip(checked, checked[1:]))
 
 
 # The storage planner.
@@ -890,7 +941,10 @@ def test_a_csc_conversion_of_short_rows_names_the_budget_of_its_pointers(
     convert = _csc_conversion(source, scratch)
 
     refusal = named_budget_runs(
-        convert, 1, item="the pointers and one entry of the CSC row conversion"
+        convert,
+        1,
+        item="the pointers and one entry of the CSC row conversion",
+        setting=None,
     )
     np.testing.assert_array_equal(convert(refusal.needed_bytes), values)
 
@@ -911,7 +965,9 @@ def test_a_csc_conversion_names_the_budget_of_its_widest_row_beside_its_pointers
     # any entry is read, naming the budget of the row with the most entries;
     # one byte less is refused once every entry is read, as that row is.
     operation = "shuffled H5AD import" if shuffled else "CSC row conversion"
-    refusal = named_budget_runs(convert, 1, item=f"one row of the {operation}")
+    refusal = named_budget_runs(
+        convert, 1, item=f"one row of the {operation}", setting=None
+    )
     assert f"Beside the {pointers} bytes of the matrix's column pointers" in str(
         refusal
     )
@@ -1672,6 +1728,7 @@ def test_the_sparse_row_conversion_names_its_pointers_and_its_widest_row(
         lambda memory: convert(diagonal, memory),
         100,
         item="the row pointers and one entry of the sparse row conversion",
+        setting=None,
     )
     assert pointers.needed_bytes == 3 * 32 + 2 * (96 + 48 + 64)
     # A bucket holds whole rows, so reading the first row reads its two entries.
@@ -1680,6 +1737,7 @@ def test_the_sparse_row_conversion_names_its_pointers_and_its_widest_row(
         lambda memory: convert(matrix, memory),
         600,
         item="one row of the sparse row conversion",
+        setting=None,
     )
     assert widest.needed_bytes == 3 * 32 + 2 * (2 * 96 + 2 * 48 + 64)
     assert list(tmp_path.iterdir()) == []
@@ -1752,13 +1810,15 @@ def test_count_value_scans_name_the_bytes_of_their_longest_vector() -> None:
         ),
         10,
         item="the 3 values of the longest compressed vector",
+        setting=None,
     )
-    # The longest vector holds three values, scanned at 72 bytes each.
+    # The longest vector holds three values, scanned at 72 bytes each. A
+    # scan runs within what its import leaves, which restates its refusal in
+    # terms of the whole budget, so it names no budget of its own.
     assert refusal.needed_bytes == 3 * 72
     assert str(refusal) == (
         "Scanning the count values holds about 216 bytes for the 3 values of the "
-        "longest compressed vector, more than the memory budget of 10 bytes. "
-        "Raise mem_budget to at least 1 MiB."
+        "longest compressed vector, more than the memory budget of 10 bytes."
     )
     dense = np.ones((5, 3), dtype=np.uint16)
     refusal = named_budget_runs(
@@ -1767,6 +1827,7 @@ def test_count_value_scans_name_the_bytes_of_their_longest_vector() -> None:
         ),
         0,
         item="the 3 values of one dense row",
+        setting=None,
     )
     assert refusal.needed_bytes == 3 * 72
     # A row of one value names it alone.
@@ -1776,6 +1837,7 @@ def test_count_value_scans_name_the_bytes_of_their_longest_vector() -> None:
         ),
         0,
         item="the 1 value of one dense row",
+        setting=None,
     )
     assert refusal.needed_bytes == 72
 
@@ -1827,6 +1889,7 @@ def test_a_10x_scan_names_the_longest_barcode_of_every_run(tmp_path: Path) -> No
             lambda memory: reader.count_value_ranges(memory),
             2 * 72,
             item="the 6 values of the longest compressed vector",
+            setting=None,
         )
         # An import in the file's order scans within what its budget leaves
         # beside the reader's arrays, so its refusal is the scan's beside them.

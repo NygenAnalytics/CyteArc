@@ -377,6 +377,7 @@ class HistogramMemoryError(MemoryBudgetError):
         )
 
     def __reduce__(self) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
+        # The estimate and the remedy come back with the rest of the state.
         return (
             _restore_histogram_memory_error,
             (
@@ -386,8 +387,6 @@ class HistogramMemoryError(MemoryBudgetError):
                 self.budget_bytes,
                 self.item,
                 self.n_distinct,
-                self.estimated_needed_bytes,
-                self.remedy,
             ),
             self.__dict__,
         )
@@ -400,18 +399,20 @@ def _restore_histogram_memory_error(
     budget_bytes: int,
     item: str,
     n_distinct: int,
-    estimated_needed_bytes: int | None,
-    remedy: str | None,
+    *_rows: int,
 ) -> HistogramMemoryError:
-    """Rebuild a pickled HistogramMemoryError, whose fields are keywords."""
+    """Rebuild a pickled HistogramMemoryError, whose fields are keywords; its pickled state restores the others.
+
+    A pickle of 1.4.0 also passes the rows read and the rows of counts,
+    which its state keeps; it holds no estimate for every row.
+    """
     return error_type(
         message,
         needed_bytes=needed_bytes,
         budget_bytes=budget_bytes,
         item=item,
         n_distinct=n_distinct,
-        estimated_needed_bytes=estimated_needed_bytes,
-        remedy=remedy,
+        estimated_needed_bytes=None,
     )
 
 

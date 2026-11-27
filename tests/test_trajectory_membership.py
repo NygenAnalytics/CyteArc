@@ -80,7 +80,12 @@ from .test_trajectory_record_paths import (
     _write_graph_payload,
 )
 from tests.storage_helpers import by_cell_id
-from tests.memory_helpers import NEEDS_NAMING_ONE_MIB, held_within_charge, named_budget
+from tests.memory_helpers import (
+    NEEDS_NAMING_ONE_MIB,
+    headroom_budget,
+    held_within_charge,
+    named_budget,
+)
 
 _SOURCES = ["t1"]
 
@@ -1918,11 +1923,12 @@ def test_a_membership_that_outweighs_its_graph_is_refused_once() -> None:
     assert reads == []
 
     # The read of the cells' labels that follows the membership needs more
-    # than the membership, beside the allowance of a read, and the budget
-    # that the refusal names leaves room for it: the call runs there,
-    # reading the graph once.
+    # than the membership, beside the allowance of a read, and a quarter more
+    # than the refusal needs, which the budget it names rounds up, leaves
+    # room for it: the call runs there, reading the graph once.
+    named_budget(refused.value)
     reads.clear()
-    _set_budget(store, named_budget(refused.value))
+    _set_budget(store, headroom_budget(refused.value))
     store.trajectory.lineage_membership(branching.curves, invalidate_cache=True)
     assert reads == ["graph"]
 

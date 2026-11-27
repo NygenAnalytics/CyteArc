@@ -42,7 +42,7 @@ from tests.clone_helpers import (
     write_lines,
 )
 from cytearc.utils.memory_budget import MemoryLedger
-from tests.memory_helpers import climb_refusals, named_budget
+from tests.memory_helpers import climb_refusals, headroom_budget, named_budget
 from tests.perturbation_helpers import use_python_kernels
 from tests.row_store_helpers import asked_bytes, finalized_bytes, free_disk
 from tests.storage_helpers import by_cell_id, open_store
@@ -1641,7 +1641,8 @@ def test_measuring_counts_the_codes_of_values_that_hold_forbidden_characters(
         "measuring the widest value of each field",
     ]
     # Reading the ID of the V call's first contig, x_contig_1, is checked too,
-    # and the budget that its refusal names reads it.
+    # and a quarter more than its refusal needs, which the budget it names
+    # rounds up, reads it.
     contigs = contigs_within(10**9)
     with pytest.raises(ValueError):
         contigs.measure(10**9, cells=_CELLS, clones=None)
@@ -1651,7 +1652,8 @@ def test_measuring_counts_the_codes_of_values_that_hold_forbidden_characters(
     assert refused.value.item == (
         "the sequence_id of a contig whose value the format forbids"
     )
-    contigs.ledger.budget = named_budget(refused.value)
+    named_budget(refused.value)
+    contigs.ledger.budget = headroom_budget(refused.value)
     assert contigs._contig_id(0) == "x_contig_1"
 
 

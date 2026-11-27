@@ -29,7 +29,7 @@ from cytearc.storage.identity import CountSummary
 from cytearc.storage.sharding import CountLayoutMemoryError, fit_count_layout
 from cytearc.utils.memory_budget import MemoryBudgetError, refusal_words
 from cytearc.writers import H5adToZarr, SparseToZarr
-from tests.memory_helpers import named_budget
+from tests.memory_helpers import headroom_budget, named_budget
 from tests.storage_helpers import write_count_store
 
 
@@ -292,7 +292,8 @@ def test_a_count_layout_refusal_states_the_producer_apart_from_resident_data(
         except MemoryError:
             pass
 
-    layout_at(named_budget(refused.value))
+    named_budget(refused.value)
+    layout_at(headroom_budget(refused.value))
 
 
 @pytest.fixture(scope="module")

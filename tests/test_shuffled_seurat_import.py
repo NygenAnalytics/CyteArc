@@ -39,7 +39,7 @@ from cytearc.storage.count_matrix import CountMatrixPolicy
 from cytearc.storage.refs import artifact_path
 from cytearc.utils.memory_budget import MemoryBudgetError
 from cytearc.writers.seurat import SeuratToZarr
-from tests.memory_helpers import named_budget
+from tests.memory_helpers import headroom_budget, named_budget
 from tests.storage_helpers import drawn_shuffles, shuffle_refusal
 from tests.test_seurat_import import _ordered_factor
 from tests.test_seurat_reader import _Wire, _write_fragment_matrix_fixture
@@ -822,9 +822,11 @@ def test_a_shuffled_import_names_one_budget_for_a_bucket_and_one_cell(
     )
     held = adt + 8 * (n_cells + 1) + 16 * n_cells
     assert refused.needed_bytes > held + 4 * (len(_GENES) * (3 * 8 + 32) + 112)
-    # With the budget it names, the import reads and spills one cell, and a
-    # later step refuses for itself, if at all.
-    later = refusal(named_budget(refused), dump=True)
+    # With a quarter more than it needs, which the budget it names rounds up,
+    # the import reads and spills one cell, and a later step refuses for
+    # itself, if at all.
+    named_budget(refused)
+    later = refusal(headroom_budget(refused), dump=True)
     assert later is None or "one cell of assay" not in later.item
     assert not list(tmp_path.glob("cytearc-sparse-*"))
 
@@ -1473,6 +1475,11 @@ def test_an_import_names_a_budget_that_prepares_one_cell_of_each_assay(
         preparing("ADT"), rna.needed_bytes, item="preparing one cell of assay 'ADT'"
     )
     assert adt.needed_bytes > rna.needed_bytes
-    # At the budget that ADT's refusal names, the import runs.
-    attempt(named_budget(adt))
+    # At a quarter more than ADT's refusal needs, the count layout refuses
+    # next, and a quarter more than the layout needs runs the import.
+    with pytest.raises(MemoryBudgetError) as layout:
+        attempt(headroom_budget(adt))
+    assert layout.value.item == "the default count-matrix policy"
+    named_budget(layout.value)
+    attempt(headroom_budget(layout.value))
     assert not list(tmp_path.glob("cytearc-sparse-*"))

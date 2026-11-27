@@ -268,6 +268,7 @@ def longest_vector_refusal(longest: int, maxBytes: int) -> MemoryBudgetError:
         f"the {_values(int(longest))} of the longest compressed vector",
         int(longest) * _SCAN_BYTES_PER_VALUE,
         max(0, int(maxBytes)),
+        setting=None,
     )
 
 
@@ -497,6 +498,7 @@ def dense_count_ranges(
             f"the {_values(row_values)} of one dense row",
             row_values * _SCAN_BYTES_PER_VALUE,
             max(0, int(maxBytes)),
+            setting=None,
         )
     columns = (
         None
