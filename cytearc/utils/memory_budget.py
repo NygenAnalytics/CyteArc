@@ -50,9 +50,12 @@ __all__ = [
 #: NumPy's buffers of a read that takes values by index arrays, and the
 #: buffer of a file read in part, as a read of part of a shard is, which
 #: Python sizes by the block of the file system. On a local file system, a
-#: read held at most 50 KB of these on Python 3.13 and 97 KB on Python 3.14,
-#: whose buffer of a file read in part is larger; a file system with larger
-#: blocks gives each read a larger buffer.
+#: read that decodes up to 10 chunks at once, Zarr's default async
+#: concurrency, held at most 50 KB of these on Python 3.13 and 97 KB on
+#: Python 3.14, whose buffer of a file read in part is larger; a file system
+#: with larger blocks gives each read a larger buffer. Each further chunk
+#: that a read decodes at once holds up to 12.1 KB more, which the read
+#: geometry charges as ``READ_DECODE_BYTES``.
 READ_ALLOWANCE_BYTES = 128 * 1024
 
 

@@ -20,6 +20,7 @@ from .validation_scope import store_key, validated_once
 
 __all__ = [
     "READ_CHUNK_BYTES",
+    "READ_DECODE_BYTES",
     "ROW_BLOCK_BYTES",
     "ROW_INDEX_BYTES",
     "ROW_KEPT_INDEX_BYTES",
@@ -46,6 +47,14 @@ ROW_BLOCK_BYTES = 512
 #: beside ``READ_ALLOWANCE_BYTES`` for each read in flight: Zarr makes a task
 #: for every one of them before it reads any, 2.1 to 2.4 KB each on Zarr 3.4.
 READ_CHUNK_BYTES = 4 * 1024
+#: ``READ_ALLOWANCE_BYTES`` covers Zarr's objects of the chunks that a read
+#: decodes at once at Zarr's default async concurrency, 10. A plan whose I/O
+#: concurrency is larger raises it, and each further chunk that a read
+#: decodes at once holds its decode's objects beside them: up to 10.6 KB on
+#: Python 3.13 and 12.1 KB on Python 3.14, in reads of 64 and 128 chunks of 4
+#: KiB, sharded and unsharded, at 16 to 128 chunks at once.
+READ_DECODE_BYTES = 12 * 1024
+_ALLOWANCE_DECODES = 10
 
 #: Zarr's orthogonal indexer orders the positions of an index array by chunk
 #: in arrays of int64. While it builds them it holds each position's chunk,
@@ -301,14 +310,20 @@ class ArrayGeometry:
         reading = touched_shards if planned is None else min(touched_shards, planned)
         return min(touched, workers), reading
 
-    def readAllowanceBytes(self, chunks: int) -> int:
-        """Return what one read in flight that touches ``chunks`` chunks holds beside its data.
+    def readAllowanceBytes(self, chunks: int, decodes: int = 1) -> int:
+        """Return what one read in flight that touches ``chunks`` chunks, ``decodes`` of them at once, holds beside its data.
 
-        That is ``READ_ALLOWANCE_BYTES`` for the read and ``READ_CHUNK_BYTES``
-        for each chunk it touches, which matter only beside chunks of tens of
-        kilobytes.
+        That is ``READ_ALLOWANCE_BYTES`` for the read, ``READ_CHUNK_BYTES``
+        for each chunk it touches, and ``READ_DECODE_BYTES`` for each chunk
+        that it decodes at once beyond the 10 that the allowance covers; they
+        matter only beside chunks of tens of kilobytes.
         """
-        return READ_ALLOWANCE_BYTES + max(1, int(chunks)) * READ_CHUNK_BYTES
+        beyond = max(0, int(decodes) - _ALLOWANCE_DECODES)
+        return (
+            READ_ALLOWANCE_BYTES
+            + max(1, int(chunks)) * READ_CHUNK_BYTES
+            + beyond * READ_DECODE_BYTES
+        )
 
     def heldDecodeBytes(self, chunks: int, decodes: int) -> int:
         """Return what a read of ``chunks`` chunks, ``decodes`` at a time, holds beside the chunks it decodes at once.
@@ -325,7 +340,7 @@ class ArrayGeometry:
         """
         touched = max(1, int(chunks))
         decoding = min(touched, max(1, int(decodes)))
-        allowance = self.readAllowanceBytes(touched)
+        allowance = self.readAllowanceBytes(touched, decoding)
         if not self.poolKeepsDecodedChunk:
             return allowance
         return allowance + min(decoding, touched - decoding) * self.nominalChunkBytes()
@@ -375,7 +390,7 @@ class ArrayGeometry:
             rows_bytes
             + touched * self.storedChunkBytes()
             + decoding * self.nominalChunkBytes()
-            + self.readAllowanceBytes(touched)
+            + self.readAllowanceBytes(touched, decoding)
         )
         return rows_bytes + band + self.readScratchBytes
 

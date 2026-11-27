@@ -83,6 +83,45 @@ def test_read_bytes_follow_what_a_zarr_read_holds() -> None:
     )
 
 
+@pytest.mark.parametrize("concurrency", [10, 64])
+def test_a_read_that_decodes_more_chunks_at_once_than_zarrs_default_holds_its_charge(
+    tmp_path, concurrency
+) -> None:
+    from cytearc.storage.async_execution import zarr_io_concurrency
+    from cytearc.storage.geometry import array_geometry
+    from tests.memory_helpers import traced_reruns
+
+    # A shard of 64 chunks of 4 KiB of random bytes, read whole at Zarr's
+    # default async concurrency of 10 and at 64, as a plan whose I/O
+    # concurrency is 64 sets it. Each chunk decoded at once beyond ten holds
+    # Zarr's objects of its decode, about 10 KB, as much as its data.
+    location = tmp_path / "objects.zarr"
+    array = zarr.open_group(store=LocalStore(location), mode="w").create_array(
+        "x", shape=(64, 4_096), chunks=(1, 4_096), shards=(64, 4_096), dtype="uint8"
+    )
+    array[:] = np.random.default_rng(0).integers(0, 255, (64, 4_096), dtype=np.uint8)
+    array = zarr.open_array(store=LocalStore(location), path="x", mode="r")
+    geometry = array_geometry(array)
+    assert geometry is not None
+
+    def read() -> int:
+        import tracemalloc
+
+        before, _ = tracemalloc.get_traced_memory()
+        values = array[:]
+        _, peak = tracemalloc.get_traced_memory()
+        del values
+        return peak - before
+
+    with zarr_io_concurrency(concurrency):
+        held = min(traced_reruns(read, runs=3))
+    charged = geometry.readBytes(64 * 4_096, 64, decodes=concurrency)
+    assert held_within_charge(held, charged)
+    # The chunks decoded at once beyond ten are charged 12 KiB each.
+    beyond = geometry.readAllowanceBytes(64, concurrency) - _allowance(64)
+    assert beyond == max(0, concurrency - 10) * 12 * 1_024
+
+
 def test_a_read_on_cytearcs_pools_holds_its_allowance_where_a_plain_pool_keeps_a_chunk() -> (
     None
 ):
