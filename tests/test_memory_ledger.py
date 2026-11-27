@@ -28,6 +28,7 @@ from cytearc.storage.selections import resolve_generated_selection_artifact
 from cytearc.utils.memory_budget import (
     MemoryBudgetError,
     MemoryLedger,
+    hash_table_bytes,
     memory_refusal,
     python_text_bytes,
     sort_bytes,
@@ -197,6 +198,26 @@ _KINDS = {
 def test_python_text_bytes_refuses_a_character_beyond_unicode() -> None:
     with pytest.raises(ValueError, match="cannot exceed U"):
         python_text_bytes(1, 1, widest=0x110000)
+
+
+@pytest.mark.parametrize(
+    "n_values",
+    [0, 1, 3, 4, 788, 789, 807_404, 807_405, 1_048_583, 1_048_584, 2_000_000],
+)
+def test_hash_table_bytes_counts_the_buckets_of_the_table_pandas_makes(
+    n_values,
+) -> None:
+    from pandas._libs import hashtable
+
+    # pandas makes a table for at most 2**20 + 7 values, of the least power of
+    # two of buckets that holds them at most 77% full, and a table of strings
+    # takes 24 bytes and a bit of flags a bucket, beside a few bytes of its
+    # own; the table grows from there as distinct values fill it.
+    table = hashtable.StringHashTable(n_values)
+    buckets = table.get_state()["n_buckets"]
+    started = hash_table_bytes(n_values, n_distinct=0)
+    assert started == 24 * buckets + buckets // 8
+    assert 0 <= table.sizeof() - started <= 64
 
 
 def test_coding_labels_refuses_before_it_hashes_them() -> None:

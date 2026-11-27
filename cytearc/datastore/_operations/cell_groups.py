@@ -46,7 +46,7 @@ from ...utils.arguments import quoted_value
 from ...utils.memory_budget import (
     MemoryBudgetError,
     MemoryLedger,
-    hash_table_bytes,
+    index_lookup_bytes,
     memory_refusal,
     object_array_bytes,
     python_text_bytes,
@@ -442,7 +442,7 @@ def cell_groups(
             ledger.hold("each labeled cell's code", codes.nbytes)
             ledger.peak(
                 "the groups artifact's cells",
-                hash_table_bytes(n_labeled) + 8 * n_labeled + 16 * n_grouped,
+                index_lookup_bytes(n_labeled, n_grouped, objects=False),
             )
             at = pd.Index(np.asarray(resolved.cell_idx, dtype=np.int64)).get_indexer(
                 grouped_index

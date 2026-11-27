@@ -30,7 +30,13 @@ from ...utils.arguments import (
 )
 from ...utils.arrays import array_digest
 from ...utils.logging import logger
-from ...utils.memory_budget import MemoryBudgetError, MemoryLedger, hash_table_bytes
+from ...utils.memory_budget import (
+    MemoryBudgetError,
+    MemoryLedger,
+    factorize_bytes,
+    object_array_bytes,
+    python_text_bytes,
+)
 
 if TYPE_CHECKING:
     from ...features.enrichment.results import EnrichmentResult
@@ -729,11 +735,23 @@ class _RegulonOperationsMixin(_RegulonOperationsBase):
             ) from error
         labels = np.asarray(resolved.labels)
         n_cells = len(labels)
-        # Whether each label is missing, pandas' hash table of the labels,
-        # and each label's code.
+        # pandas makes a Python string of each label of fixed-width text, of
+        # at most its width, before it hashes them.
+        strings = (
+            object_array_bytes(n_cells)
+            + python_text_bytes(
+                n_cells,
+                n_cells * (labels.itemsize // 4),
+                widest=int(labels.view(np.uint32).max()),
+            )
+            if labels.dtype.kind == "U" and n_cells
+            else 0
+        )
+        # Whether each label is missing, what pandas holds to find the
+        # distinct labels, and the distinct labels or each label's code.
         ledger.peak(
             f"coding the labels of {n_cells} cells",
-            n_cells + hash_table_bytes(n_cells) + _INDEX_BYTES * n_cells,
+            n_cells + strings + factorize_bytes(n_cells) + _INDEX_BYTES * n_cells,
         )
         missing = ~valid_category_mask(labels, missing_mask=resolved.missing_mask)
         if missing.any():

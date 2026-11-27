@@ -16,8 +16,9 @@ fields in their own words, and :func:`memory_refusal` words the refusal of a
 step that has none.
 
 The shared costs below estimate the structures that many steps build, at a
-simple cost for each item: Python strings, fixed-width text, object arrays,
-sorts and hash tables.
+cost for each item that bounds what the structure holds at any size, with the
+growth of pandas' and NumPy's buffers: Python strings, fixed-width text,
+object arrays, sorts, hash tables and index lookups.
 """
 
 import sys
@@ -31,8 +32,10 @@ __all__ = [
     "MemoryBudgetError",
     "MemoryLedger",
     "fixed_text_bytes",
+    "factorize_bytes",
     "hash_table_bytes",
     "held_array_bytes",
+    "index_lookup_bytes",
     "least_admitted_budget",
     "memory_refusal",
     "object_array_bytes",
@@ -389,18 +392,65 @@ def sort_bytes(
     return 2 * held if stable else held
 
 
-#: The bytes of pandas' hash table for each value that it hashes: 16 bytes a
-#: bucket, with 1.3 to 2.6 buckets a value, 30 bytes on average.
-_HASH_TABLE_BYTES = 32
+#: pandas' hash table of strings takes 24 bytes and a bit of flags a bucket,
+#: and a table of other values 16 bytes and the bit, as each table's
+#: ``sizeof`` gives them.
+_HASH_BUCKET_BYTES = 24
+#: The most values that pandas sizes a hash table for before it hashes them.
+_HASH_SIZE_HINT_LIMIT = (1 << 20) + 7
+#: pandas infers the type of an object array that it makes an index of, or
+#: looks up, from arrays of each type that the values could take, 42 bytes a
+#: value.
+_INDEX_INFERENCE_BYTES = 42
 
 
-def hash_table_bytes(n_values: int) -> int:
-    """Return the bytes of the hash table that pandas builds to hash ``n_values`` values.
+def hash_table_bytes(n_values: int, *, n_distinct: int | None = None) -> int:
+    """Return the bytes of the hash table that pandas builds to hash ``n_values`` values, ``n_distinct`` of them distinct.
 
-    ``pd.factorize``, ``pd.unique`` and ``Index.get_indexer`` hash their
-    values into a table that pandas sizes for every value given, whether or
-    not the values repeat, about 32 bytes a value. Beside the table, pandas
-    returns codes and the distinct values, and an object array hashes the
-    values' strings, which fixed-width text becomes first.
+    pandas sizes the table for the values given, at most about a million,
+    and the table grows as the distinct values fill it, as all of the values
+    do unless ``n_distinct`` says fewer. khash keeps a power of two of
+    buckets, at most 77% full, as pandas' ``kh_needed_n_buckets`` gives them:
+    1.3 to 2.6 buckets a value. Each bucket is charged the 24 bytes that a
+    table of strings takes; a table of other values takes 16.
     """
-    return _HASH_TABLE_BYTES * max(0, int(n_values))
+    n_values = max(0, int(n_values))
+    distinct = n_values if n_distinct is None else min(int(n_distinct), n_values)
+    filled = max(min(n_values, _HASH_SIZE_HINT_LIMIT), distinct)
+    buckets = next(
+        b for b in (1 << k for k in range(2, 64)) if int(b * 0.77 + 0.5) >= filled
+    )
+    return _HASH_BUCKET_BYTES * buckets + buckets // 8
+
+
+def factorize_bytes(n_values: int, *, n_distinct: int | None = None) -> int:
+    """Return the bytes that ``pd.factorize`` or ``pd.unique`` holds for ``n_values`` values, beside the codes and distinct values that it returns.
+
+    Beside its hash table, as :func:`hash_table_bytes` counts it, pandas
+    works with two arrays of 8 bytes a value, and gathers the distinct
+    values in a buffer that doubles for objects and grows four times over
+    for numbers before pandas trims it: up to 24 bytes for each distinct
+    value beside the 8 of each that it returns. The values are all distinct
+    unless ``n_distinct`` says fewer.
+    """
+    n_values = max(0, int(n_values))
+    distinct = n_values if n_distinct is None else min(int(n_distinct), n_values)
+    return (
+        hash_table_bytes(n_values, n_distinct=n_distinct)
+        + 16 * n_values
+        + 24 * distinct
+    )
+
+
+def index_lookup_bytes(n_index: int, n_lookups: int, *, objects: bool = True) -> int:
+    """Return the bytes that finding ``n_lookups`` values in a pandas index of ``n_index`` distinct values holds, beside the values given.
+
+    pandas copies the values that it makes the index of, 8 bytes each, and
+    hashes them into a table, as :func:`hash_table_bytes` counts it. It
+    copies the lookups and returns each one's position, 8 bytes each. Before
+    it hashes ``objects``, values or lookups in object arrays, it infers
+    their type, holding 42 bytes a value.
+    """
+    n_index, n_lookups = max(0, int(n_index)), max(0, int(n_lookups))
+    inferring = _INDEX_INFERENCE_BYTES * max(n_index, n_lookups) if objects else 0
+    return 8 * n_index + max(inferring, hash_table_bytes(n_index)) + 16 * n_lookups

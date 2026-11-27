@@ -101,7 +101,7 @@ from ...utils.arguments import bool_argument, integer_argument, quoted_value
 from ...utils.logging import logger
 from ...utils.memory_budget import (
     MemoryLedger,
-    hash_table_bytes,
+    factorize_bytes,
     object_array_bytes,
     python_text_bytes,
     sort_bytes,
@@ -732,17 +732,19 @@ def _value_lengths(
     return lengths
 
 
-def _coding_bytes(n_values: int, width: int) -> int:
+def _coding_bytes(n_values: int, width: int, n_distinct: int) -> int:
     """What coding ``n_values`` stored labels of up to ``width`` ASCII characters with :func:`_sorted_codes` holds.
 
-    pandas hashes a Python string for each label, as an object array, into a
-    table sized for every label, and gives each its code beside a reference
-    to each label; sorting the distinct labels renumbers the codes in place.
+    pandas factorizes a Python string for each label, as an object array, as
+    :func:`~cytearc.utils.memory_budget.factorize_bytes` counts it for
+    ``n_distinct`` distinct labels, and gives each its code beside a
+    reference to each distinct label; sorting the distinct labels renumbers
+    the codes in place.
     """
     return (
         object_array_bytes(n_values)
         + python_text_bytes(n_values, n_values * width)
-        + hash_table_bytes(n_values)
+        + factorize_bytes(n_values, n_distinct=n_distinct)
         + 16 * n_values
     )
 
@@ -1392,7 +1394,9 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         ledger.hold("each cell's receptor type code", 8 * n_cells)
         ledger.peak(
             "coding the cells' receptor types",
-            _coding_bytes(n_cells, stored_types.dtype.itemsize // 4),
+            _coding_bytes(
+                n_cells, stored_types.dtype.itemsize // 4, len(RECEPTOR_TYPES)
+            ),
         )
         _types, type_codes = _sorted_codes(receptor_type)
         types_bytes = receptor_type.nbytes

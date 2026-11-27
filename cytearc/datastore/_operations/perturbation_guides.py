@@ -92,7 +92,7 @@ from ...utils.logging import logger
 from ...utils.memory_budget import (
     MemoryLedger,
     fixed_text_bytes,
-    hash_table_bytes,
+    index_lookup_bytes,
     memory_refusal,
     object_array_bytes,
     python_text_bytes,
@@ -801,12 +801,13 @@ def _guide_positions(
 ) -> np.ndarray:
     """Find each call's guide among the assay's guides, keeping the positions charged.
 
-    The lookup is pandas' hash table of the guide IDs, beside each call's
-    position.
+    The lookup is a pandas index of the guide IDs, as
+    :func:`~cytearc.utils.memory_budget.index_lookup_bytes` counts it, which
+    gives each call's position.
     """
     ledger.peak(
         "finding the called guides",
-        hash_table_bytes(len(guide_ids)) + 8 * len(features),
+        index_lookup_bytes(len(guide_ids), len(features)),
     )
     positions = _called_guide_positions(features, guide_ids, assay)
     ledger.hold("the called guides' positions", positions.nbytes)
