@@ -2347,12 +2347,13 @@ def test_a_matrix_market_parse_of_the_largest_values_holds_no_more_than_its_char
             handle.write(text)
         return path
 
-    # 120,000 lines of about 60 characters in chunks of 10,000 and 40,000,
+    # 120,000 lines of about 60 characters in chunks of 40,000 and 120,000,
     # where the lines outweigh the buffers that pandas' reader holds whatever
-    # the chunk, which the charge leaves out.
+    # the chunk, which the charge leaves out: about 1.2 MB with pandas 2.2,
+    # more than a tenth of the charge of 10,000 lines.
     large = matrix_market_header(write(tmp_path / "large.mtx", 120_000))
     peaks = {
-        chunk_rows: _traced_parse(large, chunk_rows) for chunk_rows in (10_000, 40_000)
+        chunk_rows: _traced_parse(large, chunk_rows) for chunk_rows in (40_000, 120_000)
     }
     for chunk_rows, peak in peaks.items():
         assert held_within_charge(peak, matrix_market_parse_bytes(large, chunk_rows)), (
@@ -2360,9 +2361,9 @@ def test_a_matrix_market_parse_of_the_largest_values_holds_no_more_than_its_char
         )
     # The charge grows with the lines of a chunk at least as fast as the parse.
     assert held_within_charge(
-        peaks[40_000] - peaks[10_000],
-        matrix_market_parse_bytes(large, 40_000)
-        - matrix_market_parse_bytes(large, 10_000),
+        peaks[120_000] - peaks[40_000],
+        matrix_market_parse_bytes(large, 120_000)
+        - matrix_market_parse_bytes(large, 40_000),
     )
 
 

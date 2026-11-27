@@ -12,8 +12,10 @@ import re
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 import zarr
+from packaging.version import Version
 
 from cytearc.metadata.rows import read_rows, read_text_rows, read_whole, row_read_bytes
 from cytearc.metadata.selection import (
@@ -212,13 +214,16 @@ def test_hash_table_bytes_counts_the_buckets_of_the_table_pandas_makes(
 
     # pandas makes a table for at most 2**20 + 7 values, of the least power of
     # two of buckets that holds them at most 77% full, and a table of strings
-    # takes 24 bytes and a bit of flags a bucket, beside a few bytes of its
-    # own; the table grows from there as distinct values fill it.
+    # takes 24 bytes and a bit of flags a bucket from pandas 3.1 on, 16 bytes
+    # and the bit before, beside a few bytes of its own; the table grows from
+    # there as distinct values fill it. The charge counts 3.1's buckets, which
+    # bound the earlier ones.
     table = hashtable.StringHashTable(n_values)
     buckets = table.get_state()["n_buckets"]
     started = hash_table_bytes(n_values, n_distinct=0)
     assert started == 24 * buckets + buckets // 8
-    assert 0 <= table.sizeof() - started <= 64
+    bucket_bytes = 24 if Version(pd.__version__) >= Version("3.1") else 16
+    assert 0 <= table.sizeof() - (bucket_bytes * buckets + buckets // 8) <= 64
 
 
 def test_coding_labels_refuses_before_it_hashes_them() -> None:
