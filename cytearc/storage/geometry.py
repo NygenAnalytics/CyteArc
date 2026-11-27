@@ -62,11 +62,15 @@ _INDEX_BYTES = 40
 _SHARD_INDEX_BYTES = 64
 
 #: NumPy keeps each value of variable-width text in a 16-byte element, and a
-#: value of more than 15 bytes in UTF-8 also in an arena beside the array
-#: (NEP 55). Zarr's ``vlen-utf8`` codec stores each value's UTF-8 bytes
-#: behind a 4-byte length.
+#: value of more than 15 bytes in UTF-8 also in an arena beside the array,
+#: behind its size, a byte for a value of up to 255 bytes and 8 for a longer
+#: one, in an arena that NumPy grows by a quarter at a time (NEP 55). Zarr's
+#: ``vlen-utf8`` codec stores each value's UTF-8 bytes behind a 4-byte length.
 _TEXT_ELEMENT_BYTES = 16
 _TEXT_INLINE_BYTES = 15
+_TEXT_SHORT_SIZE_LIMIT = 255
+_TEXT_SHORT_SIZE_BYTES = 1
+_TEXT_SIZE_BYTES = 8
 _TEXT_LENGTH_BYTES = 4
 #: The most bytes of fixed-width text, and the most values, that a measure of
 #: variable-width text casts its values to at once, and the most characters
@@ -89,13 +93,15 @@ def _decode_bytes(
     Zarr's codec holds the chunk's stored bytes and makes a Python string of
     each value, referenced from an object array, of which NumPy makes its
     values; NumPy asks each string for its UTF-8 bytes, which a string beyond
-    ASCII then keeps beside its characters. ``utf8``, ``characters`` and
-    ``arena`` are the values' UTF-8 bytes, characters and arena bytes in all,
-    and ``widest`` the widest code point of their characters.
+    ASCII then keeps beside its characters, with a terminating byte.
+    ``utf8``, ``characters`` and ``arena`` are the values' UTF-8 bytes,
+    characters and arena bytes in all, and ``widest`` the widest code point
+    of their characters. The arena may have grown by a quarter beyond its
+    bytes.
     """
     stored = _TEXT_LENGTH_BYTES * values + utf8
-    copies = utf8 if widest > 0x7F else 0
-    kept = _TEXT_ELEMENT_BYTES * values + arena
+    copies = utf8 + values if widest > 0x7F else 0
+    kept = _TEXT_ELEMENT_BYTES * values + -(-5 * arena // 4)
     return (
         stored
         + object_array_bytes(values)
@@ -106,8 +112,15 @@ def _decode_bytes(
 
 
 def _arena_bytes(utf8: np.ndarray) -> int:
-    """The bytes of NumPy's arena that values of these UTF-8 lengths take: those of each value of more than 15 bytes."""
-    return int(np.where(utf8 > _TEXT_INLINE_BYTES, utf8, 0).sum())
+    """The bytes of NumPy's arena that values of these UTF-8 lengths take before it grows.
+
+    A value of up to 15 bytes takes none; a longer value takes its bytes
+    behind its size.
+    """
+    sized = np.where(
+        utf8 <= _TEXT_SHORT_SIZE_LIMIT, _TEXT_SHORT_SIZE_BYTES, _TEXT_SIZE_BYTES
+    )
+    return int(np.where(utf8 > _TEXT_INLINE_BYTES, utf8 + sized, 0).sum())
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,7 +131,7 @@ class TextExtent:
     UTF-8 bytes of any value, and ``widest`` the widest code point of any
     value's characters, 0 for none. ``values``, ``characterTotal`` and
     ``arenaBytes`` count every value, its characters, and the bytes that
-    NumPy's arena takes for them. ``chunkDecodeBytes`` and
+    NumPy's arena takes for them before it grows. ``chunkDecodeBytes`` and
     ``chunkStoredBytes`` are the most that decoding one stored chunk holds and
     the most bytes of one chunk as Zarr stores it before it compresses it,
     each chunk counted by its own values. ``measureBytes`` is the most that
@@ -136,14 +149,19 @@ class TextExtent:
     measureBytes: int
 
     def valueBytes(self) -> int:
-        """Return the most bytes that NumPy holds for one value, its element and its bytes in the arena."""
+        """Return the most bytes that NumPy holds for one value, its element and its share of the arena once the arena has grown."""
         if self.utf8Bytes <= _TEXT_INLINE_BYTES:
             return _TEXT_ELEMENT_BYTES
-        return _TEXT_ELEMENT_BYTES + self.utf8Bytes
+        size = (
+            _TEXT_SHORT_SIZE_BYTES
+            if self.utf8Bytes <= _TEXT_SHORT_SIZE_LIMIT
+            else _TEXT_SIZE_BYTES
+        )
+        return _TEXT_ELEMENT_BYTES + -(-5 * (self.utf8Bytes + size) // 4)
 
     def keptBytes(self) -> int:
-        """Return the bytes that NumPy holds for every value: their elements and their arena."""
-        return _TEXT_ELEMENT_BYTES * self.values + self.arenaBytes
+        """Return the most bytes that NumPy holds for every value: their elements and their arena once it has grown."""
+        return _TEXT_ELEMENT_BYTES * self.values + -(-5 * self.arenaBytes // 4)
 
 
 @dataclass(frozen=True, slots=True)
@@ -674,9 +692,13 @@ def _utf8_lengths(
                 np.count_nonzero(points >= limit, axis=1)
                 for limit in (0x80, 0x800, 0x10000)
             )
-        # The part as NumPy keeps it, its code points, a comparison of them
-        # and the counts it gives, and the fits of the part's values.
-        kept = _TEXT_ELEMENT_BYTES * part.size + int(utf8[positions].sum())
+        # The part as NumPy keeps it, with each value's size in an arena grown
+        # by a quarter, its code points, a comparison of them and the counts
+        # it gives, and the fits of the part's values.
+        kept = (
+            _TEXT_ELEMENT_BYTES * part.size
+            + 5 * (int(utf8[positions].sum()) + _TEXT_SIZE_BYTES * part.size) // 4
+        )
         cast = points.nbytes * 5 // 4
         part_bytes = max(part_bytes, kept + cast + 24 * window.size)
         del part, points, fits

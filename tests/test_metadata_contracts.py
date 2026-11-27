@@ -1353,11 +1353,6 @@ def _sized_bytes(utf8: int) -> int:
     return utf8 + (1 if utf8 <= 255 else 8)
 
 
-def _arena_bytes(utf8: int) -> int:
-    """The bytes of a value of ``utf8`` UTF-8 bytes that the extent of variable-width text counts in NumPy's arena: none up to 15 bytes, then its bytes."""
-    return utf8 if utf8 > 15 else 0
-
-
 @pytest.mark.parametrize("part_bytes", [None, 1], ids=["parts", "one value a part"])
 @pytest.mark.parametrize(
     "values",
@@ -1410,7 +1405,7 @@ def test_the_extent_of_variable_width_text_bounds_each_value(
         )
         assert extent.values == len(values)
         assert extent.characterTotal == sum(map(len, values))
-        assert extent.arenaBytes == sum(map(_arena_bytes, utf8))
+        assert extent.arenaBytes == sum(map(_sized_bytes, utf8))
         assert text_width(array) == extent.characters
 
 
@@ -1447,13 +1442,11 @@ def test_numpy_holds_variable_width_values_as_their_extent_counts(
     assert extent.keptBytes() <= charged
     # NumPy keeps each value's 16-byte element and, beyond 15 bytes, its
     # sized bytes in an arena that it grows by a quarter at a time (NEP 55),
-    # so it holds at least the elements and the sized bytes. The extent
-    # counts the elements and the values' bytes, and leaves out the sizes and
-    # the arena's growth, at most a quarter of the arena beside them.
+    # so it holds at least the elements and the sized bytes.
     sized = _sized_bytes(encoded_bytes)
     least = len(values) * (16 + sized)
     assert least <= held
-    assert held_within_charge(held, extent.keptBytes() + extent.arenaBytes // 4)
+    assert held_within_charge(held, extent.keptBytes())
 
 
 def test_a_column_of_variable_width_text_is_measured_once_in_an_operation(
@@ -1557,7 +1550,7 @@ def test_measuring_variable_width_text_is_charged_before_and_as_it_reads(
     ledger = MemoryLedger(None, "Reading the IDs")
     taken = read_rows(ledger, values.astype(np.dtypes.StringDType()), rows, item="x")
     utf8 = [len(value.encode("utf-8")) for value in taken.tolist()]
-    assert ledger.held_bytes >= 16 * len(utf8) + sum(map(_arena_bytes, utf8))
+    assert ledger.held_bytes >= 16 * len(utf8) + sum(map(_sized_bytes, utf8))
 
 
 # Values of random digits and then one character repeated, which compress as
@@ -1715,7 +1708,7 @@ def test_reads_of_variable_width_text_hold_what_they_charge(
     traced = {}
     # An operation measures the column once, before its reads.
     with validation_scope():
-        extent = variable_text_extent(stored)
+        variable_text_extent(stored)
         for name, (read, planned) in reads.items():
             traced[name] = traced_charge(read)
             assert held_within_charge(traced[name].held, traced[name].charged), name
@@ -1723,12 +1716,10 @@ def test_reads_of_variable_width_text_hold_what_they_charge(
                 name
             )
             # What the read returns stays charged, beside the few KiB of
-            # objects that Zarr keeps after a read and up to a quarter of the
-            # arena more, which NumPy grows the arena by and the charge leaves
-            # out.
-            assert held_within_charge(
-                traced[name].kept, traced[name].kept_charged + extent.arenaBytes // 4
-            ), name
+            # objects that Zarr keeps after a read.
+            assert held_within_charge(traced[name].kept, traced[name].kept_charged), (
+                name
+            )
     if shards is None:
         # One row decodes its chunk, which holds at least the known bytes of
         # the chunk's values, its stored bytes as compressed among them, and
@@ -1738,7 +1729,7 @@ def test_reads_of_variable_width_text_hold_what_they_charge(
         key = stored.metadata.encode_chunk_key((int(one[0]) // chunks,))
         compressed = os.path.getsize(tmp_path / "ids.zarr" / "ids" / key)
         least, most = _chunk_bytes(chunk)
-        row = 3 * (16 + _arena_bytes(len(values[one[0]].encode("utf-8"))))
+        row = 3 * (16 + _sized_bytes(len(values[one[0]].encode("utf-8"))) * 5 // 4 + 1)
         assert traced["one row"].held >= compressed + least
         assert traced["one row"].charged <= 2 * most + row + 132 * 1024
 
