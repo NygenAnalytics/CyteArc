@@ -278,20 +278,25 @@ def _bytes(nbytes: int) -> int:
     return resolved
 
 
-#: The bytes of a Python string beside its characters, between the 41 of
-#: ASCII text and the 60 of text beyond U+FFFF.
-_STRING_BYTES = 49
+#: The bytes of a Python string beside its characters: 41 for ASCII text, and
+#: at most 60 for text beyond ASCII.
+_ASCII_STRING_BYTES = 41
+_STRING_BYTES = 60
 
 
 def python_text_bytes(n_values: int, characters: int, *, widest: int = 0x7F) -> int:
     """Return the bytes of ``n_values`` Python strings that hold ``characters`` characters in all.
 
-    Each string takes about 49 bytes beside its characters, which take a
-    byte each, two when ``widest``, the widest code point of any string, is
-    beyond U+00FF, and four when it is beyond U+FFFF.
+    An ASCII string takes 41 bytes beside its characters, a byte each. Where
+    ``widest``, the widest code point of any string, is beyond ASCII, a
+    string takes at most 60 bytes beside its characters, which take a byte
+    each, two when ``widest`` is beyond U+00FF and four when it is beyond
+    U+FFFF.
     """
     if widest > 0x10FFFF:
         raise ValueError(f"A code point cannot exceed U+10FFFF, not {widest:#x}")
+    if widest <= 0x7F:
+        return int(n_values) * _ASCII_STRING_BYTES + int(characters)
     width = 1 if widest <= 0xFF else 2 if widest <= 0xFFFF else 4
     return int(n_values) * _STRING_BYTES + width * int(characters)
 
