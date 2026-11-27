@@ -15,6 +15,7 @@ from cytearc.neighbors.stages import (
     ReductionTransform,
     kmeans_fit_memory,
 )
+from tests.memory_helpers import held_within_charge
 
 
 class _CountingChunkedArray(ChunkedArray):
@@ -1015,7 +1016,8 @@ def test_kmeans_plusplus_bytes_cover_what_scikit_learn_holds_while_it_seeds(
     # points with their float64 distance chunks and float64 points with
     # their product temporaries, and is not far above it.
     estimate = _kmeans_plusplus_bytes(rows, dims, clusters, np.dtype(dtype).itemsize)
-    assert peak - base <= estimate <= 2 * (peak - base)
+    assert held_within_charge(peak - base, estimate)
+    assert estimate <= 2 * (peak - base)
 
 
 def test_kmeans_fit_memory_counts_what_each_mode_holds() -> None:

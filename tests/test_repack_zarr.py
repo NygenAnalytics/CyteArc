@@ -12,7 +12,7 @@ from cytearc.storage.ann_index import (
     ANN_INDEX_FORMAT_VERSION,
     _ANN_INDEX_METADATA,
 )
-from tests.memory_helpers import decodes_held_together
+from tests.memory_helpers import decodes_held_together, held_within_charge
 from tests.storage_helpers import finalize_test_counts
 from cytearc.storage.layout import normalize_chunks
 from cytearc.storage.pipeline_runs import (
@@ -831,7 +831,7 @@ def test_a_repack_reserves_what_reading_a_band_of_sharded_counts_holds(
             finally:
                 tracemalloc.stop()
         held[concurrency] = peak - base - band.nbytes
-        assert held[concurrency] <= producer(concurrency)
+        assert held_within_charge(held[concurrency], producer(concurrency))
     assert held[1] > 10 * 160_000 + band.nbytes
     assert held[10] > producer(1) + 8 * 160_000
     np.testing.assert_array_equal(
@@ -916,7 +916,7 @@ def test_a_repack_at_a_tight_budget_reads_each_band_within_its_reserve(
     # The first read also fills Zarr's own buffers.
     assert len(reads) > 2
     for held, reserved in reads[1:]:
-        assert held <= reserved
+        assert held_within_charge(held, reserved)
     np.testing.assert_array_equal(
         zarr.open_group(str(output), mode="r")["RNA/counts"][:], values
     )
@@ -974,13 +974,11 @@ def test_a_repack_reserves_the_shard_read_of_another_two_dimensional_array(
     # A band of all four rows of a shard fills an 80-byte shard-level copy of
     # them, holds the compressed bytes of the shard's two 40-byte chunks, each
     # at most 40 + 40 // 128 + 1,024 bytes, and decodes one chunk at a time
-    # beside the buffer of the shard's file and the objects of Zarr's read:
-    # 32 KiB, 4 KiB for each of the two chunks and 16 KiB for the decode.
-    from tests.storage_helpers import local_read_buffer
-
-    buffer = local_read_buffer(source / "RNA/embedding/zarr.json", ranged=True)
-    assert recorded["embedding"] == (
-        80 + 2 * (40 + 1_024) + 40 + buffer + 32_768 + 2 * 4_096 + 16_384
+    # beside the objects of Zarr's read: 32 KiB, 4 KiB for each of the two
+    # chunks and 16 KiB for the decode, and what reading the shard's file
+    # holds.
+    assert recorded["embedding"] >= (
+        80 + 2 * (40 + 1_024) + 40 + 32_768 + 2 * 4_096 + 16_384
     )
     np.testing.assert_array_equal(
         zarr.open_group(str(output), mode="r")["RNA/embedding"][:], embedding

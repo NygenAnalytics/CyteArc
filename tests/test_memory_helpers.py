@@ -1,13 +1,28 @@
-"""The helpers that read the budget a memory refusal names and trace what a call or a pipe end holds."""
+"""The helpers that compare a traced peak with its charge, read the budget a memory refusal names and trace what a call or a pipe end holds."""
 
 import pytest
 
 from tests.memory_helpers import (
     TracedPipeEnd,
+    held_within_charge,
     named_budget,
     traced_charge,
     traced_reruns,
 )
+
+
+def test_a_peak_stays_within_its_charge_up_to_a_tenth_of_it_and_128_kib() -> None:
+    # A charge of 1,000,000 bytes allows 1,100,000 and 131,072 more.
+    assert held_within_charge(1_231_072, 1_000_000)
+    assert not held_within_charge(1_231_073, 1_000_000)
+    # A call charged nothing may hold the 131,072 bytes alone.
+    assert held_within_charge(131_072, 0)
+    assert not held_within_charge(131_073, 0)
+    assert held_within_charge(0, 1_000_000)
+    # Three arrays of 8 bytes for each of 30,000 cells pass a charge that
+    # leaves one of them out, and a charge a tenth short is within the slack.
+    assert not held_within_charge(720_000, 480_000)
+    assert held_within_charge(720_000, 648_000)
 
 
 def test_named_budget_reads_the_budget_that_a_refusal_closes_with() -> None:

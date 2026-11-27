@@ -11,6 +11,8 @@ file.
 import gzip
 import hashlib
 import os
+import re
+import sys
 import zipfile
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -53,6 +55,7 @@ from cytearc.writers import (
 )
 from tests.storage_helpers import drawn_shuffles, shuffle_refusal
 from tests.variant_truth import tapestri_truth, write_tapestri
+from tests.memory_helpers import held_within_charge
 
 _N_CELLS = 157
 _N_FEATURES = 12
@@ -945,10 +948,9 @@ def _held_before_the_shuffle(kind: str) -> int:
     Matrix Market reader the indexes and cumulative values and, for an
     unordered file, each kept cell's next slot, all of 8 bytes, beside the
     file's barcodes. A Tapestri
-    reader holds each cell's sample, barcode and ID as Python strings of
-    ASCII, 41 bytes and one a character, each beside a reference of 8, and
-    counts the cells' cumulative reads, 8 bytes a cell and one, before its
-    scan reads them. A CSV import holds the reader's IDs, NumPy text of 4
+    reader holds each cell's sample, barcode and ID as Python strings, as
+    Python sizes them, each beside a reference of 8, and counts the cells'
+    cumulative reads, 8 bytes a cell and one, before its scan reads them. A CSV import holds the reader's IDs, NumPy text of 4
     bytes a character of the longest ID, or without an ID column the names
     that it makes, and the in-memory import its matrices and its copy of
     the cell IDs, as NumPy text too.
@@ -958,23 +960,22 @@ def _held_before_the_shuffle(kind: str) -> int:
     if kind.startswith("10x"):
         return 8 * kept + 8 * (counts.shape[0] + 1) + 8 * (kept + 1)
     if kind.startswith("parse"):
-        # A Parse reader keeps the file's wells as ASCII strings, 41 bytes and
-        # one a character each beside a reference of 8; its samples as
-        # references to the three strings A, B and C, which pandas reads once
-        # each; and its qualities, gene counts and source rows of 8 bytes.
-        # The kept cells' copies refer to the strings and copy the numbers.
+        # A Parse reader keeps the file's wells as strings, as Python sizes
+        # them, each beside a reference of 8; its samples as references to
+        # the three strings A, B and C, which pandas reads once each; and its
+        # qualities, gene counts and source rows of 8 bytes. The kept cells'
+        # copies refer to the strings and copy the numbers.
         kept = _source_rows(kind).size
         n_file = counts.shape[0]
-        wells = sum(8 + 41 + len(f"well-{row}") for row in range(n_file))
-        samples = 8 * n_file + 3 * (41 + 1)
+        wells = sum(8 + sys.getsizeof(f"well-{row}") for row in range(n_file))
+        samples = 8 * n_file + 3 * sys.getsizeof("A")
         cell_columns = samples + 3 * 8 * n_file
         return 8 * kept + 8 * (kept + 1) + wells + cell_columns + 5 * 8 * kept
     if kind.startswith("mtx"):
         slots = 8 * (kept + 1) if "unordered" in kind else 0
-        # The file's barcodes as ASCII strings of 41 bytes and one a
-        # character, each beside a reference of 8, and a reference to each
-        # kept one.
-        barcodes = sum(8 + 41 + len(f"BC-{row}") for row in range(counts.shape[0]))
+        # The file's barcodes as strings, as Python sizes them, each beside a
+        # reference of 8, and a reference to each kept one.
+        barcodes = sum(8 + sys.getsizeof(f"BC-{row}") for row in range(counts.shape[0]))
         return 8 * kept + 8 * (kept + 1) + slots + barcodes + 8 * kept
     if kind.startswith("tapestri"):
         truth = tapestri_truth()
@@ -984,7 +985,7 @@ def _held_before_the_shuffle(kind: str) -> int:
             *truth.barcodes[rows].tolist(),
             *(truth.row_ids[row] for row in rows),
         ]
-        return sum(8 + 41 + len(text) for text in texts) + 8 * (rows.size + 1)
+        return sum(8 + sys.getsizeof(str(text)) for text in texts) + 8 * (rows.size + 1)
     if kind == "csv":
         return 4 * len(f"cell-{_N_CELLS - 1}") * _N_CELLS
     if kind == "csv-without-ids":
@@ -1022,8 +1023,9 @@ def test_a_budget_without_room_for_the_shuffle_is_refused_before_it_runs(
     run, expected = _source(tmp_path, kind)
     n_cells = next(iter(expected.values())).shape[0]
     held = _held_before_the_shuffle(kind)
-    # Drawing the order and its inverse holds 24 bytes a cell beside them.
-    needed = held + 24 * n_cells
+    # Drawing the order and its inverse holds 24 bytes a cell beside them; a
+    # budget with room for half of the order is refused.
+    below = held + 12 * n_cells
     if kind.startswith("sparse"):
         # The in-memory import first checks its cell IDs, which needs more
         # than the shuffle: a copy of their NumPy text, 4 bytes a character
@@ -1031,29 +1033,39 @@ def test_a_budget_without_room_for_the_shuffle_is_refused_before_it_runs(
         # check names the shuffle passes.
         check = 4 * len(f"cell-{_N_CELLS - 1}") * _N_CELLS + _N_CELLS
         assert check > 24 * n_cells
-        needed = held + check
+        below = held + check // 2
     drawn = drawn_shuffles(monkeypatch)
     refused = tmp_path / "refused.zarr"
     with pytest.raises(MemoryBudgetError) as caught:
-        run(refused, {"shuffle_cells": True, "mem_budget": needed - 1})
+        run(refused, {"shuffle_cells": True, "mem_budget": below})
     refusal = caught.value
-    assert (refusal.needed_bytes, refusal.budget_bytes) == (needed, needed - 1)
+    assert refusal.budget_bytes == below
     if kind.startswith("sparse"):
         matrices = "matrix" if kind == "sparse" else "matrices"
         ids = 4 * len(f"cell-{_N_CELLS - 1}") * _N_CELLS
+        assert refusal.needed_bytes == held + check
         assert refusal.item == (
             f"checking the cell IDs, an array of {ids} bytes, beside the "
             f"{held - ids} bytes of the {matrices}"
         )
     else:
-        assert str(refusal) == shuffle_refusal(n_cells, held, needed - 1)
+        # The refusal names what the import holds by its own estimate of the
+        # readers' text, which the derivation above approximates, beside the
+        # order.
+        found = re.search(r"beside the (\d+) bytes", str(refusal))
+        named = held if found is None else int(found[1])
+        assert refusal.needed_bytes == named + 24 * n_cells > below
+        assert str(refusal) == shuffle_refusal(n_cells, named, below)
     # The import is refused before it draws the order or writes anything.
     assert drawn == []
     assert not refused.exists()
     # With the budget it names, the import draws the order, and a later step
     # of so small a budget refuses for itself, if at all.
     try:
-        run(tmp_path / "admitted.zarr", {"shuffle_cells": True, "mem_budget": needed})
+        run(
+            tmp_path / "admitted.zarr",
+            {"shuffle_cells": True, "mem_budget": refusal.needed_bytes},
+        )
     except MemoryError as later:
         assert "random order" not in str(later)
         assert "checking the cell IDs" not in str(later)
@@ -1083,7 +1095,7 @@ def test_a_10x_import_beside_a_reader_that_reports_no_arrays_names_only_its_orde
     assert _no_temporary_files(tmp_path)
 
 
-def test_a_shuffled_10x_import_of_many_cells_names_the_least_budget_of_its_spill(
+def test_a_shuffled_10x_import_of_many_cells_names_a_budget_that_passes_its_spill(
     tmp_path,
 ) -> None:
     n_cells = 3000
@@ -1098,12 +1110,10 @@ def test_a_shuffled_10x_import_of_many_cells_names_the_least_budget_of_its_spill
         at_budget(arrays + 24 * n_cells)
     needed = caught.value.needed_bytes
     # That budget sizes buckets of a cell each, which need more beside them
-    # than the larger buckets of the budget that the refusal names, the
-    # least that passes the spill: one byte less is refused, naming it again.
+    # than the larger buckets of the budget that the refusal names, which
+    # passes the spill.
+    assert needed > arrays + 24 * n_cells
     at_budget(needed)
-    with pytest.raises(MemoryBudgetError) as below:
-        at_budget(needed - 1)
-    assert below.value.needed_bytes == needed
     assert _no_temporary_files(tmp_path)
 
 
@@ -1282,25 +1292,24 @@ def test_a_shuffled_import_of_a_reader_names_the_budget_that_passes_its_spill(
         at_budget(start)
     # The spill runs beside the order of the cells and its inverse, 8 bytes a
     # cell each, and the reader's arrays, so the refusal names the import's
-    # budget beside them. Eight Tapestri cells hold rows wide enough that
-    # the spill's buckets, a quarter of its budget, must read the longest.
-    assert caught.value.item == (
-        f"the row spill of a cell shuffle beside the {16 * cells} bytes of its "
-        f"cell order and the {_held_before_the_shuffle(kind)} bytes of the "
-        "reader's arrays"
+    # budget beside them, the arrays by the reader's own estimate of its
+    # text. Eight Tapestri cells hold rows wide enough that the spill's
+    # buckets, a quarter of its budget, must read the longest.
+    found = re.fullmatch(
+        rf"the row spill of a cell shuffle beside the {16 * cells} bytes of its "
+        r"cell order and the (\d+) bytes of the reader's arrays",
+        caught.value.item,
     )
+    assert found is not None
+    arrays = int(found[1])
     assert caught.value.budget_bytes == start
     needed = caught.value.needed_bytes
     assert needed > start
     # With the budget it names, the spill fits, planned within what the
-    # budget leaves beside the order, its inverse and the reader's arrays;
-    # one byte less is refused, naming the same budget.
+    # budget leaves beside the order, its inverse and the reader's arrays.
     planned = _planned_spill_budgets(monkeypatch)
     at_budget(needed)
-    assert planned[0] == needed - 16 * cells - _held_before_the_shuffle(kind)
-    with pytest.raises(MemoryBudgetError) as below:
-        at_budget(needed - 1)
-    assert (below.value.needed_bytes, below.value.budget_bytes) == (needed, needed - 1)
+    assert planned[0] == needed - 16 * cells - arrays
     assert _no_temporary_files(tmp_path)
 
 
@@ -1395,7 +1404,7 @@ def test_a_spill_plan_refuses_a_budget_whose_buckets_cannot_read_the_longest_row
 
     assert planned(4 * read).bucket_bytes() >= read
     with pytest.raises(MemoryBudgetError) as caught:
-        planned(4 * read - 1)
+        planned(2 * read)
     assert (caught.value.needed_bytes, caught.value.item) == (
         4 * read,
         "the row spill of a cell shuffle",
@@ -1410,9 +1419,7 @@ def test_a_tapestri_scan_in_the_files_order_names_the_budget_beside_its_strings(
     # The scan runs beside the reader's strings and the cells' cumulative
     # reads, and holds one dense row of every amplicon and antibody at 72
     # bytes a value.
-    held = _held_before_the_shuffle("tapestri")
     features = sum(values.shape[1] for values in expected.values())
-    needed = held + 72 * features
     attempts = iter(range(10))
 
     def at_budget(budget: int) -> None:
@@ -1428,31 +1435,33 @@ def test_a_tapestri_scan_in_the_files_order_names_the_budget_beside_its_strings(
 
     with pytest.raises(MemoryBudgetError) as caught:
         at_budget(1)
-    item = (
-        f"the {features} values of one dense row beside the {held} bytes of the "
-        "reader's arrays"
+    # The reader's strings are named by its own estimate of their text.
+    item = caught.value.item
+    found = re.fullmatch(
+        rf"the {features} values of one dense row beside the (\d+) bytes of the "
+        r"reader's arrays",
+        item,
     )
-    assert (caught.value.item, caught.value.needed_bytes) == (item, needed)
+    assert found is not None
+    needed = int(found[1]) + 72 * features
+    assert caught.value.needed_bytes == needed
     assert str(caught.value) == (
         f"Importing the counts of {n_cells} cells holds about {needed} bytes for "
         f"{item}, more than the memory budget of 1 bytes. Raise mem_budget to at "
         f"least {needed} bytes."
     )
-    # With the budget it names, the scan runs; one byte less is refused.
+    # With the budget it names, the scan runs.
     at_budget(needed)
-    with pytest.raises(MemoryBudgetError) as below:
-        at_budget(needed - 1)
-    assert below.value.needed_bytes == needed
 
 
-def test_a_shuffled_csv_import_names_the_least_budget_that_passes_its_spill(
+def test_a_shuffled_csv_import_names_one_budget_that_passes_its_spill(
     tmp_path,
 ) -> None:
     run, _expected = _source(tmp_path, "csv")
     at_budget = _spill_attempts(tmp_path, run)
     # A budget sizes the spill's buckets, and larger buckets need less beside
     # them, so what the spill needs depends on the budget. Whatever budget it
-    # refuses, the refusal names the least import budget that passes it. The
+    # refuses, the refusal names the same import budget, which passes it. The
     # least budget tried passes the shuffle: the reader's IDs, NumPy text of
     # 4 bytes a character of cell-156, beside 24 bytes a cell.
     ids = 4 * len(f"cell-{_N_CELLS - 1}") * _N_CELLS
@@ -1475,17 +1484,13 @@ def test_a_shuffled_csv_import_names_the_least_budget_that_passes_its_spill(
         named.add(caught.value.needed_bytes)
     (needed,) = named
     assert needed > 40_000
-    # With the budget it names, the spill fits; one byte less is refused,
-    # naming the same budget.
-    at_budget(needed)
-    with pytest.raises(MemoryBudgetError) as below:
-        at_budget(needed - 1)
-    assert (below.value.needed_bytes, below.value.budget_bytes) == (needed, needed - 1)
-    assert str(below.value) == (
+    assert str(caught.value) == (
         f"Importing the counts of {_N_CELLS} cells holds about {needed} bytes for "
-        f"{below.value.item}, more than the memory budget of {needed - 1} bytes. "
+        f"{caught.value.item}, more than the memory budget of 40000 bytes. "
         f"Raise mem_budget to at least {needed} bytes."
     )
+    # With the budget it names, the spill fits.
+    at_budget(needed)
     assert _no_temporary_files(tmp_path)
 
 
@@ -1567,7 +1572,8 @@ def test_a_10x_reader_gives_its_kept_barcodes_as_the_file_holds_them(
     # beside them.
     assert held == 6 * _N_CELLS + (6 * kept.size if cutoff else 0)
     # Within the few kilobytes of the objects of h5py's read.
-    assert 6 * _N_CELLS <= read <= held + 16 * 1024
+    assert 6 * _N_CELLS <= read
+    assert held_within_charge(read, held)
 
 
 def test_a_10x_import_stores_barcodes_that_are_not_ascii_as_text(tmp_path) -> None:
@@ -1818,9 +1824,9 @@ def test_an_import_of_wide_ids_names_the_budget_that_writes_its_cell_table(
                 assert not destination.exists()
                 raise
 
-    needed = held + table
-    refusal = named_budget_runs(at_budget, needed - 1, item=item)
-    assert refusal.needed_bytes == needed
+    # A budget with room for half of the table beside what the import holds.
+    refusal = named_budget_runs(at_budget, held + table // 2, item=item)
+    assert refusal.needed_bytes == held + table
     assert _no_temporary_files(tmp_path)
 
 

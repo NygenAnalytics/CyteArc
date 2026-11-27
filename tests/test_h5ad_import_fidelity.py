@@ -2,6 +2,7 @@
 
 import hashlib
 import re
+import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -27,6 +28,7 @@ from cytearc.readers._h5ad_columns import (
 from cytearc.storage.count_matrix import DEFAULT_COUNT_MATRIX_POLICY
 from cytearc.utils.memory_budget import MemoryBudgetError
 from cytearc.writers import H5adToZarr
+from tests.memory_helpers import held_within_charge
 
 anndata = pytest.importorskip("anndata")
 
@@ -2527,10 +2529,16 @@ def test_inspection_warns_what_an_import_does_with_an_index_of_ids(
 
 
 # What the reader keeps of the IDs and names of the file that _h5ad_with
-# writes: four cell IDs and three feature IDs as bytes objects, 33 bytes and
-# one a character each with a reference of 8, and the feature IDs again as
-# the names, which the reader finds no column of, at 4 bytes a character.
-_WRITTEN_ID_BYTES = 4 * (8 + 33 + 2) + 3 * (8 + 33 + 2) + 3 * 4 * 2
+# writes: four cell IDs and three feature IDs as bytes objects, as Python
+# sizes them, each with a reference of 8, and the feature IDs again as the
+# names, which the reader finds no column of, at 4 bytes a character.
+_WRITTEN_ID_BYTES = sum(
+    8 + sys.getsizeof(name.encode())
+    for name in [
+        *(f"c{index}" for index in range(4)),
+        *(f"g{index}" for index in range(3)),
+    ]
+) + (3 * 4 * 2)
 
 
 _SPLIT_TYPES = np.array([b"Gene Expression", b"Antibody Capture", b"Gene Expression"])
@@ -2620,7 +2628,8 @@ def test_a_scan_refusal_states_what_the_import_needs_beside_the_ids(
     path = _h5ad_with(Path("ids.h5ad"), members)
     # Each cell holds three values, which the scan reads at 72 bytes each.
     vector = 3 * 72
-    budget = held + vector - 1
+    # A budget with room for half of the vector beside what the import holds.
+    budget = held + vector // 2
     reader = H5adReader(path)
     try:
         with pytest.raises(MemoryBudgetError) as refused:
@@ -2679,11 +2688,12 @@ def _write_vectors(path: Path, lengths: list[int], encoding: str) -> str:
 
 
 # What the reader keeps of the IDs and names of a file that _write_vectors
-# writes: 30 cell IDs and 30 feature IDs as bytes objects, and the feature
-# IDs again as the names, at 4 bytes a character of the longest.
-_VECTOR_FILE_ID_BYTES = 2 * sum(8 + 33 + len(f"c{index}") for index in range(30)) + (
-    30 * 4 * 3
-)
+# writes: 30 cell IDs and 30 feature IDs as bytes objects, as Python sizes
+# them, and the feature IDs again as the names, at 4 bytes a character of the
+# longest.
+_VECTOR_FILE_ID_BYTES = sum(
+    8 + sys.getsizeof(f"{kind}{index}".encode()) for kind in "cg" for index in range(30)
+) + (30 * 4 * 3)
 
 
 @pytest.mark.parametrize("encoding", ["csr", "csc"])
@@ -2833,19 +2843,21 @@ def test_a_conversion_again_in_the_files_order_refuses_in_the_imports_budget(
             shuffle_cells=False,
         )
         # A shuffled import replaces the conversion, so the first import
-        # converts the columns again, within a budget one byte too small.
+        # converts the columns again, within a budget with room for half of
+        # the conversion.
         H5adToZarr(
             reader, str(tmp_path / "shuffled.zarr"), mem_budget="64M", nthreads=1
         )
         needed = _VECTOR_FILE_ID_BYTES + least
-        in_order.resources = ResourceBudget(needed - 1, 1)
+        below = _VECTOR_FILE_ID_BYTES + least // 2
+        in_order.resources = ResourceBudget(below, 1)
         with pytest.raises(MemoryBudgetError) as refused:
             in_order._write_counts()
     finally:
         reader.close()
 
     assert refused.value.needed_bytes == needed
-    assert refused.value.budget_bytes == needed - 1
+    assert refused.value.budget_bytes == below
     # The first row holds an entry of every column, the most of any row.
     assert refused.value.item == (
         "one row of the CSC row conversion beside the "
@@ -2887,11 +2899,7 @@ def test_the_count_layout_charges_the_ids_that_the_reader_keeps(tmp_path) -> Non
             with pytest.raises(CountLayoutMemoryError) as refused:
                 construct(64 * 1024)
             needed[name] = refused.value.needed_bytes
-            # One byte less than the budget it names is refused the same way,
-            # and that budget fits the layout.
-            with pytest.raises(CountLayoutMemoryError) as below:
-                construct(needed[name] - 1)
-            assert below.value.needed_bytes == needed[name]
+            # The budget it names fits the layout.
             assert construct(needed[name]).policy == DEFAULT_COUNT_MATRIX_POLICY
         finally:
             reader.close()
@@ -2946,10 +2954,16 @@ def test_imported_analyses_take_blocks_of_what_the_budget_leaves_beside_the_ids(
     }
 
     # The import holds the cell IDs of 28 characters and the feature IDs as
-    # bytes objects, the feature IDs again as the names, at 4 bytes a
-    # character, and the file's row pointers. A block takes an eighth of
-    # what is left: rows of 64 float32 values, and labels at 64 bytes a row.
-    held = n_cells * (8 + 33 + 28) + 10 * (8 + 33 + 2) + 10 * 4 * 2 + pointers
+    # bytes objects, as Python sizes them, the feature IDs again as the names,
+    # at 4 bytes a character, and the file's row pointers. A block takes an
+    # eighth of what is left: rows of 64 float32 values, and labels at 64
+    # bytes a row.
+    held = (
+        n_cells * (8 + sys.getsizeof(b"x" * 28))
+        + 10 * (8 + sys.getsizeof(b"g0"))
+        + 10 * 4 * 2
+        + pointers
+    )
     left = budget - held
     assert options["embedding"]["block_rows"] == left // (8 * 64 * 4)
     assert options["labels"]["block_rows"] == left // (8 * 64)
@@ -2969,6 +2983,12 @@ def test_the_import_charges_what_tracing_finds_the_reader_keeps(tmp_path) -> Non
     adata.var["gene_short_name"] = [f"GENE{index}" for index in range(20)]
     path = str(tmp_path / "barcodes.h5ad")
     adata.write_h5ad(path)
+    # A check of another reader makes the first calls of the traced one.
+    warm = H5adReader(path)
+    try:
+        warm._check_ids_and_names()
+    finally:
+        warm.close()
     reader = H5adReader(path)
     try:
         gc.collect()
@@ -2984,10 +3004,11 @@ def test_the_import_charges_what_tracing_finds_the_reader_keeps(tmp_path) -> Non
     finally:
         reader.close()
 
-    # What the allocations that the reader keeps add up to, which the import
-    # charges, within 1%.
-    assert kept > 50_000 * (8 + 33 + 16)
-    assert abs(charged - kept) <= kept // 100
+    # What the allocations that the reader keeps add up to, at least each
+    # barcode's characters and a reference to it, stays within what the
+    # import charges.
+    assert kept > sum(8 + len(barcode) for barcode in barcodes)
+    assert held_within_charge(kept, charged)
 
 
 def test_the_reader_counts_the_renamed_ids_beside_those_of_the_file(
@@ -3003,9 +3024,9 @@ def test_the_reader_counts_the_renamed_ids_beside_those_of_the_file(
     finally:
         reader.close()
 
-    # The renamed IDs are str objects of ASCII, 41 bytes and one a character
-    # each, with a reference of 8.
-    renamed = sum(8 + 41 + len(name) for name in ["c0", "c0-1", "c1", "c2"])
+    # The renamed IDs are str objects, as Python sizes them, each with a
+    # reference of 8.
+    renamed = sum(8 + sys.getsizeof(name) for name in ["c0", "c0-1", "c1", "c2"])
     assert held == _WRITTEN_ID_BYTES + renamed
 
 

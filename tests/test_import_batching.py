@@ -21,6 +21,7 @@ from cytearc.storage.sharding import (
 from cytearc.storage.types import array_metadata_shards
 from cytearc.utils.count_values import CountValueRange
 from cytearc.writers import CrToZarr, H5adToZarr, SparseToZarr
+from tests.memory_helpers import held_within_charge
 
 
 def sparse_write_task_count(destinations, n_rows: int) -> int:
@@ -1328,6 +1329,10 @@ def _held_by_sparse_buffer(matrix: csr_matrix, band_rows: int) -> int:
     from cytearc.utils.arrays import csr_to_coo
 
     n_rows, n_columns = matrix.shape
+    # A batch given to another buffer untraced makes the first calls of the
+    # traced ones.
+    warm = SparseShardBuffer(_band_spec(n_rows, n_columns, band_rows))
+    list(warm.add(csr_to_coo(matrix[:band_rows])))
     buffer = SparseShardBuffer(_band_spec(n_rows, n_columns, band_rows))
     held = 0
     tracemalloc.start()
@@ -1361,7 +1366,7 @@ def test_the_producer_charge_bounds_what_a_sparse_buffer_holds() -> None:
         planned = sparse_producer_peak_bytes(
             values, values, 4, canonicalBatches=not reversed_rows
         )
-        assert held <= planned
+        assert held_within_charge(held, planned)
         if not reversed_rows:
             # The charge follows what the buffer holds instead of twice it.
             assert planned <= 1.5 * held

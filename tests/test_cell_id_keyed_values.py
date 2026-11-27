@@ -15,6 +15,7 @@ from zarr.storage import MemoryStore
 from cytearc import DataStore
 from cytearc.metadata import MetaData
 from tests.storage_helpers import by_cell_id, write_count_store
+from tests.memory_helpers import held_within_charge
 
 IDS = ["c0", "c1", "c2", "c3", "c4", "c5"]
 # A shuffled order of the cells, as the obs of another tool may list them.
@@ -471,7 +472,15 @@ def test_reading_ids_and_aligning_keyed_values_hold_what_their_estimate_states(
     labels = [f"{index:0{width}d}" for index in range(n_cells + 100)][::-1]
     values = pd.Series(np.arange(n_cells + 100, dtype=np.float64), index=labels)
     rows = np.arange(n_cells)
-    read_array_rows_chunkwise(stored, rows)
+    # An untraced read and alignment make the first calls of both.
+    align_to_cell_ids(
+        values,
+        read_array_rows_chunkwise(stored, rows),
+        name="x",
+        cells="c",
+        remedy="r",
+        leave_out_others=True,
+    )
     tracemalloc.start()
     before, _ = tracemalloc.get_traced_memory()
     ids = read_array_rows_chunkwise(stored, rows)
@@ -481,4 +490,6 @@ def test_reading_ids_and_aligning_keyed_values_hold_what_their_estimate_states(
     _, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
     assert aligned.to_numpy()[0] == n_cells + 99
-    assert peak - before <= cell_id_alignment_bytes(stored, n_cells, len(values))
+    assert held_within_charge(
+        peak - before, cell_id_alignment_bytes(stored, n_cells, len(values))
+    )

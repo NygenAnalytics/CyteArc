@@ -1,17 +1,21 @@
-"""Charge what an operation holds against its memory budget before it allocates.
+"""Charge an estimate of what an operation holds against its memory budget before it allocates.
 
 An operation creates one :class:`MemoryLedger` with its budget and charges it
-before each step allocates: what the step keeps, and the transient peak of
-what it builds and lets go. The ledger refuses a charge that would pass the
-budget with a :class:`MemoryBudgetError` that names the step, the bytes that
-it needs and the budget, so a call is refused before it reads or writes what
-would not fit. Planners that size work outside any ledger raise the same
-error with the same fields in their own words, and :func:`memory_refusal`
-words the refusal of a step that has none.
+before each step allocates: an estimate of what the step keeps, and of the
+transient peak of what it builds and lets go. The estimates count the arrays
+that grow with the data, such as blocks, coordinates, graphs and per-cell IDs
+and labels. They leave out the interpreter, the objects and buffers of the
+libraries, and other allocations that do not grow with the data, so a step can
+hold a little more than its charge. The ledger refuses a charge that would pass
+the budget with a :class:`MemoryBudgetError` that names the step, the bytes
+that it needs and the budget, so a call is refused before it reads or writes
+what would not fit, and a budget of the bytes it names runs that step.
+Planners that size work outside any ledger raise the same error with the same
+fields in their own words, and :func:`memory_refusal` words the refusal of a
+step that has none.
 
-The shared costs below give the bytes of the structures that many steps
-build: Python strings, fixed-width text, object arrays, sorts and hash
-tables.
+The shared costs below estimate the structures that many steps build: Python
+strings, fixed-width text, object arrays, sorts and hash tables.
 """
 
 import sys
@@ -36,15 +40,19 @@ __all__ = [
 
 
 class MemoryBudgetError(MemoryError):
-    """A step of a call would hold more memory than the call's budget.
+    """A step of a call would hold more memory than the call's budget, by the estimate that the step charges.
+
+    The estimate counts the arrays that grow with the data and leaves out the
+    memory of the interpreter and its libraries, so the budget plans the work
+    rather than capping the process.
 
     Attributes:
-        needed_bytes: The bytes that the call holds at the step that was
-            refused: what it held before and the step's own charge. A budget
-            of at least this many bytes lets the call pass that step, except
-            where a count write's producer hands it a batch beyond the
-            producer's reservation: that refusal names what the write would
-            reserve with the batch.
+        needed_bytes: The estimated bytes that the call holds at the step
+            that was refused: what it held before and the step's own charge.
+            A budget of at least this many bytes runs that step, and a later
+            step can need more. A count write whose producer hands it a batch
+            beyond the producer's reservation names instead what the write
+            would reserve with the batch.
         budget_bytes: The memory budget that the step would pass.
         item: What the step's charge was for, such as ``"the cells' IDs"``.
     """

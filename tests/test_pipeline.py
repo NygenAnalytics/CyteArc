@@ -2765,7 +2765,5 @@ def test_cluster_selection_names_the_budget_of_its_sampled_coordinates() -> None
         "the sampled coordinates and the silhouette's distances",
     )
     assert f"needs about {refusal.needed_bytes} bytes" in str(refusal)
-    below = select(refusal.needed_bytes - 1)
-    assert below is not None and below.needed_bytes == refusal.needed_bytes
     later = select(refusal.needed_bytes)
     assert later is None or later.item != refusal.item

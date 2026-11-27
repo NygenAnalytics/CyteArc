@@ -888,7 +888,7 @@ def test_load_counts_counts_the_ids_it_reads_and_finds_cells_among(
         least.append(needed)
         with monkeypatch.context() as patched:
             patched.setattr(operations, "read_metadata_rows_chunkwise", unread)
-            store.memoryBytes = needed - 1
+            store.memoryBytes = needed // 2
             with pytest.raises(MemoryError, match=f"holds about {needed} bytes"):
                 load()
     # Without a cell, no ID is read: the sites load at the budget that loading

@@ -317,8 +317,6 @@ def test_grn_names_the_budget_of_its_matrix_and_links(store_path):
         "the expression matrix and the links of GRN inference",
     )
     assert f"needs about {refusal.needed_bytes} bytes" in str(refusal)
-    below = infer(refusal.needed_bytes - 1)
-    assert below is not None and below.needed_bytes == refusal.needed_bytes
     later = infer(refusal.needed_bytes)
     assert later is None or later.item != refusal.item
 

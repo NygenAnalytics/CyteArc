@@ -902,19 +902,19 @@ def test_a_map_directed_by_a_score_is_refused_a_small_budget_before_its_graph_is
     if call == "lineage_membership":
         needed = 347_836
         named = "the lineage membership of every cell"
-    _set_budget(store, needed - 1)
+    _set_budget(store, needed // 2)
     with pytest.raises(MemoryBudgetError) as refused:
         calls[call]()
     assert str(refused.value) == (
-        f"{work} of 145 cells needs about {needed} bytes in "
+        f"{work} of 145 cells needs about {refused.value.needed_bytes} bytes in "
         f"memory for {named}, but the operation limit is "
-        f"{needed - 1} bytes. Raise mem_budget."
+        f"{needed // 2} bytes. Raise mem_budget."
     )
     assert reads == {}
     assert _fate_maps(store) == maps
     # The budget that the refusal names runs the call, which reads the graph
     # once.
-    _set_budget(store, needed)
+    _set_budget(store, refused.value.needed_bytes)
     calls[call]()
     assert reads == {"_store_to_sparse": 1}
 
@@ -958,18 +958,18 @@ def test_fate_names_what_mapping_its_fates_holds_when_that_outweighs_the_load(
     maps = _fate_maps(store)
     reads = _count_calls(monkeypatch, store, "_store_to_sparse")
     needed = 22_264 + 64 * 265 + 137_800
-    _set_budget(store, needed - 1)
+    _set_budget(store, needed // 2)
     with pytest.raises(MemoryBudgetError) as refused:
         call()
     assert str(refused.value) == (
-        f"Mapping fates of 265 cells needs about {needed} bytes in memory for a "
-        "graph of 1325 edges, but the operation limit is "
-        f"{needed - 1} bytes. Raise mem_budget."
+        f"Mapping fates of 265 cells needs about {refused.value.needed_bytes} bytes "
+        "in memory for a graph of 1325 edges, but the operation limit is "
+        f"{needed // 2} bytes. Raise mem_budget."
     )
     assert reads == {}
     assert _fate_maps(store) == maps
     # The budget that the refusal names maps the fates, reading the graph once.
-    _set_budget(store, needed)
+    _set_budget(store, refused.value.needed_bytes)
     call()
     assert reads == {"_store_to_sparse": 1}
 

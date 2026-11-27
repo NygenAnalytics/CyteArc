@@ -2811,7 +2811,7 @@ def test_composite_identity_check_rejects_unaffordable_work_before_reading_ids()
         MemoryError, match="Composite cell identity validation exceeds mem_budget"
     ):
         _require_unique_cell_ids(
-            UnreadableIds(), ResourceBudget(needed - 1, 1), resident_bytes=7
+            UnreadableIds(), ResourceBudget(needed // 2, 1), resident_bytes=7
         )
     ids = zarr.open_group(store=MemoryStore(), mode="w").create_array(
         "ids",

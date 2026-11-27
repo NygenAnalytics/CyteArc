@@ -22,6 +22,7 @@ from tests.storage_helpers import (
     open_store,
     write_count_store,
 )
+from tests.memory_helpers import held_within_charge
 
 N_CELLS = 8
 # Natural order puts s2 before s10.
@@ -462,14 +463,15 @@ def test_variable_width_labels_group_and_sample_cells_as_fixed_width_labels_do(
         pd.factorize(numbered.codes)[0], pd.factorize(fixed.codes)[0]
     )
     # The labels become Python strings, kept charged by their characters
-    # beside the UTF-8 copy that coding them leaves in a string beyond ASCII.
+    # beside the UTF-8 copy that coding them leaves in a string beyond ASCII,
+    # which covers the strings as Python holds them.
     strings = sum(map(sys.getsizeof, labels.tolist())) + 8 * n_cells
     every = np.arange(n_cells)
     values, missing, kept = _column_values(
         MemoryLedger(None, "Grouping cells"), store.cells, "variable", every
     )
     assert values.dtype == object and values.tolist() == labels.tolist()
-    assert missing is None and kept >= strings
+    assert missing is None and held_within_charge(strings, kept)
     # Samples are numbered from the same strings, charged alike.
     held_while_numbered: list[int] = []
     numbered = cell_samples.sample_codes

@@ -54,7 +54,7 @@ from cytearc.trajectory.artifacts import (
     validate_resolved_ann_parameters,
 )
 from cytearc.trajectory.parameters import resolve_aggregation_ann_params
-from tests.memory_helpers import traced_charge, traced_reruns
+from tests.memory_helpers import held_within_charge, traced_charge, traced_reruns
 
 
 def test_diffusion_loading_validates_and_builds_from_one_read_per_array(monkeypatch):
@@ -628,7 +628,9 @@ def test_listed_labels_hold_what_their_estimate_states(labels: np.ndarray) -> No
             labels, None, ["a2" + "x" * 24, "t1" + "x" * 24, 1, 2], "labels"
         )
     )
-    assert traced.held <= listed_labels_bytes(len(labels), labels.dtype)
+    assert held_within_charge(
+        traced.held, listed_labels_bytes(len(labels), labels.dtype)
+    )
 
 
 # What checking a saved feature analysis holds
@@ -920,7 +922,7 @@ def test_checking_a_saved_feature_analysis_holds_what_its_estimate_states(
     verdict, held = _traced_check(check, group, arguments)
     assert verdict
     expected = estimate(group, n_selected=len(arguments["selected_features"]))
-    assert held <= expected
+    assert held_within_charge(held, expected)
     # Charged at the bound of their compressed bytes, the reads err high, by
     # no more than the decoded chunks they count once more.
     assert expected < 3 * held
@@ -941,7 +943,7 @@ def test_a_payload_that_lacks_an_array_is_refused_within_its_estimates(
     n_selected = len(arguments["selected_features"])
     verdict, held = _traced_check(check, group, arguments)
     assert not verdict
-    assert held <= estimate(group, n_selected=n_selected)
+    assert held_within_charge(held, estimate(group, n_selected=n_selected))
     # Loading the payload checks it first.
     assert _FEATURE_LOADS[kind](group, n_selected) >= estimate(
         group, n_selected=n_selected

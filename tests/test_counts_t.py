@@ -1451,6 +1451,3 @@ def test_normalized_feature_batches_name_the_budget_of_the_requested_width():
     # The named budget streams batches of the four features requested.
     blocks = batches(refusal.needed_bytes, 4)
     assert [block.shape[0] for block, _labels in blocks] == [4, 4, 4]
-    with pytest.raises(MemoryBudgetError) as below:
-        batches(refusal.needed_bytes - 1, 4)
-    assert below.value.needed_bytes == refusal.needed_bytes

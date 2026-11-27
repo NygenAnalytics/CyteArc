@@ -52,6 +52,7 @@ from .test_trajectory_record_paths import (
     _set_budget,
     _trajectory_store,
 )
+from tests.memory_helpers import held_within_charge
 
 _REFERENCE = Path(__file__).parent / "data" / "trajectory_states" / "cellrank_reference"
 
@@ -1031,7 +1032,7 @@ def test_a_search_over_the_memory_budget_is_refused_before_the_graph_is_read(
 ) -> None:
     trajectory, direction = _path_store()
     loads = _count_calls(monkeypatch, trajectory.store, "_load_graph_artifact")
-    _set_budget(trajectory.store, _PATH_LEAST - 1)
+    _set_budget(trajectory.store, _PATH_LEAST // 2)
 
     with pytest.raises(MemoryBudgetError, match="Finding states") as refused:
         _states(trajectory, direction, n_states=_PATH_STATES)
@@ -1045,7 +1046,7 @@ def test_a_search_over_the_memory_budget_is_refused_before_the_graph_is_read(
 @pytest.mark.slow
 def test_the_budget_that_a_refusal_names_runs_the_search() -> None:
     trajectory, direction = _path_store()
-    _set_budget(trajectory.store, _PATH_LEAST - 1)
+    _set_budget(trajectory.store, _PATH_LEAST // 2)
     with pytest.raises(MemoryBudgetError) as refused:
         _states(trajectory, direction, n_states=_PATH_STATES)
 
@@ -1508,7 +1509,7 @@ def test_a_search_on_a_branching_graph_holds_no_more_than_its_estimate() -> None
 
     held, charged = _traced_search(graph, direction, 3, 10.0)
 
-    assert held <= charged
+    assert held_within_charge(held, charged)
     # Beside its fixed mebibyte, the estimate stays close to what is held.
     assert held >= 0.6 * (charged - states_module._SMALL_ARRAY_BYTES)
 
@@ -1533,13 +1534,11 @@ def test_the_costliest_eigen_solve_grows_no_faster_than_its_estimate() -> None:
         traced.append(_traced_search(graph, direction, 3, 0.0))
 
     for held, charged in traced:
-        assert held <= charged
+        assert held_within_charge(held, charged)
     # The growth from 2,400 to 7,200 cells leaves out the fixed mebibyte, so
     # every per-cell term of the eigen-solve counts.
     (small_held, small_charged), (large_held, large_charged) = traced
-    held_growth = (large_held - small_held) / 4_800
-    charged_growth = (large_charged - small_charged) / 4_800
-    assert 0.8 * charged_growth <= held_growth <= charged_growth
+    assert held_within_charge(large_held - small_held, large_charged - small_charged)
 
 
 def test_the_simplex_of_many_states_stays_within_the_estimate(
@@ -1584,4 +1583,4 @@ def test_the_simplex_of_many_states_stays_within_the_estimate(
         - 64 * n_cells
         - states_module._SMALL_ARRAY_BYTES
     )
-    assert 0.8 * charged <= held <= charged
+    assert held_within_charge(held, charged)

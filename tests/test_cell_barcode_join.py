@@ -48,7 +48,7 @@ from tests.barcode_join_helpers import (
     write_tree_file,
     write_variant_file,
 )
-from tests.memory_helpers import climb_refusals
+from tests.memory_helpers import climb_refusals, held_within_charge
 from tests.storage_helpers import by_cell_id
 
 _REFERENCE = Path(__file__).parent / "guide_calls_import_reference.json"
@@ -1087,11 +1087,11 @@ def test_the_pass_over_variable_width_store_ids_holds_what_it_charges(
     # in an operation that measured them before, as an import's read of the
     # selected cells' IDs does.
     traced = traced_charge(join)
-    assert traced.held <= traced.charged
+    assert held_within_charge(traced.held, traced.charged)
     with validation_scope():
         variable_text_extent(array)
         traced = traced_charge(join)
-    assert traced.held <= traced.charged
+    assert held_within_charge(traced.held, traced.charged)
 
 
 def test_the_join_keeps_variable_width_selected_ids_as_the_strings_it_charges(
@@ -1123,8 +1123,8 @@ def test_the_join_keeps_variable_width_selected_ids_as_the_strings_it_charges(
     # The least of three joins holds no more than it charges while it starts,
     # and keeps no more than stays charged, its lookup's strings among it.
     traced = traced_charge(join, runs=3)
-    assert traced.held <= traced.charged
-    assert traced.kept <= traced.kept_charged
+    assert held_within_charge(traced.held, traced.charged)
+    assert held_within_charge(traced.kept, traced.kept_charged)
 
 
 def test_the_join_takes_variable_width_store_ids_given_in_memory() -> None:

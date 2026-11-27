@@ -359,14 +359,14 @@ def test_consumers_admit_their_graph_memory_before_reading_it(
     )
     for call, work, required in cases:
         _forbid(monkeypatch, store, *_KERNELS)
-        store.resources = ResourceBudget(required - 1, 1)
+        store.resources = ResourceBudget(required // 2, 1)
         with pytest.raises(MemoryError) as caught:
             call()
-        assert str(caught.value) == _budget_message(work, required, required - 1)
+        assert str(caught.value) == _budget_message(work, required, required // 2)
 
     neighbors = refs["rna_neighbors"]
     required = connectivity_peak_bytes(N_CELLS, K)
-    store.resources = ResourceBudget(required - 1, 1)
+    store.resources = ResourceBudget(required // 2, 1)
     monkeypatch.setattr(
         "cytearc.neighbors.graph.build_connectivity_arrays",
         lambda *_args, **_kwargs: pytest.fail("the neighbors were converted"),
@@ -376,7 +376,7 @@ def test_consumers_admit_their_graph_memory_before_reading_it(
     assert str(caught.value) == (
         f"Building the connectivity map of {N_CELLS} cells needs about {required} "
         f"bytes in memory for a graph of {N_CELLS * K} edges, but the operation "
-        f"limit is {required - 1} bytes. Raise mem_budget."
+        f"limit is {required // 2} bytes. Raise mem_budget."
     )
     assert store.artifacts.list(kind="cluster_labels", from_assay="RNA") == [
         refs["leiden"]

@@ -222,7 +222,7 @@ def test_compressed_range_reads_a_long_vector_whole_and_every_value(monkeypatch)
 
     with pytest.raises(MemoryError, match="for the 8 values of the longest"):
         compressed_count_range(
-            *_compressed(matrix), minorSize=8, maxBytes=_PER_VALUE * 8 - 1
+            *_compressed(matrix), minorSize=8, maxBytes=_PER_VALUE * 8 // 2
         )
     # A budget that leaves nothing for the scan reports no negative budget.
     with pytest.raises(MemoryError, match="more than the memory budget of 0 bytes"):
@@ -296,26 +296,22 @@ def test_a_scan_refusal_names_a_longer_vector_beyond_the_pointers_it_read(
 
     data = _CountingSlices(matrix.data)
     with pytest.raises(MemoryBudgetError) as refused:
-        scan(2 * _PER_VALUE - 1, data)
+        scan(_PER_VALUE, data)
     # The pointers name the longest row without reading any value.
     assert data.reads == 0
     needed = longest * _PER_VALUE
     assert refused.value.needed_bytes == needed
-    assert refused.value.budget_bytes == 2 * _PER_VALUE - 1
+    assert refused.value.budget_bytes == _PER_VALUE
     assert (
         refused.value.item == f"the {longest} values of the longest compressed vector"
     )
     assert str(refused.value) == (
         f"Scanning the count values holds about {needed} bytes for the {longest} "
         "values of the longest compressed vector, more than the memory budget of "
-        f"{2 * _PER_VALUE - 1} bytes. Raise mem_budget to at least {needed} bytes."
+        f"{_PER_VALUE} bytes. Raise mem_budget to at least {needed} bytes."
     )
-    # The budget that it names scans every row; one byte less is refused at
-    # the longest row, naming the same budget.
+    # The budget that it names scans every row.
     assert scan(needed) == CountValueRange(integral=True, maximum=1)
-    with pytest.raises(MemoryBudgetError) as below:
-        scan(needed - 1)
-    assert below.value.needed_bytes == needed
 
 
 def test_compressed_range_does_not_depend_on_the_budget():

@@ -1,4 +1,5 @@
 import os
+import sys
 
 import numpy as np
 import pandas as pd
@@ -17,6 +18,7 @@ from cytearc.writers import (
     subset_assay_zarr,
 )
 from tests.storage_helpers import by_cell_id
+from tests.memory_helpers import held_within_charge
 
 
 def _value_range(values: np.ndarray) -> CountValueRange:
@@ -738,19 +740,23 @@ def test_h5ad_parallel_producer_count_is_memory_admitted(tmp_path):
     # Producer processes keep buffering while the parent writes, so two of
     # them need both of their reserves beside the parent's write band, and
     # beside the IDs and names that the parent keeps: the cell and feature IDs
-    # as bytes objects, 33 bytes and one a character each with a reference of
-    # 8, and the names as text, 4 bytes a character of the longest. The count
+    # as bytes objects, as Python sizes them, each with a reference of 8, and
+    # the names as text, 4 bytes a character of the longest. The count
     # summary of the 12 cells holds 8 bytes more for each cell's count of its
     # nonzero values, 96 bytes beside the 5,300 of the rest. Each process's
     # own reader also holds the file's row pointers, as the parent's does:
     # 13 int32 values, 52 bytes.
     cells = [f"c{i}" for i in range(12)]
-    kept = sum(8 + 33 + len(text) for text in [*cells, "f0", "f1", "f2"]) + 3 * 4 * 2
-    assert kept == 671
+    kept = sum(
+        8 + sys.getsizeof(text.encode()) for text in [*cells, "f0", "f1", "f2"]
+    ) + (3 * 4 * 2)
     pointers = 13 * 4
-    producers, store = write(5_300 + 8 * 12 + kept + 2 * pointers)
+    two = 5_300 + 8 * 12 + kept + 2 * pointers
+    producers, store = write(two)
     assert producers == 2
-    assert write(5_299 + 8 * 12 + kept + 2 * pointers)[0] == 1
+    # A budget 500 bytes short of that holds one producer's reserve and not
+    # two, so one producer writes.
+    assert write(two - 500)[0] == 1
 
     root = zarr.open_group(store=store, mode="r")
     np.testing.assert_array_equal(root["RNA/counts"][:], values)
@@ -1326,7 +1332,8 @@ def test_h5ad_import_processes_are_charged_what_tracing_finds_their_reader_keeps
     pointers = 0 if encoding == "dense" and not shuffle_cells else 8 * (n_cells + 1)
     features = 24 * n_feats if split else 0
     assert charged == pointers + features
-    assert 0 <= kept_bytes - pointers <= 64 * 1024
+    assert 0 <= kept_bytes - pointers
+    assert held_within_charge(kept_bytes, charged)
 
 
 @pytest.mark.parametrize(
@@ -1711,7 +1718,7 @@ def test_a_dense_h5ad_reader_process_holds_no_more_than_its_charge(tmp_path):
     # The process holds its batch and the band it fills, which its admission
     # charges, beside a few kilobytes of the objects of its reader; the band
     # of 320,000 bytes that it sent last is freed before it makes the next.
-    assert held <= charge + 64 * 1024
+    assert held_within_charge(held, charge)
 
 
 @pytest.mark.parametrize("encoding", ["csr", "dense"])
@@ -2597,7 +2604,7 @@ def test_subset_assay_zarr_reserves_what_reading_its_selection_of_sharded_counts
             finally:
                 tracemalloc.stop()
         held[concurrency] = peak - base - block.nbytes
-        assert held[concurrency] <= producer(concurrency)
+        assert held_within_charge(held[concurrency], producer(concurrency))
     # Every gene is read from the ten stored 160,000-byte chunks of the shard
     # at once; scattered genes a chunk at a time, each stored chunk beside its
     # decoded copy. One decoded chunk, the charge before #353, leaves both out.
@@ -2672,7 +2679,7 @@ def test_subset_assay_zarr_reserves_the_indices_of_scattered_cells(
                 tracemalloc.stop()
         held[name] = peak - base - block.nbytes
         planned[name] = producer(1)
-        assert held[name] <= planned[name]
+        assert held_within_charge(held[name], planned[name])
     # The indices of 100,000 scattered cells, at least two int64 values each,
     # come beside what a run of as many cells holds, and a run is planned
     # near what it holds rather than as scattered cells.
@@ -2767,7 +2774,7 @@ def test_subset_assay_zarr_band_tasks_fit_their_reserve_at_the_writes_concurrenc
     assert plan.ioConcurrency == 10
     per_task = (plan.reservedBytes - plan.residentBytes) // plan.readWorkers
     assert len(tasks) == -(-cells.size // 1_000)
-    assert max(tasks) <= per_task
+    assert held_within_charge(max(tasks), per_task)
     # The bands read their cells from this many source shards.
     assert shards == max(
         len(np.unique(cells[start : start + 1_000] // 1_000))

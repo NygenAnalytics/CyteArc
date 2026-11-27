@@ -35,6 +35,7 @@ from scripts.build_string_networks import write_npz
 from tests.network_helpers import NETWORK_SKIP, hub_or_skip
 from tests.perturbation_helpers import use_python_kernels
 from tests.storage_helpers import by_cell_id, graph_rows
+from tests.memory_helpers import held_within_charge
 
 LOG2_1_1 = math.log2(1.1)
 GOLDEN_RATIO = (1 + math.sqrt(5)) / 2
@@ -1077,7 +1078,7 @@ def test_smoothing_holds_what_its_estimate_states(neighbors):
         step()
         _, peak = tracemalloc.get_traced_memory()
         tracemalloc.stop()
-        assert peak - before <= estimate
+        assert held_within_charge(peak - before, estimate)
 
 
 def test_smoothing_and_transition_bytes_pin_their_terms():

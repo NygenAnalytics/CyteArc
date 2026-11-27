@@ -9,6 +9,7 @@ the import must give back exactly the molecules or barcode counts that the
 truth fixes.
 """
 
+import gc
 import gzip
 import re
 import warnings
@@ -1039,6 +1040,11 @@ def test_files_whose_rows_of_selected_cells_hold_no_barcode_warn_naming_them(
     path = tmp_path / f"{case}.csv"
     path.write_text(content)
 
+    # Collect what earlier tests in this process left behind first: an object
+    # that the garbage collector cleans up during the import, such as a
+    # temporary directory, warns there, and only the import's own warnings
+    # count.
+    gc.collect()
     refs = []
     for _call in range(2):
         with warnings.catch_warnings(record=True) as caught:

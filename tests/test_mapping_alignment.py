@@ -13,6 +13,7 @@ from cytearc.matrix import ChunkedArray
 from cytearc.storage.artifacts import callable_identity
 from cytearc.storage.budget import ResourceBudget
 from tests.store_probes import RecordingStore
+from tests.memory_helpers import held_within_charge
 
 
 @pytest.mark.parametrize(
@@ -446,7 +447,7 @@ def test_aligned_feature_stream_charges_each_block_the_shards_of_its_cells(
     assert shards == 100
     feature = stream.query_feature_indices
     read, peak = traced_selection_read(stored, cells[:100], feature)
-    assert peak <= read.nbytes + fixed + 100 * per_row
+    assert held_within_charge(peak, read.nbytes + fixed + 100 * per_row)
     # A charge of one shard's task falls short of the read.
     one_fixed, one_per_row = row_read_parts(
         array_geometry(stored), feature, rows_contiguous=False

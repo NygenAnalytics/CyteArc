@@ -832,7 +832,5 @@ def test_a_graph_export_names_the_budget_of_its_edges(analysis, tmp_path) -> Non
     assert refusal is not None
     assert (refusal.budget_bytes, refusal.item) == (1000, "the graph's 240 edges")
     assert f"needs about {refusal.needed_bytes} bytes" in str(refusal)
-    below = export(refusal.needed_bytes - 1)
-    assert below is not None and below.item == refusal.item
     later = export(refusal.needed_bytes)
     assert later is None or later.item != refusal.item

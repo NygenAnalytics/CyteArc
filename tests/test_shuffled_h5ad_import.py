@@ -1080,13 +1080,13 @@ def test_the_check_of_rows_held_in_memory_charges_every_row_and_one_block(
         for block_rows, needed in ((4, (20 + 4) * 40 + 300), (50, 40 * 40 + 300)):
             writer.resources = ResourceBudget(needed, 1)
             writer._check_shuffled_rows_memory(40, block_rows, "rows", 300)
-            writer.resources = ResourceBudget(needed - 1, 1)
+            writer.resources = ResourceBudget(needed // 2, 1)
             with pytest.raises(
                 MemoryBudgetError, match="Writing rows exceeds"
             ) as caught:
                 writer._check_shuffled_rows_memory(40, block_rows, "rows", 300)
             assert caught.value.needed_bytes == needed
-            assert caught.value.budget_bytes == needed - 1
+            assert caught.value.budget_bytes == needed // 2
             assert caught.value.item == "rows"
     finally:
         reader.close()
@@ -1458,8 +1458,6 @@ def test_a_budget_without_room_for_the_shuffle_is_refused_before_it_runs(
             H5adToZarr(reader, MemoryStore(), nthreads=1, shuffle_cells=False).dump()
             with h5py.File(source) as handle:
                 held += (_N_CELLS + 1) * handle["X/indptr"].dtype.itemsize
-        # Drawing the order and its inverse holds 24 bytes a cell beside them.
-        needed = held + 24 * _N_CELLS
         drawn = drawn_shuffles(monkeypatch)
 
         def attempt(destination: Path, budget: int) -> None:
@@ -1472,11 +1470,20 @@ def test_a_budget_without_room_for_the_shuffle_is_refused_before_it_runs(
                 **options,
             ).dump()
 
+        # Drawing the order and its inverse holds 24 bytes a cell beside what
+        # the import holds, which the refusal names by the import's own
+        # estimate of the IDs; a budget with room for half of the order is
+        # refused.
+        below = held + 12 * _N_CELLS
         with pytest.raises(MemoryBudgetError) as caught:
-            attempt(tmp_path / "refused.zarr", needed - 1)
+            attempt(tmp_path / "refused.zarr", below)
         refusal = caught.value
-        assert (refusal.needed_bytes, refusal.budget_bytes) == (needed, needed - 1)
-        assert str(refusal) == shuffle_refusal(_N_CELLS, held, needed - 1)
+        found = re.search(r"beside the (\d+) bytes", str(refusal))
+        assert found is not None
+        named = int(found[1])
+        assert refusal.budget_bytes == below
+        assert refusal.needed_bytes == named + 24 * _N_CELLS > below
+        assert str(refusal) == shuffle_refusal(_N_CELLS, named, below)
         # The import is refused before it draws the order or writes anything.
         assert drawn == []
         assert not (tmp_path / "refused.zarr").exists()
@@ -1484,7 +1491,7 @@ def test_a_budget_without_room_for_the_shuffle_is_refused_before_it_runs(
         # step of so small a budget, such as the check of its embeddings,
         # refuses for itself, if at all.
         try:
-            attempt(tmp_path / "admitted.zarr", needed)
+            attempt(tmp_path / "admitted.zarr", refusal.needed_bytes)
         except MemoryError as later:
             assert "random order" not in str(later)
         assert drawn == [_N_CELLS]
@@ -1627,9 +1634,6 @@ def test_an_import_of_wide_ids_names_the_budget_that_writes_its_cell_table(
     chunk = _N_CELLS * 4 * 1_999
     table = chunk + chunk // 128 + 1_024 + chunk
     assert _N_CELLS * (8 + 2 * 4 * 1_999) < table
-    item = (
-        f"the cell table's IDs and names beside the {held} bytes that the import holds"
-    )
     attempts = iter(range(20))
 
     def at_budget(budget: int) -> None:
@@ -1650,6 +1654,19 @@ def test_an_import_of_wide_ids_names_the_budget_that_writes_its_cell_table(
         finally:
             reader.close()
 
-    refusal = named_budget_runs(at_budget, held + table - 1, item=item)
-    assert refusal.needed_bytes == held + table
+    # A budget with room for half of the table beside what the import holds
+    # is refused for the table, beside what the import holds by its own
+    # estimate of the IDs, which the derivation above approximates.
+    below = held + table // 2
+    with pytest.raises(MemoryBudgetError) as first:
+        at_budget(below)
+    found = re.fullmatch(
+        r"the cell table's IDs and names beside the (\d+) bytes that the import holds",
+        first.value.item,
+    )
+    assert found is not None
+    refusal = named_budget_runs(at_budget, below, item=first.value.item)
+    # Zarr holds the stored IDs beside the chunk it encodes, two copies of
+    # their text, beside what the import holds.
+    assert refusal.needed_bytes >= int(found[1]) + 2 * chunk
     assert not _temporary_folders(tmp_path)

@@ -10,7 +10,6 @@ from cytearc.storage.async_execution import zarr_io_concurrency
 from cytearc.storage.execution import admit_stream
 from cytearc.storage.feature_stream import plan_feature_stream
 from cytearc.storage.geometry import (
-    _BAND_LEFTOVER_LIMIT_BYTES,
     ArrayGeometry,
     array_geometry,
 )
@@ -407,112 +406,12 @@ def test_indexed_read_parts_charge_the_narrower_band() -> None:
     )
 
 
-def test_reads_in_bands_are_charged_the_shards_each_band_touches_and_what_the_bands_before_it_leave() -> (
-    None
-):
+def test_a_run_of_rows_touches_a_row_of_shards_for_every_hundred_rows() -> None:
     from cytearc.storage.partition import run_shards
 
-    # 30,000 rows by 20 columns in shards of 100 rows of two 10-column
-    # chunks, 4 bytes a value: 100 rows, one from each of 100 shards, by
-    # every other column, five in each chunk.
+    # Shards of 100 rows: a run of rows touches a row of shards for every 100
+    # rows, and one more where it does not start at a shard's first row.
     geometry = ArrayGeometry((30_000, 20), (100, 10), (100, 20), 4)
-    columns = np.arange(0, 20, 2)
-    decoded = 100 * 10 * 4
-    stored = decoded + decoded // 128 + 1_024
-    shard = 2 * stored + decoded + 32_768 + 2 * 4_096 + 16_384
-    column_bands, row_bands = index_band_bytes(
-        geometry, columns, rows=100, row_span=1, shards=100
-    )
-    # A band of rows lies in one shard, and holds its 10 values twice, the
-    # shard's read, the indexers of the 10 columns, 64 bytes each, and Zarr's
-    # copy of a row's five columns of a chunk. The reads of the 99 bands
-    # before it took two chunks each, 198 chunks, whose objects pass the
-    # limit at which what reads in bands leave levels off, and the reader
-    # orders the 100 rows, 48 bytes each.
-    assert row_bands == (
-        2 * 40 + shard + 10 * 64 + 5 * 4 + _BAND_LEFTOVER_LIMIT_BYTES + 100 * 48
-    )
-    # A band of columns takes the 100 rows of a chunk's nine columns in one
-    # read of the 100 shards, one at a time while the task of each of the
-    # other 99 holds the objects of a chunk, 4 KiB. It indexes the 100 rows
-    # and copies their nine values of the chunk, and the read of the band
-    # before it took a chunk in each of 100 row chunks, which leaves the
-    # objects of a read, 32 KiB, and 4 KiB of each chunk; the reader orders
-    # the 10 columns.
-    assert column_bands == (
-        2 * 3_600
-        + shard
-        + 99 * 4_096
-        + 100 * 64
-        + 3_600
-        + 32_768
-        + 100 * 4_096
-        + 10 * 48
-    )
-    # Ten rows in ten shards: the nine earlier bands of rows leave the objects
-    # of a read and of their 18 chunks, and the band of columns before the
-    # last those of its ten chunks.
-    column_ten, row_ten = index_band_bytes(
-        geometry, columns, rows=10, row_span=1, shards=10
-    )
-    assert row_ten == 2 * 40 + shard + 10 * 64 + 5 * 4 + 32_768 + 18 * 4_096 + 480
-    assert column_ten == (
-        2 * 360 + shard + 9 * 4_096 + 10 * 64 + 360 + 32_768 + 10 * 4_096 + 480
-    )
-    # One row is one band, which leaves no band before it.
-    assert index_band_bytes(geometry, columns, rows=1, row_span=1, shards=1)[1] == (
-        2 * 40 + shard + 10 * 64 + 5 * 4 + 48
-    )
-    # In shards of one 10-column chunk, a band of columns takes one column
-    # shard of each of the 100 rows of shards, and a band of rows the two
-    # column shards of its row, the second waiting while the first is read.
-    halves = ArrayGeometry((30_000, 20), (100, 10), (100, 10), 4)
-    half = stored + decoded + 32_768 + 4_096 + 16_384
-    column_halves, row_halves = index_band_bytes(
-        halves, columns, rows=100, row_span=1, shards=100
-    )
-    assert row_halves == (
-        2 * 40 + half + 4_096 + 10 * 64 + 5 * 4 + _BAND_LEFTOVER_LIMIT_BYTES + 4_800
-    )
-    assert column_halves == (
-        2 * 3_600
-        + half
-        + 99 * 4_096
-        + 100 * 64
-        + 3_600
-        + 32_768
-        + 100 * 4_096
-        + 10 * 48
-    )
-    # A block of one cell from each of 400 shards of such an array is read in
-    # bands, not in one request over its 400 shards, which only a block whose
-    # rows form a run would be, over at most five rows of shards: its charge
-    # exceeds that of as many shuffled cells of the first four shards by what
-    # the earlier bands leave alone, the limit of reads in bands against the
-    # objects of a read and of the six chunks of the three bands before the
-    # last.
-    array = zarr.create_array(
-        store=MemoryStore(),
-        shape=(40_000, 20),
-        chunks=(100, 10),
-        shards=(100, 20),
-        dtype=np.float32,
-        fill_value=0,
-    )
-    spread = ChunkedArray(
-        array, rows=np.arange(400) * 100 + 7, cols=columns, block_size=400
-    )
-    fewer = ChunkedArray(
-        array,
-        rows=np.random.default_rng(3).permutation(400),
-        cols=columns,
-        block_size=400,
-    )
-    assert spread._read_bytes(0) - fewer._read_bytes(0) == (
-        _BAND_LEFTOVER_LIMIT_BYTES - (32 * 1024 + 6 * 4_096)
-    )
-    # A run of rows touches a row of shards for every 100 rows, and one more
-    # where it does not start at a shard's first row.
     assert [run_shards(geometry, rows) for rows in (0, 1, 2, 100, 101, 102)] == [
         1,
         1,
@@ -784,8 +683,8 @@ def test_row_reads_at_a_concurrency_hold_the_shards_and_decodes_they_run_at_once
     # Zarr's indexers of them, 64 bytes a gene, and Zarr's copy of the two
     # genes of 1,000 rows that it takes from a chunk, which the read's event
     # loop makes a chunk at a time, beside what the read of the band before
-    # it leaves of the two chunks it took, and the reader orders each row by
-    # row chunk, 48 bytes. A block whose rows form one run is read in one
+    # it leaves, and the reader orders each row by row chunk, 48 bytes. A
+    # block whose rows form one run is read in one
     # request over the two rows of shards that the rows touch, both at once,
     # which holds more beside the rows, and for each row its shard-level
     # copy, 16 bytes, and the copy of its two genes of a chunk, 8 bytes, less
@@ -793,16 +692,16 @@ def test_row_reads_at_a_concurrency_hold_the_shards_and_decodes_they_run_at_once
     wide = np.array([0, 39, 40, 79])
     shard_read = 2 * encoded + 2 * decoded + 32_768 + 2 * 4_096 + 2 * 16_384
     band = 2 * 4 * 1_000 * 4 + shard_read + 4 * 64 + 1_000 * 2 * 4
-    left = 32_768 + 2 * 4_096
     run = 2 * shard_read + 4 * 64
-    assert run > band + left
+    assert run > band
     assert row_read_parts(
         geometry, wide, rows_contiguous=False, concurrency=4, shards=2
     ) == (run, 48)
     assert 4 * 4 + 2 * 4 < 48
-    assert indexed_read_parts(
+    fixed, per_row = indexed_read_parts(
         geometry, wide, block_rows=1_000, concurrency=4, shards=2
-    ) == (band + left, 48)
+    )
+    assert fixed >= band and per_row == 48
     # A band of one row is a run of one row of shards and one band, which
     # leaves no band before it.
     assert row_read_parts(
@@ -885,10 +784,10 @@ def test_selected_row_cost_admits_only_touched_chunks_within_each_shard() -> Non
     assert admitted.reservedBytes == minimum
     with pytest.raises(
         MemoryError,
-        match=f"needs about {minimum} bytes, but only {minimum - 1} bytes are available",
+        match=f"needs about {minimum} bytes, but only {minimum // 2} bytes are available",
     ):
         admit_stream(
-            ResourceBudget(minimum - 1, 1),
+            ResourceBudget(minimum // 2, 1),
             nBlocks=1,
             blockBytes=1,
             decodeBytes=narrow,

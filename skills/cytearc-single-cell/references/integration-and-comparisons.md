@@ -303,8 +303,9 @@ an inserted copy records abstentions only as missing values and loses their reas
   holds about 1.5 KB per cell at 30 dims and 100 clusters (`n_clusters` defaults to cells / 30, at
   most 100), plus its batch labels (about 60 bytes per cell per column): lower
   `harmony_params={"n_clusters": ...}` or the PCA dims, or raise the budget. WNN holds every assay's
-  neighbors and coordinates, SNN every graph plus a float64 matrix per graph. The estimates are
-  near-exact counts of what each step allocates, not a cap on process memory; leave headroom.
+  neighbors and coordinates, SNN every graph plus a float64 matrix per graph. The estimates count
+  the arrays that grow with the data, not every allocation, and are no cap on process memory;
+  leave headroom.
 - `reduction.harmony` and WNN reject coordinates that are normalized values (`pca={"dims": 0}`
   runs); build PCA first, or integrate such graphs with `method="snn"`.
 - Keys of the earlier Harmony raise `ValueError: Unsupported Harmony parameter ...`, also

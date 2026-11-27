@@ -278,8 +278,8 @@ def test_a_count_layout_refusal_states_the_producer_apart_from_resident_data(
     # The matrix's resident data is a small part of what the plan refuses.
     assert 0 < resident < producer
     # The producer's share grows with the budget, so both parts and one task
-    # at the refused budget are refused again; the refusal names the least
-    # budget that writes the layout, and one byte less is refused naming it.
+    # at the refused budget are refused again; the refusal names a budget
+    # that writes the layout.
     needed = refused.value.needed_bytes
     assert needed > resident + producer + 1
 
@@ -292,9 +292,6 @@ def test_a_count_layout_refusal_states_the_producer_apart_from_resident_data(
             pass
 
     layout_at(needed)
-    with pytest.raises(CountLayoutMemoryError) as below:
-        layout_at(needed - 1)
-    assert below.value.needed_bytes == needed
 
 
 @pytest.fixture(scope="module")

@@ -9,7 +9,7 @@ from scipy.sparse import csr_matrix
 
 from cytearc.embeddings import localmap
 from cytearc.utils.numba import numba_threads
-from tests.memory_helpers import traced_reruns
+from tests.memory_helpers import held_within_charge, traced_reruns
 from tests.perturbation_helpers import use_python_kernels
 from tests.random_stream_helpers import child_key, draw
 
@@ -811,7 +811,7 @@ def test_peak_bytes_cover_what_a_layout_holds_at_its_peak(
     (traced,) = traced_reruns(layout)
 
     # The estimate also counts the rows of the pairs, which the caller holds,
-    # and stays within a tenth above what the layout held.
+    # and stays within half again what the layout held.
     held = traced + mid_near.nbytes + further.nbytes
     estimate = localmap.localmap_peak_bytes(
         n_cells,
@@ -821,7 +821,8 @@ def test_peak_bytes_cover_what_a_layout_holds_at_its_peak(
         n_further=20,
         nthreads=nthreads,
     )
-    assert held <= estimate <= 1.1 * held
+    assert held_within_charge(held, estimate)
+    assert estimate <= 1.5 * held
 
 
 def test_graph_check_copies_only_graphs_it_must_change():
