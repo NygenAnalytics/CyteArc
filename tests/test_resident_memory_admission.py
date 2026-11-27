@@ -41,6 +41,8 @@ from cytearc.neighbors.stages import (
 from cytearc.storage.artifacts import artifact_group
 from cytearc.storage.budget import ResourceBudget
 from cytearc.storage.execution import ExecutionReport, execution_report_scope
+from cytearc.storage.geometry import READ_CHUNK_BYTES
+from cytearc.utils.memory_budget import READ_ALLOWANCE_BYTES
 from tests.storage_helpers import by_cell_id, write_count_store
 
 N_CELLS = 120
@@ -318,11 +320,24 @@ def test_wnn_integration_raises_before_loading_coordinates_over_budget(
         )
 
     message = str(caught.value)
-    # The integration needs its kernels' peak, or what reading the
-    # coordinates holds where that is more, as the allowance of a read makes
-    # it on so few cells.
+
+    # The integration needs its kernels' peak or, where that is more, what
+    # reading an assay's float32 coordinates holds: the uint32 neighbors and
+    # coordinates of the assays loaded so far and of this one, the block of
+    # every cell as read and as returned, its one stored chunk decoded and
+    # encoded, at most a 128th more and 1 KiB, and the allowance of a read in
+    # flight and of its chunk. On so few cells the reads need more.
+    def reading(held: int, dims: int) -> int:
+        chunk = N_CELLS * dims * 4
+        encoded = chunk + chunk // 128 + 1_024
+        return (
+            held + 2 * chunk + chunk + encoded + READ_ALLOWANCE_BYTES + READ_CHUNK_BYTES
+        )
+
+    rna = N_CELLS * (6 * 4 + 5 * 4)
+    adt = rna + N_CELLS * (6 * 4 + 3 * 4)
     needed = _required_bytes(message)
-    assert needed >= peak
+    assert needed == max(peak, reading(rna, 5), reading(adt, 3)) > peak
     assert (
         f"2 assays over {N_CELLS} cells with [6, 6] neighbors and [5, 3] dimensions"
         in message
@@ -344,8 +359,7 @@ def test_wnn_integration_raises_before_loading_coordinates_over_budget(
     assert held and not any(held)
     # Each read reserves the uint32 neighbors and float32 coordinates of its
     # assay beside those of the assays loaded before it.
-    rna = N_CELLS * (6 * 4 + 5 * 4)
-    assert _reserved_bytes(reports) == [rna, rna + N_CELLS * (6 * 4 + 3 * 4)]
+    assert _reserved_bytes(reports) == [rna, adt]
 
 
 def _record_index_creations(monkeypatch) -> list[int]:
