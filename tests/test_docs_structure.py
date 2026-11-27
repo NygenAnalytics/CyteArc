@@ -593,3 +593,114 @@ def test_labels_of_built_pages_stay_apart_once_normalized() -> None:
         for label in re.findall(r"^\(([^)\s]+)\)=\s*$", _prose(path), re.MULTILINE)
     ]
     assert len(labels) == len(set(labels))
+
+
+# Tutorials describe a computed result by what identifies it ("the cluster that
+# expresses CD79A"), never by the number a particular execution gave it, because
+# a rebuilt store numbers its clusters, modules, clones and states differently.
+_COMPUTED_LABEL_NUMBER = re.compile(
+    r"(?<![A-Za-z])"
+    r"(?:clusters?|modules?|clones?|clonotypes?|states?|communit(?:y|ies))"
+    r"(?:[\s_]|\s*==\s*|\.eq\(\s*)[\"']?"
+    r"\d+(?![\d.]*\d)(?!,\d{3})",
+    re.IGNORECASE,
+)
+
+
+def _computed_label_numbers(text: str) -> list[str]:
+    """The cluster, module, clone and state numbers that a text quotes."""
+    text = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
+    return [match[0] for match in _COMPUTED_LABEL_NUMBER.finditer(text)]
+
+
+def _tutorial_texts(path: Path) -> list[str]:
+    """The Markdown cells and the figure descriptions of a notebook."""
+    cells = json.loads(path.read_text())["cells"]
+    texts = ["".join(c["source"]) for c in cells if c["cell_type"] == "markdown"]
+    for cell in cells:
+        texts.extend(cell.get("metadata", {}).get("figure_descriptions", []))
+    return texts
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "T-cell clusters 3 and 4 hold 13 and 14 of them.",
+        "Cluster 2 holds classical CD14 monocytes.",
+        "Group the cells, then look at the largest, cluster 1.",
+        "The Neurog3 module, module 5 with 1,229 genes, peaks first.",
+        "so `clonotype_5` holds four cells with that alpha chain",
+        "Four clones carry the variant: clone_1 carries it alone.",
+        "Mark the cells of run cluster 5 in a new Boolean column.",
+        "The Ductal and Ngn3 high EP states 2 and 3 drain the walk.",
+        "Split it with `in_cluster_7 = cluster == 7`.",
+        'keep `clusters.eq("3")` as the mask',
+        "UMAP colored by the 12 saved clusters. NK cluster 5 sits below it.",
+        "Cluster\n7 is mostly G2M.",
+    ],
+)
+def test_computed_label_numbers_are_found(text: str) -> None:
+    assert _computed_label_numbers(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Cluster the cells with `resolution=1.0`.",
+        "Cluster 3,948 human peripheral blood mononuclear cells (PBMCs).",
+        "The 12 clusters at resolution 0.5 and `n_clusters=12`.",
+        "The default `min_cluster_size=3` applies.",
+        "Each cluster has its own color; the module that holds Neurog3 peaks first.",
+        "The cluster that expresses CD79A, and the largest clone.",
+        "State 2.5 is not a label, and a state vector has 10 entries.",
+        "The cluster of 25 cells, then the module of 1,229 genes.",
+        "Run the clusterer 5 times on 10 PCs of the 2,700 cells.",
+        "```python\nds.clusters.select(cluster=3)\n```",
+    ],
+)
+def test_computed_label_numbers_ignore_parameters_and_prose_numbers(
+    text: str,
+) -> None:
+    assert _computed_label_numbers(text) == []
+
+
+def test_computed_label_numbers_name_each_quote() -> None:
+    quoted = _computed_label_numbers("Cluster 1 and cluster 10 beside clone_4.")
+    assert quoted == ["Cluster 1", "cluster 10", "clone_4"]
+
+
+def test_tutorial_texts_include_figure_descriptions(tmp_path: Path) -> None:
+    notebook = {
+        "cells": [
+            {"cell_type": "markdown", "source": ["Prose.\n", "More."], "metadata": {}},
+            {
+                "cell_type": "code",
+                "source": ["cluster_3 = 1"],
+                "metadata": {"figure_descriptions": ["Left, cluster 3 on top."]},
+            },
+        ]
+    }
+    path = tmp_path / "page.ipynb"
+    path.write_text(json.dumps(notebook))
+
+    assert _tutorial_texts(path) == ["Prose.\nMore.", "Left, cluster 3 on top."]
+
+
+def test_tutorials_do_not_quote_computed_label_numbers() -> None:
+    quoted = {
+        path.relative_to(_DOCS_SOURCE).as_posix(): hits
+        for path in _pages()
+        if path.suffix == ".ipynb"
+        if (
+            hits := [
+                hit
+                for text in _tutorial_texts(path)
+                for hit in _computed_label_numbers(text)
+            ]
+        )
+    }
+
+    assert quoted == {}, (
+        "Describe a cluster, module, clone or state by what identifies it, not by "
+        "the number of one execution; see 'Add a tutorial' in contributing.md."
+    )

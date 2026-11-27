@@ -7,6 +7,7 @@ These instructions cover documentation sources, notebook execution, and site bui
 - MyST builds guides and tutorials. Sphinx builds only `docs/source/reference/api/`.
 - Give every DOI a page links an entry in `docs/source/references.bib`. MyST otherwise looks the DOI up on doi.org during each build, and `tests/test_docs_structure.py` checks this.
 - `docs/source/developers/contributing.md` describes the authoring workflow.
+- Tutorials don't quote values that a page computed, such as cluster numbers, counts or scores, in prose, comments or figure descriptions; "Add a tutorial" in `contributing.md` has the rule.
 
 ## Setup and rendering
 

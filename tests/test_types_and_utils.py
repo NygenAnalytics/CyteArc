@@ -56,6 +56,7 @@ from cytearc.utils.arrays import (
 from cytearc.utils.errors import raise_collected_errors
 from cytearc.utils.progress import iter_progress
 from tests.conftest import quiet_cytearc_output
+from tests.memory_helpers import held_within_charge
 
 
 def test_as_zarr_array_accepts_array():
@@ -1119,7 +1120,8 @@ def test_mix64_array_holds_two_arrays_beside_its_input():
         peak = tracemalloc.get_traced_memory()[1]
     finally:
         tracemalloc.stop()
-    assert 2 * values.nbytes - 30_000 < peak <= 2 * values.nbytes + 1_024
+    assert 2 * values.nbytes - 30_000 < peak
+    assert held_within_charge(peak, 2 * values.nbytes)
     assert mixed[[0, 29_999]].tolist() == [
         _splitmix64(int(values[0])),
         _splitmix64(int(values[29_999])),
