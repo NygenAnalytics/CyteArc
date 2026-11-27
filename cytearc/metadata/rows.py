@@ -144,6 +144,38 @@ def text_width(array: Any, *, ledger: MemoryLedger | None = None) -> int:
     return text_extent(array, None, ledger).characters
 
 
+def text_size(
+    values: np.ndarray, ledger: MemoryLedger | None = None
+) -> tuple[int, int, int]:
+    """Return the characters of NumPy text ``values``, the UTF-8 bytes of the longest value and the widest code point.
+
+    Fixed-width text counts each value at the stored width, which bounds its
+    characters, and its UTF-8 bytes at the widest character stored.
+    Variable-width text counts them as
+    :func:`~cytearc.storage.geometry.text_extent` measures them, charged to
+    ``ledger``.
+    """
+    if values.dtype.kind == "T":
+        extent = text_extent(values, None, ledger)
+        return extent.characterTotal, extent.utf8Bytes, extent.widest
+    width = max(1, values.dtype.itemsize // 4)
+    widest = int(values.view(np.uint32).max()) if values.size else 0
+    utf8 = 1 if widest < 0x80 else 2 if widest < 0x800 else 3 if widest < 0x10000 else 4
+    return len(values) * width, width * utf8, widest
+
+
+def text_strings_bytes(values: np.ndarray, ledger: MemoryLedger | None = None) -> int:
+    """Return the bytes of NumPy text ``values`` as Python strings and their references, as :func:`text_size` measures them.
+
+    pandas makes them of fixed-width and variable-width text before it hashes
+    it, as ``astype(object)`` does.
+    """
+    characters, _, widest = text_size(values, ledger)
+    return object_array_bytes(len(values)) + python_text_bytes(
+        len(values), characters, widest=widest
+    )
+
+
 def text_row_selection_parts(
     array: Any, *, ledger: MemoryLedger | None = None
 ) -> tuple[int, int]:

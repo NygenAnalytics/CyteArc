@@ -12,7 +12,7 @@ from cytearc.regulons.results import GrnResult
 from cytearc.storage.artifacts import ArtifactRef, artifact_group
 from cytearc.utils.arrays import sort_categories
 from cytearc.utils.memory_budget import MemoryLedger
-from tests.memory_helpers import climb_refusals
+from tests.memory_helpers import climb_refusals, held_within_charge, traced_charge
 from tests.regulon_helpers import csi_by_definition, rss_by_definition
 from tests.storage_helpers import (
     by_cell_id,
@@ -747,6 +747,26 @@ def test_connection_specificity_streams_the_correlations_of_the_scores(scored):
         store.regulons.connection_specificity(auc, margin=float("inf"))
     with pytest.raises(TypeError, match="margin must be a real number"):
         store.regulons.connection_specificity(auc, margin="0.05")
+
+
+@pytest.mark.parametrize("kind", ["U", "T"], ids=["fixed width", "variable width"])
+def test_coding_the_groups_charges_the_strings_that_pandas_makes_of_text(kind) -> None:
+    from cytearc.datastore._operations.regulons import _group_codes
+
+    # 50,000 cells' labels of 31 characters in 12 groups, as a text column of
+    # fixed or variable width reads. pandas hashes them as a Python string of
+    # each, 80 bytes a label, more than the rest of what coding holds.
+    names = np.asarray([f"cluster label {k:02d} xxxxxxxxxxxxxx" for k in range(12)])
+    picks = np.random.default_rng(0).integers(0, 12, 50_000)
+    labels = names[picks].astype("U32" if kind == "U" else np.dtypes.StringDType())
+
+    run = traced_charge(lambda ledger: _group_codes(ledger, labels, None))
+
+    assert held_within_charge(run.held, run.charged)
+    assert run.held >= len(labels) * (8 + 41 + 31)
+    categories, codes = _group_codes(MemoryLedger(None, "Scoring"), labels, None)
+    assert categories == sort_categories(names.tolist())
+    assert codes.tolist() == [categories.index(name) for name in names[picks]]
 
 
 def test_specificity_charges_a_block_of_scores_that_follows_the_budget_not_the_cells(

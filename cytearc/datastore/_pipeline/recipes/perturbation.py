@@ -18,7 +18,11 @@ import numpy as np
 import pandas as pd
 
 from ....assay import RNAassay
-from ....metadata.rows import read_metadata_rows_chunkwise, read_rows
+from ....metadata.rows import (
+    read_metadata_rows_chunkwise,
+    read_rows,
+    text_strings_bytes,
+)
 from ....perturbation.associations import covariate_columns
 from ....perturbation.guide_calls import validated_guide_ids
 from ....perturbation.labels import GuideTargets, guide_targets, label_settings
@@ -36,7 +40,6 @@ from ..._operations.perturbation_guides import (
     _parse_call_file,
     _read_guide_ids,
     _refuse_shared_cells,
-    _strings_bytes,
 )
 from ..._operations.cell_samples import require_cell_column
 from ..executor import COORDINATES, PlannedStage, RecipePlan, RunState
@@ -584,7 +587,7 @@ def _check_call_file(
     # finds.
     ledger.peak(
         "finding the call file's barcodes among the run's cells",
-        _strings_bytes(cell_ids, ledger)
+        text_strings_bytes(cell_ids, ledger)
         + index_lookup_bytes(len(cell_ids), n_rows)
         + derived_id_bytes(call_file, n_rows, size.n_bytes),
     )

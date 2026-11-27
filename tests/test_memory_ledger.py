@@ -36,6 +36,7 @@ from cytearc.utils.memory_budget import (
 from tests.memory_helpers import (
     held_within_charge,
     named_budget,
+    traced_charge,
 )
 from tests.storage_helpers import by_cell_id
 
@@ -261,6 +262,22 @@ def test_coding_unhashable_labels_refuses_before_it_makes_their_texts() -> None:
     assert codes.tolist() == expected_codes.tolist()
     # Label k holds index k % 3, which names sort by.
     assert codes.tolist() == [index % 3 for index in range(1_000)]
+
+
+@pytest.mark.parametrize("kind", ["U", "T"], ids=["fixed width", "variable width"])
+def test_coding_numpy_text_charges_the_strings_that_pandas_makes(kind) -> None:
+    # 50,000 labels of 31 characters in 12 groups, as a text column of fixed
+    # or variable width reads. pandas hashes them as a Python string of each,
+    # 80 bytes a label, more than the rest of what coding holds.
+    names = np.asarray([f"cluster label {k:02d} xxxxxxxxxxxxxx" for k in range(12)])
+    picks = np.random.default_rng(0).integers(0, 12, 50_000)
+    labels = names[picks].astype("U32" if kind == "U" else np.dtypes.StringDType())
+
+    run = traced_charge(lambda ledger: category_codes(labels, ledger=ledger))
+
+    # The codes that coding returns are the caller's to charge.
+    assert held_within_charge(run.held, run.charged + 8 * len(labels))
+    assert run.held >= len(labels) * (8 + 41 + 31)
 
 
 @pytest.mark.parametrize(

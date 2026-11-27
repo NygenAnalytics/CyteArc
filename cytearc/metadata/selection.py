@@ -45,6 +45,7 @@ from .rows import (
     read_metadata_rows,
     read_rows,
     read_rows_bytes,
+    text_strings_bytes,
 )
 
 LookupBy = Literal["name", "id", "index"]
@@ -466,8 +467,10 @@ def category_codes(
     With ``ledger``, what coding holds is charged to it before each step:
     what pandas holds to factorize the values, as
     :func:`~cytearc.utils.memory_budget.factorize_bytes` counts it for values
-    that may all differ, beside each value's code and the distinct values'
-    references; and
+    that may all differ, beside each value's code, the distinct values'
+    references and, for NumPy text, the Python string that pandas makes of
+    each value, as :func:`~cytearc.metadata.rows.text_strings_bytes` counts
+    it; and
     then the codes beside naming and ordering the distinct labels, from their
     texts' characters and widest character, as
     :func:`~cytearc.utils.memory_budget.python_text_bytes` counts them, and
@@ -498,9 +501,12 @@ def category_codes(
         raise ValueError("category values must be one-dimensional")
     n_values = len(array)
     if ledger is not None:
+        # pandas hashes NumPy text, fixed or variable in width, as a Python
+        # string of each value.
+        strings = text_strings_bytes(array, ledger) if array.dtype.kind in "UT" else 0
         ledger.peak(
             f"coding {n_values} labels",
-            factorize_bytes(n_values) + _FACTORIZE_BYTES_PER_VALUE * n_values,
+            strings + factorize_bytes(n_values) + _FACTORIZE_BYTES_PER_VALUE * n_values,
         )
     try:
         factorized, distinct = pd.factorize(array, use_na_sentinel=True)
