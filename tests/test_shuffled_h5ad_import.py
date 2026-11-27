@@ -47,6 +47,7 @@ from tests.row_store_helpers import (
     finalized_bytes,
     free_disk,
 )
+from tests.memory_helpers import NEEDS_NAMING_ONE_MIB, climb_refusals, named_budget
 from tests.storage_helpers import drawn_shuffles, shuffle_refusal
 
 anndata = pytest.importorskip("anndata")
@@ -970,10 +971,11 @@ def test_a_budget_without_room_for_the_spill_is_refused_with_the_bytes_it_needs(
         assert caught.value.needed_bytes == needed
         assert caught.value.budget_bytes == budget
         assert caught.value.item == item
+        assert needed <= NEEDS_NAMING_ONE_MIB
         assert str(caught.value) == (
             f"Importing {quoted_value(str(source))} holds about {needed} bytes for "
             f"{item}, more than the memory budget of {budget} bytes. Raise "
-            f"mem_budget to at least {needed} bytes."
+            "mem_budget to at least 1 MiB."
         )
         assert reader._convertedCsr is None
         # With that much, the spill fits; a later step of so small a budget
@@ -1077,7 +1079,11 @@ def test_the_check_of_rows_held_in_memory_charges_every_row_and_one_block(
         # Twenty rows and a block of four, of 40 bytes each, beside the 300
         # bytes the import holds throughout; a block of more rows than the
         # cells holds the twenty.
-        for block_rows, needed in ((4, (20 + 4) * 40 + 300), (50, 40 * 40 + 300)):
+        for rows, needed in ((4, (20 + 4) * 40 + 300), (50, 40 * 40 + 300)):
+
+            def block_rows(_budget: int, rows: int = rows) -> int:
+                return rows
+
             writer.resources = ResourceBudget(needed, 1)
             writer._check_shuffled_rows_memory(40, block_rows, "rows", 300)
             writer.resources = ResourceBudget(needed // 2, 1)
@@ -1088,6 +1094,26 @@ def test_the_check_of_rows_held_in_memory_charges_every_row_and_one_block(
             assert caught.value.needed_bytes == needed
             assert caught.value.budget_bytes == needed // 2
             assert caught.value.item == "rows"
+
+        # Rows of 1 MB in blocks of a row for every 2 MB of the budget grow
+        # by half of what the budget does. At 1 MB they need the 20 rows
+        # beside 300 bytes, 20,000,300 bytes, whose suggested budget, 24 MiB,
+        # holds blocks of 12 rows and needs 32,000,300; at that need's, 39
+        # MiB, the blocks hold every row and the check passes.
+        def growing(budget: int) -> int:
+            return budget // 2_000_000
+
+        writer.resources = ResourceBudget(1_000_000, 1)
+        with pytest.raises(MemoryBudgetError) as grown:
+            writer._check_shuffled_rows_memory(1_000_000, growing, "rows", 300)
+        assert grown.value.needed_bytes == 32_000_300
+        assert grown.value.budget_bytes == 1_000_000
+        assert named_budget(grown.value) == 39 * 1024**2
+        writer.resources = ResourceBudget(39 * 1024**2, 1)
+        writer._check_shuffled_rows_memory(1_000_000, growing, "rows", 300)
+        writer.resources = ResourceBudget(24 * 1024**2, 1)
+        with pytest.raises(MemoryBudgetError):
+            writer._check_shuffled_rows_memory(1_000_000, growing, "rows", 300)
     finally:
         reader.close()
 
@@ -1429,6 +1455,81 @@ def test_what_a_shuffled_import_holds_beside_a_gathered_array_is_charged(
         + _N_CELLS
         + 8 * (_N_CELLS + 1)
     )
+
+
+@pytest.mark.parametrize("encoding", ["csr", "csc", "dense"])
+def test_a_shuffled_import_of_3000_cells_is_refused_once_at_most_by_each_step(
+    tmp_path, encoding
+) -> None:
+    # The blocks of the embeddings' shuffled rows and the count layout's
+    # writes grow with the budget, so each refused the budget that its own
+    # refusal named, up to four times in a row (#621). Climbing from a byte,
+    # each refusal names a budget that passes its step, and the last one
+    # imports the file.
+    source = tmp_path / "source.h5ad"
+    counts = _write_source(source, encoding, n_cells=3000)
+    attempts = iter(range(20))
+
+    def at_budget(budget: int) -> Path:
+        destination = tmp_path / f"store-{next(attempts)}.zarr"
+        _import(source, destination, mem_budget=budget, shuffle_cells=True)
+        return destination
+
+    refusals, destination = climb_refusals(at_budget)
+    items = [refusal.item for refusal in refusals]
+    assert len(set(items)) == len(items) >= 2
+    assert "the default count-matrix policy" in items
+    root = _open(destination)
+    order = np.asarray(root[f"cellData/{SOURCE_ROW}"][...])
+    np.testing.assert_array_equal(np.asarray(root["RNA/counts"][...]), counts[order])
+    assert not _temporary_folders(tmp_path)
+
+
+def test_long_cluster_labels_are_refused_once_for_their_shuffled_rows(
+    tmp_path,
+) -> None:
+    # Blocks of cluster labels are sized at 64 bytes a row and hold 4 bytes
+    # a character beside a flag, 241 bytes for labels of 60 characters, so
+    # what their shuffled rows need grows faster with the budget than the
+    # quarter beside a refusal's need covers: their check names a need at
+    # which it passes its own block.
+    n_cells = 30_000
+    rng = np.random.default_rng(0)
+    labels = [name.ljust(60, "x") for name in ("alpha", "beta", "gamma")]
+    source = tmp_path / "labels.h5ad"
+    anndata.AnnData(
+        csr_matrix(rng.poisson(0.9, (n_cells, _N_FEATURES)).astype(np.float32)),
+        obs=pd.DataFrame(
+            {"label": pd.Categorical(rng.choice(labels, n_cells))},
+            index=[f"cell-{row}" for row in range(n_cells)],
+        ),
+        var=pd.DataFrame(index=[f"g{f}" for f in range(_N_FEATURES)]),
+    ).write_h5ad(source)
+    attempts = iter(range(20))
+    item = "the cluster labels of 'label' in shuffled order"
+
+    def at_budget(budget: int) -> None:
+        reader = H5adReader(str(source), cluster_keys=("label",))
+        try:
+            H5adToZarr(
+                reader,
+                str(tmp_path / f"store-{next(attempts)}.zarr"),
+                mem_budget=budget,
+                nthreads=1,
+                shuffle_cells=True,
+            ).dump()
+        finally:
+            reader.close()
+
+    refusals, _ = climb_refusals(at_budget)
+    assert [refusal.item for refusal in refusals].count(item) == 1
+    labels_refusal = next(refusal for refusal in refusals if refusal.item == item)
+    # The rows of 30,000 labels and a block of them hold at most twice 241
+    # bytes a cell beside what the import holds, which the refusal names.
+    found = re.search(r"beside the (\d+) bytes", str(labels_refusal))
+    assert found is not None
+    assert labels_refusal.needed_bytes <= int(found[1]) + 2 * 241 * n_cells
+    assert not _temporary_folders(tmp_path)
 
 
 @pytest.mark.parametrize("case", ["plain", "split", "reused reader"])

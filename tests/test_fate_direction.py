@@ -51,7 +51,7 @@ from .test_trajectory_record_paths import (
     _trajectory_store,
     _y_graph,
 )
-from tests.memory_helpers import climb_refusals
+from tests.memory_helpers import named_budget
 from tests.storage_helpers import by_cell_id
 
 _SINKS = ["A", "B"]
@@ -910,7 +910,7 @@ def test_a_map_directed_by_a_score_is_refused_a_small_budget_before_its_graph_is
     assert str(refused.value) == (
         f"{work} of 145 cells needs about {refused.value.needed_bytes} bytes in "
         f"memory for {named}, but the operation limit is "
-        f"{needed // 2} bytes. Raise mem_budget."
+        f"{needed // 2} bytes. Raise mem_budget to at least 1 MiB."
     )
     assert reads == {}
     assert _fate_maps(store) == maps
@@ -969,24 +969,18 @@ def test_fate_names_what_mapping_its_fates_holds_when_that_outweighs_the_load(
     assert str(refused.value) == (
         f"Mapping fates of 265 cells needs about {refused.value.needed_bytes} bytes "
         "in memory for a graph of 1325 edges, but the operation limit is "
-        f"{needed // 2} bytes. Raise mem_budget."
+        f"{needed // 2} bytes. Raise mem_budget to at least 1 MiB."
     )
     assert reads == {}
     assert _fate_maps(store) == maps
 
-    # The budget that the refusal names passes the graph's check; the read of
-    # the cells' labels that follows it can name a little more, beside the
-    # allowance of its read, and the fates are mapped at the last budget
-    # named.
-    def mapping(budget: int) -> ArtifactRef:
-        _set_budget(store, budget)
-        return call()
-
-    later, _ = climb_refusals(mapping, start=refused.value.needed_bytes)
-    assert all(error.item != refused.value.item for error in later)
-    # That budget maps the fates reading the graph once.
+    # The read of the cells' labels that follows the graph's check needs a
+    # little more than mapping, beside the allowance of its read, and the
+    # budget that the refusal names leaves room for it: the fates are mapped
+    # there, reading the graph once.
     reads.clear()
-    mapping(later[-1].needed_bytes if later else refused.value.needed_bytes)
+    _set_budget(store, named_budget(refused.value))
+    call()
     assert reads == {"_store_to_sparse": 1}
 
 

@@ -701,12 +701,12 @@ def load_diffusion_payload(
     if load_bytes >= memory_bytes:
         raise MemoryBudgetError(
             "Diffusion operator and imputed output exceed the memory budget "
-            "during loading or sparse conversion; increase the memory budget "
-            "or request fewer features per call. They need at least "
+            "during loading or sparse conversion. They need at least "
             f"{load_bytes + 1} bytes.",
             needed_bytes=load_bytes + 1,
             budget_bytes=int(memory_bytes),
             item="loading the diffusion operator beside the imputed output",
+            remedy="request fewer features per call",
         )
     loaded = [np.asarray(array[:]) for array in arrays]
     builder = ValueFingerprintBuilder()

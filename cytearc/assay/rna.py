@@ -378,12 +378,11 @@ class RNAassay(Assay):
                 f"Normalized feature batches of {max(1, width)} features over "
                 f"{n_cells} cells do not fit the memory budget of "
                 f"{self.resources.memoryBytes} bytes; the affordable width is "
-                f"{affordable}. Increase the memory budget"
-                + ("." if batch_size is None else " or reduce the batch size.")
-                + f" They need at least {needed} bytes.",
+                f"{affordable}. They need at least {needed} bytes.",
                 needed_bytes=needed,
                 budget_bytes=int(self.resources.memoryBytes),
                 item=f"normalized feature batches of {max(1, width)} features",
+                remedy=None if batch_size is None else "reduce the batch size",
             )
         loaded_groups = map_feature_read_groups(
             counts_t,

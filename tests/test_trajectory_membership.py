@@ -80,7 +80,7 @@ from .test_trajectory_record_paths import (
     _write_graph_payload,
 )
 from tests.storage_helpers import by_cell_id
-from tests.memory_helpers import climb_refusals, held_within_charge
+from tests.memory_helpers import NEEDS_NAMING_ONE_MIB, held_within_charge, named_budget
 
 _SOURCES = ["t1"]
 
@@ -1917,20 +1917,13 @@ def test_a_membership_that_outweighs_its_graph_is_refused_once() -> None:
     )
     assert reads == []
 
-    # The budget that the refusal names passes the membership; the read of the
-    # cells' labels that follows it can name more, beside the allowance of a
-    # read, and the call runs at the last budget named.
-    def membership(budget: int) -> Any:
-        _set_budget(store, budget)
-        return store.trajectory.lineage_membership(
-            branching.curves, invalidate_cache=True
-        )
-
-    later, _ = climb_refusals(membership, start=needed)
-    assert all(error.item != refused.value.item for error in later)
-    # That budget calls the membership reading the graph once.
+    # The read of the cells' labels that follows the membership needs more
+    # than the membership, beside the allowance of a read, and the budget
+    # that the refusal names leaves room for it: the call runs there,
+    # reading the graph once.
     reads.clear()
-    membership(later[-1].needed_bytes if later else needed)
+    _set_budget(store, named_budget(refused.value))
+    store.trajectory.lineage_membership(branching.curves, invalidate_cache=True)
     assert reads == ["graph"]
 
 
@@ -2052,10 +2045,11 @@ def test_a_budget_below_the_graph_load_is_refused_before_the_graph_is_read(
         named = item = _MEMBERSHIP_ITEMS[call]
     else:
         named, item = "a graph of 725 edges", "the graph of 725 edges and its work"
+    assert refused.value.needed_bytes <= NEEDS_NAMING_ONE_MIB
     assert str(refused.value) == (
         f"{work} of 145 cells needs about {refused.value.needed_bytes} bytes "
         f"in memory for {named}, but the operation limit is "
-        f"{below} bytes. Raise mem_budget."
+        f"{below} bytes. Raise mem_budget to at least 1 MiB."
     )
     assert refused.value.item == item
     assert reads == {}
@@ -2102,15 +2096,16 @@ def test_the_membership_loaders_name_a_graph_that_outweighs_the_membership_check
         needed = refused.value.needed_bytes
         assert needed >= least
         assert needed > membership_load_bytes(145, ["a2", "b2"], 2)
+        assert needed <= NEEDS_NAMING_ONE_MIB
         assert str(refused.value) == (
             f"{work} of 145 cells needs about {needed} bytes in memory for a "
             f"graph of 3770 edges, but the operation limit is {below} "
-            "bytes. Raise mem_budget."
+            "bytes. Raise mem_budget to at least 1 MiB."
         )
         assert refused.value.item == "the graph of 3770 edges and its work"
         assert reads == {}
-        # The budget that the refusal names reads the graph once and runs
-        # the call.
+        # The bytes that the refusal needs read the graph once and run the
+        # call.
         _set_budget(store, needed)
         call()
         assert reads == {"_store_to_sparse": 1}

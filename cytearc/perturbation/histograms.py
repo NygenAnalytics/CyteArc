@@ -26,6 +26,7 @@ from cytearc.utils.memory_budget import (
     MemoryBudgetError,
     MemoryLedger,
     memory_refusal,
+    refusal_words,
 )
 from cytearc.utils.numba import njit
 
@@ -361,9 +362,14 @@ class HistogramMemoryError(MemoryBudgetError):
         item: str,
         n_distinct: int,
         estimated_needed_bytes: int | None,
+        remedy: str | None = None,
     ) -> None:
         super().__init__(
-            message, needed_bytes=needed_bytes, budget_bytes=budget_bytes, item=item
+            message,
+            needed_bytes=needed_bytes,
+            budget_bytes=budget_bytes,
+            item=item,
+            remedy=remedy,
         )
         self.n_distinct = int(n_distinct)
         self.estimated_needed_bytes = (
@@ -381,6 +387,7 @@ class HistogramMemoryError(MemoryBudgetError):
                 self.item,
                 self.n_distinct,
                 self.estimated_needed_bytes,
+                self.remedy,
             ),
             self.__dict__,
         )
@@ -394,6 +401,7 @@ def _restore_histogram_memory_error(
     item: str,
     n_distinct: int,
     estimated_needed_bytes: int | None,
+    remedy: str | None,
 ) -> HistogramMemoryError:
     """Rebuild a pickled HistogramMemoryError, whose fields are keywords."""
     return error_type(
@@ -403,6 +411,7 @@ def _restore_histogram_memory_error(
         item=item,
         n_distinct=n_distinct,
         estimated_needed_bytes=estimated_needed_bytes,
+        remedy=remedy,
     )
 
 
@@ -449,7 +458,7 @@ def _require_memory(
             remedy=ledger.remedy,
         )
         raise HistogramMemoryError(
-            str(named),
+            refusal_words(named),
             needed_bytes=refusal.needed_bytes,
             budget_bytes=refusal.budget_bytes,
             item=item,
@@ -457,6 +466,7 @@ def _require_memory(
             estimated_needed_bytes=(
                 None if every_row is None else ledger.held_bytes + every_row
             ),
+            remedy=named.remedy,
         ) from refusal
 
 

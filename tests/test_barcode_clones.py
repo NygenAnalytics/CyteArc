@@ -38,7 +38,6 @@ from tests.clone_truth import (
     calling_truth,
     clone_truth,
 )
-from tests.memory_helpers import named_budget
 from tests.storage_helpers import by_cell_id, copy_store, open_store, write_count_store
 
 TRUTH = clone_truth()
@@ -1100,9 +1099,9 @@ def test_an_allowlist_too_large_for_the_budget_is_refused_before_it_is_copied(
         MemoryError, match=f"allowlist of {len(allowlist)} barcodes"
     ) as refused:
         store.clones.barcode_clones(barcodes, preset="celltag", allowlist=allowlist)
-    # The budget that the refusal names gets past the allowlist to a later
+    # The bytes that the refusal needs get past the allowlist to a later
     # step.
-    monkeypatch.setattr(store, "memoryBytes", named_budget(refused.value))
+    monkeypatch.setattr(store, "memoryBytes", refused.value.needed_bytes)
     with pytest.raises(MemoryError, match="Raise mem_budget") as raised:
         store.clones.barcode_clones(barcodes, preset="celltag", allowlist=allowlist)
     assert "allowlist" not in str(raised.value)

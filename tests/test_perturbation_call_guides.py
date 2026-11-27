@@ -45,7 +45,7 @@ from tests.storage_helpers import (
     write_count_store,
     written,
 )
-from tests.memory_helpers import held_within_charge
+from tests.memory_helpers import held_within_charge, named_budget
 
 N_PER_LANE = 200
 # Cells come in this lane order, so the fits must sort the lanes.
@@ -967,11 +967,13 @@ def test_histograms_that_outgrow_the_budget_name_what_every_row_needs(
         r"counts, while (\d+) of 2000 rows of counts remain to be read, and at "
         r"the rate of the rows read the histograms of every row need about (\d+) "
         rf"bytes, more than the memory budget of {budget} bytes\. Raise mem_budget "
-        r"to at least \1 bytes, or pass a smaller cell_selection or fewer samples\.",
+        r"to at least (\d+) MiB, or pass a smaller cell_selection or fewer "
+        r"samples\.",
         str(error),
     )
     assert found is not None, str(error)
-    needed, n_distinct, remaining, every_row = map(int, found.groups())
+    needed, n_distinct, remaining, every_row, named = map(int, found.groups())
+    assert named * 1024**2 == named_budget(error)
     assert (error.needed_bytes, error.budget_bytes) == (needed, budget)
     stopped = error.__cause__
     assert isinstance(stopped, HistogramMemoryError)

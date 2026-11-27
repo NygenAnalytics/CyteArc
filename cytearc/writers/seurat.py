@@ -52,7 +52,7 @@ from ..utils.arrays import (
     max_window_nnz,
 )
 from ..utils.count_values import CountValueRange
-from ..utils.memory_budget import MemoryBudgetError, refusal_words
+from ..utils.memory_budget import MemoryBudgetError, admitted_need, refusal_words
 from ._store import (
     resolve_import_values,
     DEFAULT_IMPORT_BLOCK_ROWS,
@@ -825,11 +825,13 @@ class SeuratToZarr:
         requested: int | None,
         *,
         row_bytes: int,
+        budget: int | None = None,
     ) -> int:
+        """Return the rows of an import block within an eighth of the budget, the import's own unless ``budget`` names another."""
         return bounded_block_rows(
             requested,
             row_bytes=row_bytes,
-            memory_bytes=int(self.resources.memoryBytes),
+            memory_bytes=int(self.resources.memoryBytes if budget is None else budget),
         )
 
     def _write_cell_data(self, block_rows: int) -> None:
@@ -915,7 +917,10 @@ class SeuratToZarr:
         resident = self._source_resident_bytes()
         n_cells = int(self._cellOrder.size)
         largest = max(1, n_cells)
-        metadata_rows = self._bounded_block_rows(largest, row_bytes=64)
+
+        def metadata_rows(budget: int) -> int:
+            return self._bounded_block_rows(largest, row_bytes=64, budget=budget)
+
         self._check_shuffled_rows_memory(
             cell_dtype.itemsize,
             metadata_rows,
@@ -960,7 +965,9 @@ class SeuratToZarr:
             )
             self._check_shuffled_rows_memory(
                 row_bytes,
-                self._reduction_block_rows(reduction, largest),
+                lambda budget: self._reduction_block_rows(
+                    reduction, largest, budget=budget
+                ),
                 f"the coordinates of reduction {reduction.name!r} in shuffled order",
                 resident + 9 * n_cells,
                 n_rows=int(matrix.shape[0]),
@@ -969,7 +976,7 @@ class SeuratToZarr:
     def _check_shuffled_rows_memory(
         self,
         row_bytes: int,
-        block_rows: int,
+        block_rows: Callable[[int], int],
         item: str,
         resident: int,
         *,
@@ -982,25 +989,39 @@ class SeuratToZarr:
         beside the ``resident`` bytes it holds throughout, to write them in
         shuffled order. The array has a row for each cell unless ``n_rows``
         says otherwise, as for a reduction of only some of the cells.
+        ``block_rows`` gives the rows of a block at a budget. A block grows
+        with the budget, so a refusal names a need whose suggested budget
+        holds a block of its own size, which :func:`admitted_need` finds.
 
         Raises:
             MemoryBudgetError: If they do not fit in the import's budget.
         """
         assert self._cellOrder is not None
         rows = int(self._cellOrder.size if n_rows is None else n_rows)
-        needed = int(resident) + (rows + min(int(block_rows), rows)) * int(row_bytes)
-        budget = int(self.resources.memoryBytes)
-        if needed > budget:
-            raise MemoryBudgetError(
+
+        def refusal(needed: int, budget: int) -> MemoryBudgetError:
+            return MemoryBudgetError(
                 f"Writing {item} exceeds the memory limit. A shuffled import "
                 "holds the object's rows to write them in shuffled order, beside "
                 f"the {int(resident)} bytes of its count sources and cell order, "
-                f"which needs {needed} bytes; raise mem_budget or import with "
-                "shuffle_cells=False.",
+                f"which needs {needed} bytes.",
                 needed_bytes=needed,
                 budget_bytes=budget,
                 item=item,
+                remedy="import with shuffle_cells=False",
             )
+
+        def admit(budget: int) -> None:
+            block = min(int(block_rows(budget)), rows)
+            needed = int(resident) + (rows + block) * int(row_bytes)
+            if needed > budget:
+                raise refusal(needed, budget)
+
+        budget = int(self.resources.memoryBytes)
+        try:
+            admit(budget)
+        except MemoryBudgetError as error:
+            raise refusal(admitted_need(admit, error), budget) from None
 
     def _shuffled_blocks(
         self, arrays: tuple[np.ndarray, ...], block_rows: int
@@ -2057,11 +2078,15 @@ class SeuratToZarr:
         self,
         reduction: SeuratReduction,
         requested_rows: int | None,
+        *,
+        budget: int | None = None,
     ) -> int:
         row_bytes = max(1, reduction.cellEmbeddings.shape[1]) * max(
             1, reduction.cellEmbeddings.dtype.itemsize
         )
-        return self._bounded_block_rows(requested_rows, row_bytes=row_bytes)
+        return self._bounded_block_rows(
+            requested_rows, row_bytes=row_bytes, budget=budget
+        )
 
     def _reduction_cells(
         self,

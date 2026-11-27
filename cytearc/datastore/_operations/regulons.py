@@ -444,10 +444,11 @@ class _RegulonOperationsMixin(_RegulonOperationsBase):
             raise MemoryBudgetError(
                 f"GRN inference over {n_cells} cells and {n_genes} genes needs "
                 f"about {needed} bytes, but the memory budget is "
-                f"{self.resources.memoryBytes} bytes; select fewer cells or genes",
+                f"{self.resources.memoryBytes} bytes.",
                 needed_bytes=needed,
                 budget_bytes=int(self.resources.memoryBytes),
                 item="the expression matrix and the links of GRN inference",
+                remedy="select fewer cells or genes",
             )
         workers = threads
         while (

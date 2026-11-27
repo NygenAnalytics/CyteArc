@@ -19,7 +19,7 @@ from cytearc.storage.count_matrix import (
     policy_from_payload,
 )
 from cytearc.storage.layout import count_array_spec
-from cytearc.utils.memory_budget import MemoryBudgetError
+from cytearc.utils.memory_budget import MemoryBudgetError, refusal_words
 from tests.memory_helpers import held_within_charge
 
 
@@ -3215,7 +3215,7 @@ def test_dataset_merge_rejects_insufficient_metadata_budget(tmp_path):
         (
             295_000,
             "The merge does not fit mem_budget even with count shards of one row. "
-            "Increase mem_budget. Resident data needs about",
+            "Resident data needs about",
         ),
     ],
 )
@@ -6969,10 +6969,13 @@ def test_a_one_row_refusal_names_the_budget_that_admits_the_row():
 
     with pytest.raises(MemoryBudgetError) as refused:
         _refuse_one_row(refuse, "Merged rows cannot fit", "one merged row")
-    assert str(refused.value) == "Merged rows cannot fit. It needs at least 900 bytes."
+    assert str(refused.value) == (
+        "Merged rows cannot fit. It needs at least 900 bytes. Raise mem_budget to "
+        "at least 1 MiB."
+    )
     assert (refused.value.needed_bytes, refused.value.budget_bytes) == (900, 500)
     assert refused.value.item == "one merged row"
-    assert str(refused.value.__cause__) == "1 rows need 900 bytes"
+    assert refusal_words(refused.value.__cause__) == "1 rows need 900 bytes"
     # A budget that admits the row it refused while the widths were tried is
     # inconsistent, and the refusal says so rather than returning.
     with pytest.raises(
@@ -7493,7 +7496,10 @@ def test_dataset_merge_below_one_feature_metadata_row_fails_before_the_destinati
     # One 5,000-character value needs about 240 KB to merge, more than the
     # budget that admits the rest of the merge. Planning refuses it, so the
     # destination is never created.
-    message = "^Merged feature column 'description' cannot fit the memory budget$"
+    message = (
+        "^Merged feature column 'description' cannot fit the memory budget. Raise "
+        r"mem_budget to at least \d+ MiB\.$"
+    )
     with pytest.raises(MemoryError, match=message):
         merger.plan()
     assert not path.exists()

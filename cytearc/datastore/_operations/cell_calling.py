@@ -128,11 +128,11 @@ class _CellCallingOperationsMixin(_CellCallingOperationsBase):
             raise MemoryBudgetError(
                 f"Cell calling over {len(rows)} barcodes and {n_features} features "
                 f"holds about {resident} bytes, more than the memory budget of "
-                f"{self.memoryBytes} bytes. Raise mem_budget, or pass a smaller "
-                "cell_selection or lower.",
+                f"{self.memoryBytes} bytes.",
                 needed_bytes=resident,
                 budget_bytes=int(self.memoryBytes),
                 item="the barcodes' totals, the ambient profile and the simulations",
+                remedy="pass a smaller cell_selection or lower",
             )
         totals = np.asarray(self.cells.fetch_all(assay._totals_name))[rows]
         tested = totals > settings.lower

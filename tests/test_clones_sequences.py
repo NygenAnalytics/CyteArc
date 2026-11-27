@@ -18,7 +18,7 @@ from cytearc.repertoire.clonotypes import METRICS
 from tests.clone_helpers import levenshtein_distance as _levenshtein
 from tests.clone_helpers import link_count_variance
 from cytearc.utils.memory_budget import MemoryLedger
-from tests.memory_helpers import budgeted, climb_refusals, named_budget
+from tests.memory_helpers import budgeted, climb_refusals
 from tests.clone_helpers import within_distance as _within
 from tests.perturbation_helpers import use_python_kernels
 
@@ -525,12 +525,13 @@ def test_a_budget_below_the_pairs_found_raises_memory_error(
     texts = _VARIANTS[:10] if python_kernels else _VARIANTS
     expected = _expected(texts, metric, 1)
     assert len(expected) == (9 + 9 * 8 // 2 if python_kernels else 36 + 4 * 9 * 8 // 2)
-    # From one byte, each refusal names the budget that passes its step: one
-    # of them refuses the pairs, which keys under substitutions find in runs
-    # that outgrow the buffer of the pairs found as it doubles, and the last
-    # budget finds every pair.
+    # From one byte, through the bytes that each refusal needs, each step
+    # refuses in turn: one of them refuses the pairs, which keys under
+    # substitutions find in runs that outgrow the buffer of the pairs found
+    # as it doubles, and the last budget finds every pair.
     refusals, found = climb_refusals(
-        lambda budget: neighbor_pairs(texts, metric, 1, ledger=budgeted(budget))
+        lambda budget: neighbor_pairs(texts, metric, 1, ledger=budgeted(budget)),
+        at_needs=True,
     )
     step = (
         "for the pairs within max_distance"
@@ -570,7 +571,8 @@ def test_pairs_found_hold_memory_while_later_lengths_are_searched(
         refusals, found = climb_refusals(
             lambda budget, texts=texts: neighbor_pairs(
                 texts, metric, 1, ledger=budgeted(budget)
-            )
+            ),
+            at_needs=True,
         )
         assert "for the pairs found" in str(refusals[-1])
         assert _pairs(*found) == _expected(texts, metric, 1)
@@ -608,7 +610,7 @@ def test_the_encoded_texts_must_fit_the_budget() -> None:
     # beyond it.
     with pytest.raises(MemoryError, match="for the encoded texts") as refused:
         neighbor_pairs(["abc", "abd"], "hamming", 1, ledger=budgeted(1))
-    encodes_latin = named_budget(refused.value)
+    encodes_latin = refused.value.needed_bytes
     with pytest.raises(MemoryError, match="for the encoded texts"):
         neighbor_pairs(["αβγ", "αβδ"], "hamming", 1, ledger=budgeted(encodes_latin))
 
@@ -621,10 +623,11 @@ def test_the_pairs_of_one_run_must_fit_the_budget_beside_the_keys(
     # 36 pairs within one substitution, found in one run, which outgrow the
     # buffer of the pairs found as it doubles. A budget that holds the
     # encoded texts and the keys of the pass refuses the buffer, and the
-    # budget that the refusals name finds every pair.
+    # bytes that the last refusal needs find every pair.
     texts = [letter + _BASE[1:] for letter in "PQRSTVWYC"]
     refusals, found = climb_refusals(
-        lambda budget: neighbor_pairs(texts, "hamming", 1, ledger=budgeted(budget))
+        lambda budget: neighbor_pairs(texts, "hamming", 1, ledger=budgeted(budget)),
+        at_needs=True,
     )
     assert "the pairs within max_distance" in _refused_steps(refusals)
     assert _pairs(*found) == _expected(texts, "hamming", 1)
@@ -649,9 +652,10 @@ def test_the_pairs_found_in_a_pass_must_fit_the_budget(monkeypatch, text) -> Non
     texts = [text] * 10
     # A budget that holds the encoded texts, their packed codes and their
     # keys refuses the buffer of the pairs found as it doubles, and the
-    # budget that the refusals name finds every pair once.
+    # bytes that the last refusal needs find every pair once.
     refusals, found = climb_refusals(
-        lambda budget: neighbor_pairs(texts, "hamming", 1, ledger=budgeted(budget))
+        lambda budget: neighbor_pairs(texts, "hamming", 1, ledger=budgeted(budget)),
+        at_needs=True,
     )
     assert "for the pairs within max_distance" in _refused_steps(refusals)
     assert _pairs(*found) == set(itertools.combinations(range(10), 2))
@@ -1211,7 +1215,8 @@ def test_the_positions_of_partial_texts_count_against_the_budget() -> None:
     refusals, found = climb_refusals(
         lambda budget: neighbor_pairs(
             texts, "hamming", 0, unknown="-", ledger=budgeted(budget)
-        )
+        ),
+        at_needs=True,
     )
     assert "where the texts hold no base" in _refused_steps(refusals)
     assert len(found[0]) == 0
@@ -1790,7 +1795,8 @@ def test_choosing_one_text_per_component_counts_against_the_budget() -> None:
     refusals, expected = climb_refusals(
         lambda budget: expected_chance_pairs(
             texts, "hamming", 2, ledger=budgeted(budget)
-        )
+        ),
+        at_needs=True,
     )
     assert "the representatives of the components" in _refused_steps(refusals)
     assert expected == pytest.approx(
@@ -1813,7 +1819,8 @@ def test_the_characters_of_one_text_per_component_count_against_the_budget() -> 
     refusals, expected = climb_refusals(
         lambda budget: expected_chance_pairs(
             texts, "hamming", 2, ledger=budgeted(budget), **search
-        )
+        ),
+        at_needs=True,
     )
     assert "the characters of one text per component" in _refused_steps(refusals)
     assert expected == pytest.approx(
@@ -2114,7 +2121,8 @@ def test_the_frequencies_of_edited_texts_count_against_the_budget() -> None:
     refusals, expected = climb_refusals(
         lambda budget: expected_chance_pairs(
             texts, "levenshtein", 1, ledger=budgeted(budget)
-        )
+        ),
+        at_needs=True,
     )
     assert "frequencies of the texts' characters" in _refused_steps(refusals)
     assert expected == pytest.approx(

@@ -384,8 +384,7 @@ def copy_zarr_group_tree(
             column = max(chunk_bytes, key=chunk_bytes.__getitem__)
             raise MemoryBudgetError(
                 f"Copying one chunk of metadata column {column!r} needs {minimum} "
-                f"bytes, but the memory budget is {resources.memoryBytes} bytes. "
-                "Increase mem_budget.",
+                f"bytes, but the memory budget is {resources.memoryBytes} bytes.",
                 needed_bytes=minimum,
                 budget_bytes=int(resources.memoryBytes),
                 item=f"one chunk of metadata column {column!r}",

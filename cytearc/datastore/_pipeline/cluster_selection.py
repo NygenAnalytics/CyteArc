@@ -238,11 +238,14 @@ def _admitted_coordinates(
         raise MemoryBudgetError(
             f"Cluster selection needs about {required} bytes to score "
             f"{n_rows} sampled cells with {dims} dimensions, but the operation "
-            f"limit is {limit} bytes. Raise mem_budget, or score fewer "
-            "dimensions, such as a PCA reduction instead of normalized values.",
+            f"limit is {limit} bytes.",
             needed_bytes=required,
             budget_bytes=limit,
             item="the sampled coordinates and the silhouette's distances",
+            remedy=(
+                "score fewer dimensions, such as a PCA reduction instead of "
+                "normalized values"
+            ),
         )
     return coordinates
 

@@ -2044,11 +2044,11 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                 raise MemoryBudgetError(
                     f"The chromVAR background model needs about {needed} bytes, "
                     f"more than half the memory budget of "
-                    f"{self.resources.memoryBytes} bytes; score fewer sources or "
-                    "peaks per call",
+                    f"{self.resources.memoryBytes} bytes.",
                     needed_bytes=2 * needed,
                     budget_bytes=int(self.resources.memoryBytes),
                     item="the chromVAR background model",
+                    remedy="score fewer sources or peaks per call",
                 )
             counts = assay.rawData[:, feature_index][cell_index, :]
             fragments = np.asarray(

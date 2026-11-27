@@ -131,18 +131,19 @@ SAMPLES: dict[type[BaseException], Callable[[], BaseException]] = {
         budget_bytes=10**9,
         item="the requested count-matrix policy",
         fittingPolicy=CountMatrixPolicy(unitBytes=125_000_000, chunkBytes=12_500_000),
+        remedy="pass policy=CountMatrixPolicy(unitBytes=125000000, chunkBytes=12500000)",
     ),
     HistogramMemoryError: lambda: HistogramMemoryError(
         "Counting guide UMIs holds about 4096 bytes for the guide count histograms "
         "of 128 distinct counts, while 10 of 20 rows of counts remain to be read, "
-        "more than the memory budget of 1024 bytes. Raise mem_budget to at least "
-        "4096 bytes.",
+        "more than the memory budget of 1024 bytes.",
         needed_bytes=4096,
         budget_bytes=1024,
         item="the guide count histograms of 128 distinct counts, while 10 of 20 "
         "rows of counts remain to be read",
         n_distinct=128,
         estimated_needed_bytes=8192,
+        remedy="pass a smaller cell_selection",
     ),
     MemoryBudgetError: lambda: memory_refusal(
         "Importing contigs for 8 selected cells",

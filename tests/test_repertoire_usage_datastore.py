@@ -1160,7 +1160,7 @@ def test_each_refusal_names_the_remedy_that_its_step_allows(
     slots = refusal(1_000)
     assert "for each cell's chain slots" in slots
     assert slots.endswith(
-        f"Raise mem_budget to at least {named_budget(MemoryError(slots))} bytes."
+        f"Raise mem_budget to at least {named_budget(MemoryError(slots)) // 2**20} MiB."
     )
     counting = refusal(100_000_000)
     assert "13 chains counted" in counting

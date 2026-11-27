@@ -386,7 +386,7 @@ def test_values_beyond_the_memory_budget_are_refused_before_anything_is_read(
             MemoryError,
             match=(
                 r"more than the memory budget of 48 bytes\. Raise mem_budget to "
-                rf"at least \d+ bytes, or {remedy}\.$"
+                rf"at least \d+ MiB, or {remedy}\.$"
             ),
         ):
             store.artifacts.load_values(scores, **options)
@@ -769,7 +769,7 @@ def test_a_cell_column_beyond_the_memory_budget_is_refused_before_it_is_read(
             MemoryError,
             match=(
                 r"more than the memory budget of 48 bytes\. Raise mem_budget to "
-                rf"at least \d+ bytes, or {remedy}\.$"
+                rf"at least \d+ MiB, or {remedy}\.$"
             ),
         ):
             store.artifacts.load_values(
@@ -886,7 +886,7 @@ def test_select_cells_admits_its_read_against_the_memory_budget(
         MemoryError,
         match=(
             r"more than the memory budget of 64 bytes\. Raise mem_budget to at "
-            r"least \d+ bytes, or select from fewer cells with cell_selection\.$"
+            r"least \d+ MiB, or select from fewer cells with cell_selection\.$"
         ),
     ):
         store.select_cells(scores, low=0.0)

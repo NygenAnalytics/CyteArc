@@ -10,10 +10,12 @@ libraries, and other allocations that do not grow with the data, so a step can
 hold a little more than its charge. The ledger refuses a charge that would pass
 the budget with a :class:`MemoryBudgetError` that names the step, the bytes
 that it needs and the budget, so a call is refused before it reads or writes
-what would not fit, and a budget of the bytes it names runs that step.
-Planners that size work outside any ledger raise the same error with the same
-fields in their own words, and :func:`memory_refusal` words the refusal of a
-step that has none.
+what would not fit. Every refusal closes naming the budget of
+:func:`suggested_budget`, a quarter more than the bytes it needs rounded up to
+a whole MiB, at which a rerun of the call passes the refused step. Planners
+that size work outside any ledger raise the same error with the same fields in
+their own words, and :func:`memory_refusal` words the refusal of a step that
+has none.
 
 The shared costs below estimate the structures that many steps build, at a
 cost for each item that bounds what the structure holds at any size, with the
@@ -36,12 +38,13 @@ __all__ = [
     "hash_table_bytes",
     "held_array_bytes",
     "index_lookup_bytes",
-    "least_admitted_budget",
+    "admitted_need",
     "memory_refusal",
     "object_array_bytes",
     "python_text_bytes",
     "refusal_words",
     "sort_bytes",
+    "suggested_budget",
 ]
 
 
@@ -59,31 +62,80 @@ __all__ = [
 READ_ALLOWANCE_BYTES = 128 * 1024
 
 
+#: A refusal names a budget of a whole number of these bytes, a mebibyte, so
+#: that it reads as a budget that a user would type, such as ``"3M"``.
+_NAMED_BUDGET_UNIT = 1024**2
+
+
+def suggested_budget(needed_bytes: int) -> int:
+    """Return the memory budget that the refusal of a step that needs ``needed_bytes`` names.
+
+    The budget is a quarter more than the bytes that the step needs, rounded
+    up to a whole MiB. The quarter leaves room for a step whose blocks take a
+    share of the budget, and so grow with it, and for the steps after it,
+    which can need a little more than it, such as a read beside the
+    allowance of its read; at least 1 MiB.
+    """
+    needed = max(1, int(needed_bytes))
+    with_headroom = needed + needed // 4
+    return -(-with_headroom // _NAMED_BUDGET_UNIT) * _NAMED_BUDGET_UNIT
+
+
 class MemoryBudgetError(MemoryError):
     """A step of a call would hold more memory than the call's budget, by the estimate that the step charges.
 
     The estimate counts the arrays that grow with the data and leaves out the
     memory of the interpreter and its libraries, so the budget plans the work
-    rather than capping the process.
+    rather than capping the process. The message closes with "Raise
+    mem_budget to at least {suggested} MiB.", with ", or {remedy}" before
+    the period when the step can also be made smaller.
 
     Attributes:
         needed_bytes: The estimated bytes that the call holds at the step
             that was refused: what it held before and the step's own charge.
-            A budget of at least this many bytes runs that step, and a later
-            step can need more. A count write whose producer hands it a batch
-            beyond the producer's reservation names instead what the write
-            would reserve with the batch.
+            A step whose blocks take a share of the budget can need more at
+            a larger budget; one that checks its plan at the budget that it
+            names gives what it needs at the largest budget that the check
+            refused. A count write whose producer hands it a batch beyond the
+            producer's reservation names instead what the write would
+            reserve with the batch.
         budget_bytes: The memory budget that the step would pass.
         item: What the step's charge was for, such as ``"the cells' IDs"``.
+        suggested_budget_bytes: The budget that the refusal names: a
+            quarter more than ``needed_bytes``, rounded up to a whole MiB. A
+            rerun of the call with this budget passes the refused step, and
+            a later step can need more.
+        remedy: Another way to fit the budget that the message names, such
+            as ``"pass a smaller cell_selection"``, or None.
     """
 
     def __init__(
-        self, message: str, *, needed_bytes: int, budget_bytes: int, item: str
+        self,
+        message: str,
+        *,
+        needed_bytes: int,
+        budget_bytes: int,
+        item: str,
+        remedy: str | None = None,
     ) -> None:
         super().__init__(message)
         self.needed_bytes = int(needed_bytes)
         self.budget_bytes = int(budget_bytes)
         self.item = str(item)
+        self.remedy = remedy or None
+        self.suggested_budget_bytes = suggested_budget(self.needed_bytes)
+
+    def __str__(self) -> str:
+        words = str(self.args[0]) if self.args else ""
+        if words and not words.endswith("."):
+            words += "."
+        closing = (
+            "Raise mem_budget to at least "
+            f"{self.suggested_budget_bytes // _NAMED_BUDGET_UNIT} MiB"
+        )
+        if self.remedy:
+            closing += f", or {self.remedy}"
+        return f"{words} {closing}.".lstrip()
 
     def __reduce__(self) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
         return (
@@ -94,6 +146,7 @@ class MemoryBudgetError(MemoryError):
                 self.needed_bytes,
                 self.budget_bytes,
                 self.item,
+                self.remedy,
             ),
             self.__dict__,
         )
@@ -105,6 +158,7 @@ def _restore_memory_budget_error(
     needed_bytes: int,
     budget_bytes: int,
     item: str,
+    remedy: str | None,
 ) -> MemoryBudgetError:
     """Rebuild a pickled MemoryBudgetError, whose fields are keywords."""
     error = MemoryBudgetError.__new__(error_type)
@@ -114,6 +168,7 @@ def _restore_memory_budget_error(
         needed_bytes=needed_bytes,
         budget_bytes=budget_bytes,
         item=item,
+        remedy=remedy,
     )
     return error
 
@@ -130,7 +185,7 @@ def memory_refusal(
 
     The message reads "{doing} holds about {needed_bytes} bytes for {item},
     more than the memory budget of {budget_bytes} bytes. Raise mem_budget to
-    at least {needed_bytes} bytes.", with ", or {remedy}" before the closing
+    at least {suggested} MiB.", with ", or {remedy}" before the closing
     period when a step can also be made smaller.
 
     Args:
@@ -156,27 +211,28 @@ def memory_refusal(
             f"A refusal needs more than the budget of {budget_bytes} bytes, not {needed_bytes}"
         )
     needed_bytes, budget_bytes = int(needed_bytes), int(budget_bytes)
-    closing = f"Raise mem_budget to at least {needed_bytes} bytes"
-    if remedy:
-        closing += f", or {remedy}"
     return MemoryBudgetError(
         f"{doing} holds about {needed_bytes} bytes for {item}, more than the "
-        f"memory budget of {budget_bytes} bytes. {closing}.",
+        f"memory budget of {budget_bytes} bytes.",
         needed_bytes=needed_bytes,
         budget_bytes=budget_bytes,
         item=item,
+        remedy=remedy,
     )
 
 
 def refusal_words(error: MemoryBudgetError) -> str:
-    """Return the message of ``error`` without the sentence that closes it with its bytes.
+    """Return the message of ``error`` without the sentences that close it with its bytes and its budget.
 
     A step that refuses inside a larger one, such as a conversion beside the
-    data it converts, closes its message with "It needs at least
-    {needed_bytes} bytes." in its own terms. The larger step keeps these
-    words and states the bytes of its whole budget after them.
+    data it converts, can close its own words with "It needs at least
+    {needed_bytes} bytes." The larger step keeps the words before it and
+    states the bytes of its whole budget after them, and its own refusal
+    names the budget that they need.
     """
-    return str(error).removesuffix(f" It needs at least {error.needed_bytes} bytes.")
+    return str(error.args[0]).removesuffix(
+        f" It needs at least {error.needed_bytes} bytes."
+    )
 
 
 class MemoryLedger:
@@ -321,46 +377,36 @@ def object_array_bytes(n_values: int) -> int:
     return 8 * int(n_values)
 
 
-# The most times that a step's named need is raised before its refusal is
-# passed on: a need that grows with its budget passes within a few.
-_ADMISSION_CLIMBS = 64
+# The most budgets at which a step whose need grows with its budget is checked
+# before its refusal is passed on: each is at least a quarter larger than the
+# one before, so sixteen span a need 35 times the first.
+_ADMISSION_CHECKS = 16
 
 
-def least_admitted_budget(
-    admit: Callable[[int], object], refused: MemoryBudgetError
-) -> int:
-    """Return the least budget at which ``admit`` passes a step that it ``refused``.
+def admitted_need(admit: Callable[[int], object], refused: MemoryBudgetError) -> int:
+    """Return a need of the step that ``admit`` refused, whose suggested budget it passes.
 
     ``admit(budget)`` checks the step at ``budget``, planning it but running
     nothing, and raises :class:`MemoryBudgetError` for a budget that it
-    refuses. A step whose need grows with its budget, as shares of the
-    budget do, can refuse the budget that its refusal names: the budget is
-    raised to each larger need that a refusal names until the step passes.
-    The least budget that passes, above the refused one, is then found by
-    bisection.
+    refuses. A step whose blocks take a share of the budget needs more at a
+    larger budget, which can pass even the headroom of
+    :func:`suggested_budget`: the step is checked at the suggested budget of
+    the need that ``refused`` names, then at that of each need that a check
+    names in turn, and the need whose suggested budget passes is returned,
+    for the step's refusal to name.
 
-    A step that refuses each need that it names, 64 times over, keeps the
-    need that its refusal named, as one that passes at no budget would.
+    A step that refuses 16 suggested budgets in a row keeps the need that
+    ``refused`` named, as one that passes at no budget would.
     """
-    low, high = int(refused.budget_bytes), int(refused.needed_bytes)
-    for _ in range(_ADMISSION_CLIMBS):
+    needed = int(refused.needed_bytes)
+    for _ in range(_ADMISSION_CHECKS):
         try:
-            admit(high)
+            admit(suggested_budget(needed))
         except MemoryBudgetError as error:
-            low, high = high, max(int(error.needed_bytes), high + 1)
+            needed = int(error.needed_bytes)
         else:
-            break
-    else:
-        return int(refused.needed_bytes)
-    while high - low > 1:
-        middle = (low + high) // 2
-        try:
-            admit(middle)
-        except MemoryBudgetError:
-            low = middle
-        else:
-            high = middle
-    return high
+            return needed
+    return int(refused.needed_bytes)
 
 
 def held_array_bytes(values: np.ndarray) -> int:

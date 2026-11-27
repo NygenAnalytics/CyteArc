@@ -211,7 +211,7 @@ class CrReader(ABC):
         Raises:
             ValueError: If ``destinationRows`` is not a permutation of the cells.
             MemoryBudgetError: If ``maxBytes`` cannot hold the spill of the
-                longest cell, naming the least budget that holds it.
+                longest cell, naming a budget that holds it.
             OSError: If the temporary disk lacks room for the rows.
         """
         self._release_shuffled_rows()

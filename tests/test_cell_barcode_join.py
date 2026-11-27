@@ -1203,8 +1203,8 @@ def test_only_a_selection_of_some_cells_reserves_the_pass_over_the_stores_ids(
     # pass over the store's IDs is reserved; a selection of all but one
     # reserves it.
     item = "the pass over the store's cell IDs"
-    every, _ = climb_refusals(lambda budget: join(ids, budget))
-    some, _ = climb_refusals(lambda budget: join(ids[:-1], budget))
+    every, _ = climb_refusals(lambda budget: join(ids, budget), at_needs=True)
+    some, _ = climb_refusals(lambda budget: join(ids[:-1], budget), at_needs=True)
     assert item not in [error.item for error in every]
     assert item in [error.item for error in some]
     assert store_pass_bytes(array, len(ids)) == 0
@@ -1306,7 +1306,7 @@ def test_the_join_refuses_store_ids_that_are_not_text_and_a_pass_beyond_the_budg
         MemoryError,
         match=r"holds about \d+ bytes for the pass over the store's cell IDs, more "
         r"than the memory budget of \d+ bytes\. Raise mem_budget to at least \d+ "
-        r"bytes\.$",
+        r"MiB\.$",
     ):
         CellBarcodeJoin(store[:1], ledger=ledger, store_ids=store)
 

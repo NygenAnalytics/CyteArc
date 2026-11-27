@@ -1,12 +1,13 @@
 """Every memory refusal outside the variant operations is a MemoryBudgetError.
 
-A refusal's ``needed_bytes`` is a memory budget that passes the step it
-refused, in the terms of the call's whole budget, ``budget_bytes`` is the
-budget it refused and ``item`` names the step. The planners, given the bytes
-of their work, name a budget that runs them. Each family of master's checks
-refuses a budget too small for it, naming its step, and a guard keeps the
-built-in ``MemoryError`` out of every module but those of the variant
-operations.
+A refusal's ``needed_bytes`` is what the call holds at the step it refused, in
+the terms of the call's whole budget, ``budget_bytes`` is the budget it
+refused and ``item`` names the step. Its message closes naming its
+``suggested_budget_bytes``, a quarter more than it needs rounded up to a whole
+MiB, at which a rerun passes the step. The planners, given the bytes of their
+work, name a budget that runs them. Each family of master's checks refuses a
+budget too small for it, naming its step, and a guard keeps the built-in
+``MemoryError`` out of every module but those of the variant operations.
 """
 
 import ast
@@ -24,9 +25,14 @@ from scipy.sparse import coo_matrix, csc_matrix, csr_matrix
 from zarr.storage import MemoryStore
 
 import cytearc
-from cytearc.utils.memory_budget import MemoryBudgetError, memory_refusal
+from cytearc.utils.memory_budget import (
+    MemoryBudgetError,
+    admitted_need,
+    memory_refusal,
+    suggested_budget,
+)
 from tests.storage_helpers import by_cell_id
-from tests.memory_helpers import held_within_charge
+from tests.memory_helpers import held_within_charge, named_budget
 
 CYTEARC_ROOT = Path(cytearc.__file__).parent
 
@@ -147,14 +153,82 @@ def named_budget_runs(
     """Check the refusal of ``at_budget(budget)`` and that the budget it names passes its step.
 
     The refusal names ``budget`` and ``item`` and more bytes than the budget,
-    and at the named budget ``at_budget`` runs.
+    and closes naming its suggested budget, at which ``at_budget`` runs.
     """
     refusal = refused(lambda: at_budget(budget))
     assert refusal.budget_bytes == budget
     assert refusal.needed_bytes > budget
     assert refusal.item == item
-    at_budget(refusal.needed_bytes)
+    at_budget(named_budget(refusal))
     return refusal
+
+
+_MIB = 1024**2
+
+
+def test_a_refusal_names_a_quarter_more_than_it_needs_rounded_up_to_a_whole_mib() -> (
+    None
+):
+    # 838,861 bytes and a quarter, 209,715, are 1,048,576, one MiB; a byte
+    # more is past it. Four GiB and a quarter are five GiB exactly.
+    assert suggested_budget(1) == _MIB
+    assert suggested_budget(838_861) == _MIB
+    assert suggested_budget(838_862) == 2 * _MIB
+    assert suggested_budget(4 * 1024 * _MIB) == 5 * 1024 * _MIB
+    assert suggested_budget(4 * 1024 * _MIB + 1) == 5 * 1024 * _MIB + _MIB
+    refusal = memory_refusal(
+        "Importing contigs for 8 selected cells",
+        "a chunk of 1000 contig rows as parsed",
+        1_154_586,
+        1_000_000,
+        remedy="pass a smaller cell_selection",
+    )
+    # 1,154,586 and a quarter, 288,646, are 1,443,232: two MiB.
+    assert refusal.suggested_budget_bytes == 2 * _MIB
+    assert str(refusal) == (
+        "Importing contigs for 8 selected cells holds about 1154586 bytes for a "
+        "chunk of 1000 contig rows as parsed, more than the memory budget of "
+        "1000000 bytes. Raise mem_budget to at least 2 MiB, or pass a smaller "
+        "cell_selection."
+    )
+    assert named_budget(refusal) == 2 * _MIB
+
+
+def test_every_refusal_closes_naming_its_suggested_budget_after_its_own_words() -> None:
+    from cytearc.utils.memory_budget import refusal_words
+
+    # Words without a closing period gain one before the budget.
+    plain = MemoryBudgetError(
+        "One buffer needs 32 bytes, but the operation limit is 8 bytes",
+        needed_bytes=32,
+        budget_bytes=8,
+        item="one buffer",
+    )
+    assert str(plain) == (
+        "One buffer needs 32 bytes, but the operation limit is 8 bytes. Raise "
+        "mem_budget to at least 1 MiB."
+    )
+    assert plain.remedy is None
+    # A step inside a larger one keeps its words without its bytes, and the
+    # larger step's refusal names its own budget once.
+    inner = MemoryBudgetError(
+        "A row does not fit. It needs at least 3000000 bytes.",
+        needed_bytes=3_000_000,
+        budget_bytes=10,
+        item="a row",
+        remedy="pass fewer rows",
+    )
+    assert refusal_words(inner) == "A row does not fit."
+    outer = MemoryBudgetError(
+        f"{refusal_words(inner)} Beside 1000000 bytes, the import needs at least "
+        "4000000 bytes.",
+        needed_bytes=4_000_000,
+        budget_bytes=10,
+        item="a row",
+    )
+    # 4,000,000 and a quarter are 5,000,000 bytes, 4.77 MiB: five MiB.
+    assert str(outer).count("Raise mem_budget") == 1
+    assert str(outer).endswith("Raise mem_budget to at least 5 MiB.")
 
 
 def _growing_step(base: int, share: int) -> Callable[[int], None]:
@@ -173,34 +247,33 @@ def _growing_step(base: int, share: int) -> Callable[[int], None]:
     return admit
 
 
-def test_the_least_admitted_budget_climbs_past_needs_that_grow_with_the_budget() -> (
-    None
-):
-    from cytearc.utils.memory_budget import least_admitted_budget
-
-    # A step that needs 1,000 bytes and a quarter of its budget refuses 1,000
-    # bytes naming 1,250, which it refuses naming 1,312, and so on; it passes
-    # from 1,333 bytes, whose quarter, 333, leaves 1,000, and refuses 1,332.
-    admit = _growing_step(1_000, 4)
+def test_an_admitted_need_climbs_past_needs_that_grow_beyond_the_headroom() -> None:
+    # A step that needs 10 MiB and half of its budget refuses 1 MiB naming
+    # 10.5 MiB, whose suggested budget, 14 MiB, it refuses naming 17 MiB; at
+    # that need's, 22 MiB, it needs 21 MiB and passes. It passes from a byte
+    # below 20 MiB, whose half rounds down.
+    admit = _growing_step(10 * _MIB, 2)
     with pytest.raises(MemoryBudgetError) as first:
-        admit(1_000)
-    assert first.value.needed_bytes == 1_250
-    assert least_admitted_budget(admit, first.value) == 1_333
-    admit(1_333)
+        admit(_MIB)
+    assert first.value.needed_bytes == 10 * _MIB + _MIB // 2
+    assert first.value.suggested_budget_bytes == 14 * _MIB
     with pytest.raises(MemoryBudgetError):
-        admit(1_332)
+        admit(14 * _MIB)
+    needed = admitted_need(admit, first.value)
+    assert needed == 17 * _MIB
+    assert suggested_budget(needed) == 22 * _MIB
+    admit(22 * _MIB)
+    admit(20 * _MIB - 1)
+    with pytest.raises(MemoryBudgetError):
+        admit(20 * _MIB - 2)
 
 
-def test_the_least_admitted_budget_bisects_below_a_need_that_shrinks_with_the_budget() -> (
-    None
-):
-    from cytearc.utils.memory_budget import least_admitted_budget
-
-    # A step that needs 3,000 bytes less a tenth of its budget passes from
-    # 2,728 bytes, where 3,000 less 272 leaves 2,728, below the 2,900 that
-    # it names at 1,000 bytes.
+def test_an_admitted_need_is_the_first_when_the_headroom_passes_its_step() -> None:
+    # A step that needs 30 MB less a tenth of its budget names 29.9 MB at
+    # 1 MB, and passes from 27,272,728 bytes, below it, so the suggested
+    # budget of the first need passes.
     def admit(budget: int) -> None:
-        needed = 3_000 - budget // 10
+        needed = 30_000_000 - budget // 10
         if needed > budget:
             raise MemoryBudgetError(
                 "The step does not fit.",
@@ -210,22 +283,29 @@ def test_the_least_admitted_budget_bisects_below_a_need_that_shrinks_with_the_bu
             )
 
     with pytest.raises(MemoryBudgetError) as first:
-        admit(1_000)
-    assert first.value.needed_bytes == 2_900
-    assert least_admitted_budget(admit, first.value) == 2_728
+        admit(1_000_000)
+    assert first.value.needed_bytes == 29_900_000
+    assert admitted_need(admit, first.value) == 29_900_000
+    admit(suggested_budget(29_900_000))
 
 
-def test_the_least_admitted_budget_of_a_step_that_never_passes_is_its_first_need() -> (
-    None
-):
-    from cytearc.utils.memory_budget import least_admitted_budget
+def test_an_admitted_need_of_a_step_that_never_passes_is_its_first_need() -> None:
+    # A step that needs its budget and a byte more refuses each budget, so
+    # it keeps the need that it named first, after 16 checks.
+    checked: list[int] = []
+    step = _growing_step(1, 1)
 
-    # A step that needs its budget and a byte more refuses each need that it
-    # names, so it keeps the one that it named first.
-    admit = _growing_step(1, 1)
+    def admit(budget: int) -> None:
+        checked.append(budget)
+        step(budget)
+
     with pytest.raises(MemoryBudgetError) as first:
-        admit(10)
-    assert least_admitted_budget(admit, first.value) == first.value.needed_bytes == 11
+        step(10)
+    assert admitted_need(admit, first.value) == first.value.needed_bytes == 11
+    assert len(checked) == 16
+    # Each check is at the suggested budget of the need before it.
+    assert checked[0] == _MIB
+    assert checked[1:] == [suggested_budget(budget + 1) for budget in checked[:-1]]
 
 
 # The storage planner.
@@ -990,13 +1070,15 @@ def test_a_sparse_matrix_import_names_the_budget_of_its_scan_beside_the_matrix(
     assert refusal.item == item
     assert refusal.needed_bytes == held + 50 * 72
     assert refusal.budget_bytes == budget
+    # Under 838,861 bytes, a need and a quarter fit in one MiB.
+    assert held + 50 * 72 < 838_861
     assert str(refusal) == (
         f"Importing the sparse matrix holds about {held + 50 * 72} bytes for "
         f"{item}, more than the memory budget of {budget} bytes. Raise "
-        f"mem_budget to at least {held + 50 * 72} bytes."
+        "mem_budget to at least 1 MiB."
     )
     assert not destination.exists()
-    # The budget it names passes the scan, and the layout refuses next.
+    # The bytes it needs pass the scan, and the layout refuses next.
     beyond = refused(lambda: construct(refusal.needed_bytes))
     assert beyond.item == "the default count-matrix policy"
     assert not destination.exists()
@@ -1654,7 +1736,8 @@ def test_document_frequency_refuses_a_small_budget_and_streams_within_another() 
 
     refusal = refused(lambda: count(100))
     assert "could not allocate" in str(refusal)
-    assert str(refusal).endswith(f"It needs at least {refusal.needed_bytes} bytes.")
+    assert f"It needs at least {refusal.needed_bytes} bytes." in str(refusal)
+    assert str(refusal).endswith("Raise mem_budget to at least 1 MiB.")
     # 500 bytes count the four blocks of three rows one at a time.
     np.testing.assert_array_equal(count(500), np.count_nonzero(values, axis=0))
 
@@ -1675,7 +1758,7 @@ def test_count_value_scans_name_the_bytes_of_their_longest_vector() -> None:
     assert str(refusal) == (
         "Scanning the count values holds about 216 bytes for the 3 values of the "
         "longest compressed vector, more than the memory budget of 10 bytes. "
-        "Raise mem_budget to at least 216 bytes."
+        "Raise mem_budget to at least 1 MiB."
     )
     dense = np.ones((5, 3), dtype=np.uint16)
     refusal = named_budget_runs(
@@ -2364,9 +2447,8 @@ def test_cells_over_more_bands_than_the_fewest_are_refused_before_any_value_is_r
     # The refusal takes the ledger's words, and a ledger without a remedy
     # names none.
     assert str(refusal).startswith("Reading holds about "), refusal
-    assert str(refusal).endswith(
-        f"Raise mem_budget to at least {refusal.needed_bytes} bytes."
-    ), refusal
+    assert re.search(r"bytes\. Raise mem_budget to at least \d+ MiB\.$", str(refusal))
+    assert named_budget(refusal) > refusal.needed_bytes
     # No value or mask was read for the refusal.
     assert reads == []
 

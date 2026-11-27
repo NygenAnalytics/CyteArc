@@ -218,7 +218,7 @@ def test_a_shuffle_beyond_the_budget_is_refused_naming_the_budget_that_holds_it(
     assert caught.value.item == item
     assert str(caught.value) == (
         f"Shuffling 1000 cells holds about 29000 bytes for {item}, more than the "
-        "memory budget of 28999 bytes. Raise mem_budget to at least 29000 bytes."
+        "memory budget of 28999 bytes. Raise mem_budget to at least 1 MiB."
     )
     # An import that holds nothing else names the shuffle alone.
     check_shuffle_fits(3, 0, 72)

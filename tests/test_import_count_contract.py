@@ -43,7 +43,12 @@ from cytearc.writers import (
     create_zarr_count_assay,
     subset_assay_zarr,
 )
-from tests.memory_helpers import held_within_charge, traced_charge, traced_reruns
+from tests.memory_helpers import (
+    NEEDS_NAMING_ONE_MIB,
+    held_within_charge,
+    traced_charge,
+    traced_reruns,
+)
 from tests.storage_helpers import finalize_test_counts, write_count_store
 from tests.test_seurat_reader import _Wire
 
@@ -1267,8 +1272,9 @@ def test_sparse_writer_refuses_a_matrix_larger_than_mem_budget(tmp_path):
         f"Importing the sparse matrix holds about {needed} bytes for checking the "
         f"cell IDs, an array of {ids} bytes, beside the {held} bytes of the matrix, "
         f"more than the memory budget of {held // 2} bytes. Raise mem_budget to at "
-        f"least {needed} bytes."
+        "least 1 MiB."
     )
+    assert needed <= NEEDS_NAMING_ONE_MIB
     assert not destination.exists()
 
 

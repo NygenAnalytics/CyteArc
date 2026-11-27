@@ -1447,7 +1447,7 @@ def test_normalized_feature_batches_name_the_budget_of_the_requested_width():
         4096,
         "normalized feature batches of 4 features",
     )
-    assert str(refusal).endswith(f"They need at least {refusal.needed_bytes} bytes.")
+    assert f"They need at least {refusal.needed_bytes} bytes." in str(refusal)
     # The named budget streams batches of the four features requested.
     blocks = batches(refusal.needed_bytes, 4)
     assert [block.shape[0] for block, _labels in blocks] == [4, 4, 4]

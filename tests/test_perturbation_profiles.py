@@ -982,9 +982,9 @@ def test_profiles_at_a_small_budget_give_the_profiles_of_a_large_one(tmp_path) -
 
     whole_ref, whole_units = run(None)
     whole = open_store(screen.path).perturbation.load_profiles(whole_ref)
-    # The budget that the refusals name from 1 MB, the least that runs,
-    # streams the counts in more bands than the store's default budget.
-    _refusals, (ref, units) = climb_refusals(run, start=1_000_000)
+    # The bytes that the refusals need from 1 MB, up to the least budget that
+    # runs, stream the counts in more bands than the store's default budget.
+    _refusals, (ref, units) = climb_refusals(run, start=1_000_000, at_needs=True)
     assert units > whole_units
     result = open_store(screen.path).perturbation.load_profiles(ref)
     pd.testing.assert_frame_equal(result.values, whole.values)

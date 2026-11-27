@@ -336,7 +336,8 @@ def test_mount_rejects_a_budget_below_one_metadata_chunk(default_sources, tmp_pa
             mem_budget=budget,
         )
     found = re.search(
-        r"metadata column 'barcode' needs (\d+) bytes.* Increase mem_budget",
+        r"metadata column 'barcode' needs (\d+) bytes.* Raise mem_budget to at "
+        r"least \d+ MiB\.$",
         str(refused.value),
     )
     assert found is not None

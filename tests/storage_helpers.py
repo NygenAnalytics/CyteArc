@@ -125,14 +125,18 @@ def shuffle_refusal(n_cells: int, held: int, budget: int) -> str:
     """The refusal of a shuffle of ``n_cells`` cells beside ``held`` bytes, at ``budget``.
 
     Drawing the order and its inverse holds 24 bytes a cell at its peak, as
-    ``tests/test_cell_order.py`` traces it.
+    ``tests/test_cell_order.py`` traces it. The shuffles of these tests need
+    so little that the refusal names 1 MiB.
     """
+    from tests.memory_helpers import NEEDS_NAMING_ONE_MIB
+
     needed = held + 24 * n_cells
+    assert needed <= NEEDS_NAMING_ONE_MIB, needed
     beside = f" beside the {held} bytes that the import holds" if held else ""
     return (
         f"Shuffling {n_cells} cells holds about {needed} bytes for the cells' random "
         f"order{beside}, more than the memory budget of {budget} bytes. Raise "
-        f"mem_budget to at least {needed} bytes."
+        "mem_budget to at least 1 MiB."
     )
 
 

@@ -694,11 +694,11 @@ def require_materialized_lsi_budget(
         raise MemoryBudgetError(
             f"Materialized LSI needs about {required} bytes to hold the "
             f"{n_rows} x {n_features} matrix and its SVD workspace, but the "
-            f"operation limit is {memory_bytes} bytes. Use solver='streaming', "
-            "which reads the matrix in bounded blocks.",
+            f"operation limit is {memory_bytes} bytes.",
             needed_bytes=required,
             budget_bytes=int(memory_bytes),
             item="the matrix and its SVD workspace",
+            remedy="use solver='streaming', which reads the matrix in bounded blocks",
         )
 
 

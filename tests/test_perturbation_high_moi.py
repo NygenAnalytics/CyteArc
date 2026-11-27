@@ -32,7 +32,6 @@ from tests.perturbation_helpers import (
     warned,
     write_screen,
 )
-from tests.memory_helpers import named_budget
 from tests.storage_helpers import open_store
 
 
@@ -1482,9 +1481,9 @@ def test_high_moi_refuses_a_budget_without_room_for_one_gene(screen) -> None:
         open_store(store.zarr_loc, mem_budget=1_000).perturbation.associations(
             labels, **arguments
         )
-    # The budget that counts each guide's and target's cells holds too little
-    # to test a gene.
-    budgeted = open_store(store.zarr_loc, mem_budget=named_budget(counting.value))
+    # The bytes that count each guide's and target's cells hold too little to
+    # test a gene.
+    budgeted = open_store(store.zarr_loc, mem_budget=counting.value.needed_bytes)
 
     with pytest.raises(MemoryError, match="one gene over 400 labeled cells"):
         budgeted.perturbation.associations(labels, **arguments)
@@ -1526,7 +1525,7 @@ def test_high_moi_checks_the_budget_before_the_store_must_be_writable(
     with pytest.raises(MemoryError, match="^Counting the cells") as counting:
         reader.perturbation.associations(labels, **arguments)
     reader = open_store(
-        store.zarr_loc, zarr_mode="r", mem_budget=named_budget(counting.value)
+        store.zarr_loc, zarr_mode="r", mem_budget=counting.value.needed_bytes
     )
     with pytest.raises(MemoryError, match="one gene over 400 labeled cells"):
         reader.perturbation.associations(labels, **arguments)

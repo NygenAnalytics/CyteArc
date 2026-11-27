@@ -420,8 +420,8 @@ class CSVtoZarr:
 
         Raises:
             MemoryBudgetError: If the budget cannot hold one chunk and its
-                spill, naming the least budget that holds them beside the
-                order, its inverse, the cell IDs and the cell columns.
+                spill, naming a budget that holds them beside the order, its
+                inverse, the cell IDs and the cell columns.
             ValueError: If the file no longer holds the rows that the reader
                 counted.
             OSError: If the temporary disk lacks room for the rows.

@@ -21,6 +21,7 @@ from cytearc.utils.count_values import (
 )
 from cytearc.utils.memory_budget import MemoryBudgetError
 from cytearc.writers import H5adToZarr
+from tests.memory_helpers import NEEDS_NAMING_ONE_MIB
 
 
 def compressed_count_range(*args, **kwargs) -> CountValueRange:
@@ -305,10 +306,11 @@ def test_a_scan_refusal_names_a_longer_vector_beyond_the_pointers_it_read(
     assert (
         refused.value.item == f"the {longest} values of the longest compressed vector"
     )
+    assert needed <= NEEDS_NAMING_ONE_MIB
     assert str(refused.value) == (
         f"Scanning the count values holds about {needed} bytes for the {longest} "
         "values of the longest compressed vector, more than the memory budget of "
-        f"{_PER_VALUE} bytes. Raise mem_budget to at least {needed} bytes."
+        f"{_PER_VALUE} bytes. Raise mem_budget to at least 1 MiB."
     )
     # The budget that it names scans every row.
     assert scan(needed) == CountValueRange(integral=True, maximum=1)

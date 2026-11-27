@@ -426,11 +426,11 @@ def _require_pca_fit_budget(
             f"PCA with the {pca_solver(n_features)} solver needs about "
             f"{required} bytes to fit {dims} components of {n_features} "
             f"features in blocks of {block_rows} rows, but the operation limit "
-            f"is {limit} bytes. Pass a smaller batch_size, select fewer "
-            "features, or raise mem_budget.",
+            f"is {limit} bytes.",
             needed_bytes=required,
             budget_bytes=limit,
             item="the PCA fit",
+            remedy="pass a smaller batch_size or select fewer features",
         )
 
 
@@ -508,25 +508,26 @@ def _require_kmeans_fit_budget(
         raise MemoryBudgetError(
             f"The in-memory k-means fit of {n_cells} cells needs about "
             f"{required} bytes for their coordinates and the fit, but the "
-            f"operation limit is {limit} bytes. Pass a batch_size below "
-            f"{n_cells} to select the streamed fit, which holds a seeding "
-            "sample of the cells, the label of every cell, and one block of "
-            "coordinates at a time, or raise mem_budget. The batch size is "
-            "part of the result's identity, so the fit does not switch on its "
-            "own.",
+            f"operation limit is {limit} bytes. The batch size is part of the "
+            "result's identity, so the fit does not switch to the streamed fit "
+            "on its own.",
             needed_bytes=required,
             budget_bytes=limit,
             item="the in-memory k-means fit",
+            remedy=(
+                f"pass a batch_size below {n_cells} to select the streamed fit, "
+                "which holds a seeding sample of the cells, the label of every "
+                "cell, and one block of coordinates at a time"
+            ),
         )
     raise MemoryBudgetError(
         f"The streamed k-means fit of {n_cells} cells needs about {required} "
         "bytes for its seeding sample, the labels of every cell, and one "
-        f"block of coordinates, but the operation limit is {limit} bytes. "
-        "Lower kmeans_sampling, kmeans_batch_size, or batch_size, or raise "
-        "mem_budget.",
+        f"block of coordinates, but the operation limit is {limit} bytes.",
         needed_bytes=required,
         budget_bytes=limit,
         item="the streamed k-means fit",
+        remedy="lower kmeans_sampling, kmeans_batch_size, or batch_size",
     )
 
 
@@ -586,11 +587,13 @@ def _require_harmony_fit_budget(
             f"Harmony needs about {required} bytes to correct {n_cells} cells "
             f"with {dims} dimensions in {n_clusters} clusters over {n_levels} "
             f"batch levels, {labels} of them for the batch labels, but the "
-            f"operation limit is {limit} bytes. Use fewer clusters (n_clusters in "
-            "harmony_params) or fewer dimensions, or raise mem_budget.",
+            f"operation limit is {limit} bytes.",
             needed_bytes=required,
             budget_bytes=limit,
             item="the Harmony fit",
+            remedy=(
+                "use fewer clusters (n_clusters in harmony_params) or fewer dimensions"
+            ),
         )
     return reading
 
@@ -631,17 +634,21 @@ def _require_ann_index_budget(
     m: int,
     remedy: str,
 ) -> None:
-    """Raise MemoryError, before the index is created or loaded, over budget."""
+    """Raise MemoryError, before the index is created or loaded, over budget.
+
+    ``remedy`` is another way to fit the budget, without a closing period.
+    """
     limit = int(resources.memoryBytes)
     if required <= limit:
         return
     raise MemoryBudgetError(
         f"{work} needs about {required} bytes, {index_bytes} of them for the "
         f"hnswlib index with ann_m={m}, but the operation limit is {limit} "
-        f"bytes. {remedy}",
+        "bytes.",
         needed_bytes=required,
         budget_bytes=limit,
         item=f"the hnswlib index with ann_m={m} and its work",
+        remedy=remedy,
     )
 
 
@@ -655,7 +662,7 @@ def _require_integration_budget(
     if required > limit:
         raise MemoryBudgetError(
             f"{description} needs about {required} bytes in memory, but the "
-            f"operation limit is {limit} bytes. Raise mem_budget.",
+            f"operation limit is {limit} bytes.",
             needed_bytes=required,
             budget_bytes=limit,
             item="the integration's inputs and work",
@@ -682,7 +689,7 @@ def _require_graph_budget(
     raise MemoryBudgetError(
         f"{work} of {n_cells} cells needs about {required} bytes in memory "
         f"for {f'a graph of {n_edges} edges' if item is None else item}, but the "
-        f"operation limit is {limit} bytes. Raise mem_budget.",
+        f"operation limit is {limit} bytes.",
         needed_bytes=required,
         budget_bytes=limit,
         item=f"the graph of {n_edges} edges and its work" if item is None else item,
@@ -2599,8 +2606,8 @@ class _GraphOperationsMixin(_GraphOperationsBase):
                 ),
                 m=settings.ann_m,
                 remedy=(
-                    "Lower ann_m, index fewer dimensions, such as a PCA "
-                    "reduction instead of normalized values, or raise mem_budget."
+                    "lower ann_m or index fewer dimensions, such as a PCA "
+                    "reduction instead of normalized values"
                 ),
             )
             ann_idx = AnnIndexStage.fit(
@@ -2813,9 +2820,9 @@ class _GraphOperationsMixin(_GraphOperationsBase):
                 ),
                 m=ann_m,
                 remedy=(
-                    "Raise mem_budget, or build the index on fewer dimensions, "
-                    "such as a PCA reduction instead of normalized values, or "
-                    "with a lower ann_m."
+                    "build the index on fewer dimensions, such as a PCA "
+                    "reduction instead of normalized values, or with a lower "
+                    "ann_m"
                 ),
             )
             ann_idx = self._resolve_ann_index(

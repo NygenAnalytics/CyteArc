@@ -457,7 +457,7 @@ class SparseToZarr:
             what = "The sparse matrix holds" if single else "The sparse matrices hold"
             raise MemoryBudgetError(
                 f"{what} {held} bytes, but mem_budget is "
-                f"{self.resources.memoryBytes} bytes. Increase mem_budget.",
+                f"{self.resources.memoryBytes} bytes.",
                 needed_bytes=held + 1,
                 budget_bytes=int(self.resources.memoryBytes),
                 item="the sparse matrix" if single else "the sparse matrices",
