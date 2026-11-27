@@ -359,9 +359,15 @@ def coefficient_estimability(
         mask &= np.isfinite(coeff_float)
     for name, values in technicals.items():
         technical = _as_1d(values)
-        if technicalKinds[name] != "continuous":
+        not_na = np.asarray(~pd.isna(technical), dtype=bool)
+        if technicalKinds[name] == "continuous":
+            mask &= not_na
+            tech_float = _to_float(technical[not_na])
+            if tech_float is not None:
+                mask[not_na] &= np.isfinite(tech_float)
+        else:
             require_labels_match_their_text(technical, name=f"technicals[{name!r}]")
-        mask &= np.asarray(~pd.isna(technical), dtype=bool)
+            mask &= not_na
     rows_used = int(mask.sum())
     if rows_used < 2:
         return _not_computed(
