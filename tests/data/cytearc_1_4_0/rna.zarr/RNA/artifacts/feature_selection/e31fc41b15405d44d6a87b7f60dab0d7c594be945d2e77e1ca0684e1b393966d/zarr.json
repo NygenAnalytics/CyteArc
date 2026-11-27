@@ -1,0 +1,22 @@
+{
+  "attributes": {
+    "artifact_id": "e31fc41b15405d44d6a87b7f60dab0d7c594be945d2e77e1ca0684e1b393966d",
+    "kind": "feature_selection",
+    "provenance": {
+      "operation": "create_all_features",
+      "parameters": {
+        "dataset_fingerprint": "e17310f277d4dc70fc194df1d7a964ea9c7a62a72f9c1e49e46b6ea6b5efd175",
+        "ordered_feature_ids_fingerprint": "37930d58a33f7bd15d54eb779bdfaaafa6dd283d2728dab3f9140eea82910cdd"
+      },
+      "inputs": {}
+    },
+    "execution_options": {},
+    "created_at_ns": 1795720168087448000,
+    "cytearc_version": "1.4.0",
+    "complete": true,
+    "ordered_feature_ids_fingerprint": "37930d58a33f7bd15d54eb779bdfaaafa6dd283d2728dab3f9140eea82910cdd",
+    "payload_fingerprint": "8e9f1c053b633be4c4f554af2603d5f37cacd0891b03c9aad009570a8a0ffc89"
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

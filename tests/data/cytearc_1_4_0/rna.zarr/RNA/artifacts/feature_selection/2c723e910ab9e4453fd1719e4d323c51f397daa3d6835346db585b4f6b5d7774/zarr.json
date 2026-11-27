@@ -1,0 +1,69 @@
+{
+  "attributes": {
+    "artifact_id": "2c723e910ab9e4453fd1719e4d323c51f397daa3d6835346db585b4f6b5d7774",
+    "kind": "feature_selection",
+    "provenance": {
+      "operation": "select_hvgs",
+      "parameters": {
+        "min_cells": 5,
+        "max_cells": 175,
+        "top_n": 150,
+        "min_var": {
+          "special_float": "-inf"
+        },
+        "max_var": {
+          "special_float": "inf"
+        },
+        "min_mean": {
+          "special_float": "-inf"
+        },
+        "max_mean": {
+          "special_float": "inf"
+        },
+        "n_bins": 200,
+        "lowess_frac": 0.1,
+        "blacklist": "^MT-|^RPS|^RPL|^MRPS|^MRPL|^CCN[A-Z]|^HLA-|^H2-|^HIST|^H1-[1-6]$|^H1F[1-6]$|^H2AC\\d+$|^H2BC\\d+$|^H3C\\d+$|^H4C\\d+$|^H2AW$|^H3-4$|^H4-16$|^XIST$|^DDX3Y$|^USP9Y$|^EIF1AY$|^KDM5D$|^SRY$|^ZFY$|^UTY$|^TMSB4Y$|^NLGN4Y$",
+        "blacklist_fingerprint": "3a5bbbfbe540cbbe88e912cccebab65397fcd921310042353ac38153b1b18ade",
+        "keep_bounds": false,
+        "bin_strategy": "adaptive",
+        "variance_estimator": "regularized_local_quantile",
+        "variance_quantile": 0.25
+      },
+      "inputs": {
+        "feature_summary": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "feature_summary",
+          "artifact_id": "2ef3e9b80b993c1e62efd6c4ee83177959088ab396bb9ecaab043e91030aab0e",
+          "assay": "RNA"
+        },
+        "feature_snapshot": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "metadata_snapshot",
+          "artifact_id": "299e8946296927bb1648765e69b8172f21c566a08b8a824f31e107446069f61f",
+          "assay": "RNA"
+        }
+      }
+    },
+    "execution_options": {
+      "show_plot": false,
+      "plot_kwargs": {},
+      "nthreads": 2,
+      "invalidate_cache": false
+    },
+    "created_at_ns": 1795720168493361000,
+    "cytearc_version": "1.4.0",
+    "complete": true,
+    "ordered_feature_ids_fingerprint": "37930d58a33f7bd15d54eb779bdfaaafa6dd283d2728dab3f9140eea82910cdd",
+    "payload_fingerprint": "7bf3cfbafc8f79d645a2f2a1e81f74d9bc7418206a8818f8c9e71d5589094f28",
+    "diagnostics": {
+      "selectedFeatures": 150,
+      "batches": null,
+      "batchesBelowTopN": null,
+      "batchBelowTopNExamples": []
+    }
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

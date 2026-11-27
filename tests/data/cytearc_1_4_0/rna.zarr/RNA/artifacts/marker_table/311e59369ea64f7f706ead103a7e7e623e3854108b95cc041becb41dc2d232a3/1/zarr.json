@@ -1,0 +1,8 @@
+{
+  "attributes": {
+    "n_group": 64,
+    "n_reference": 111
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

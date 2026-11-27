@@ -1,0 +1,10 @@
+{
+  "attributes": {
+    "assayTypes": {
+      "RNA": "RNA"
+    },
+    "defaultAssay": "RNA"
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

@@ -1,0 +1,64 @@
+{
+  "attributes": {
+    "cytearc:import_source": "DataStoreMerge",
+    "cytearc:import_complete": true,
+    "complete": true,
+    "cytearc:merge_manifest": {
+      "sourceNames": [
+        "left",
+        "right"
+      ],
+      "sourceWorkspaces": [
+        null,
+        null
+      ],
+      "sourceCellCounts": [
+        80,
+        80
+      ],
+      "sourceFeatureCounts": {
+        "RNA": [
+          170,
+          170
+        ]
+      },
+      "sourceCountFingerprints": {
+        "RNA": [
+          "1954f756c4364da52d5abc5198bd87ca79980af1f0e86297ee7694e056e5615d",
+          "7a48901a126b554571ff74a263f9600b41dedf84df03ca4001b4aeac74e36d37"
+        ]
+      },
+      "assays": [
+        "RNA"
+      ],
+      "assayTypes": {
+        "RNA": "RNA"
+      },
+      "normalization": {
+        "RNA": {}
+      },
+      "sourceMembership": {
+        "RNA": [
+          "all",
+          "all"
+        ]
+      },
+      "seed": 42,
+      "prependText": "orig",
+      "resetCellFilter": true,
+      "sourceColumn": "study",
+      "profile": "fast_local",
+      "countMatrixPolicy": null,
+      "missingAssayPolicy": "zero_fill",
+      "featureKey": "ids",
+      "outWorkspace": null,
+      "nCells": 160
+    },
+    "assayTypes": {
+      "RNA": "RNA"
+    },
+    "defaultAssay": "RNA"
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

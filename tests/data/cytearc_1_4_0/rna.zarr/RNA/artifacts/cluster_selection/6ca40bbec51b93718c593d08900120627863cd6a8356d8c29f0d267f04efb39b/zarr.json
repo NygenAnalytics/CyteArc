@@ -1,0 +1,145 @@
+{
+  "attributes": {
+    "artifact_id": "6ca40bbec51b93718c593d08900120627863cd6a8356d8c29f0d267f04efb39b",
+    "kind": "cluster_selection",
+    "provenance": {
+      "operation": "select_clusters_by_silhouette",
+      "parameters": {
+        "candidateKeys": [
+          "0.5",
+          "0.75",
+          "1.0",
+          "1.25"
+        ],
+        "seed": 4466,
+        "maxSampleSize": 10000,
+        "metric": "euclidean",
+        "tieOrder": [
+          "0.5",
+          "0.75",
+          "1.0",
+          "1.25"
+        ],
+        "sampleStrategy": "sharedClusterQuota",
+        "minClusterQuota": 2
+      },
+      "inputs": {
+        "coordinates": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "reduction",
+          "artifact_id": "bd6cb726cc209891c096d9ff0050ee23fa3130f488bb12f3b3e1baa307cf41de",
+          "assay": "RNA"
+        },
+        "connectivityMap": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "connectivity_map",
+          "artifact_id": "372fca04640f6e13c607e5634530c062e5e82782b19da854e0ca0d64b773ac75",
+          "assay": "RNA"
+        },
+        "cellSelection": {
+          "type": "artifact",
+          "scope": "datastore",
+          "kind": "cell_selection",
+          "artifact_id": "26fe72eafb5a078ff48fe49c95f5b8d59a3d872f2d3fb7b5fedd01877dfd6999"
+        },
+        "candidates": {
+          "0.5": {
+            "type": "artifact",
+            "scope": "assay",
+            "kind": "cluster_labels",
+            "artifact_id": "591a30b1f554d4248af4669e432da158a6c6a3d00e0af3865262b33afbb38b3a",
+            "assay": "RNA"
+          },
+          "0.75": {
+            "type": "artifact",
+            "scope": "assay",
+            "kind": "cluster_labels",
+            "artifact_id": "b5c24faf44fb5ca2096e927d7cdb5ad416f78c10dee657b8cb9380061c8278b5",
+            "assay": "RNA"
+          },
+          "1.0": {
+            "type": "artifact",
+            "scope": "assay",
+            "kind": "cluster_labels",
+            "artifact_id": "78583fcd243001d472abe1ca26ea2da25b1ce7d258534daaf2ed99b7de584560",
+            "assay": "RNA"
+          },
+          "1.25": {
+            "type": "artifact",
+            "scope": "assay",
+            "kind": "cluster_labels",
+            "artifact_id": "6ac13ed0304dd3e93729df3d3e77ec8edf3e369d20573c61935ce9545e2b2cd0",
+            "assay": "RNA"
+          }
+        }
+      }
+    },
+    "execution_options": {
+      "workingMemoryMiB": 1
+    },
+    "created_at_ns": 1795720169583093000,
+    "cytearc_version": "1.4.0",
+    "complete": true,
+    "candidateKeys": [
+      "0.5",
+      "0.75",
+      "1.0",
+      "1.25"
+    ],
+    "candidateRefs": [
+      {
+        "type": "artifact",
+        "scope": "assay",
+        "kind": "cluster_labels",
+        "artifact_id": "591a30b1f554d4248af4669e432da158a6c6a3d00e0af3865262b33afbb38b3a",
+        "assay": "RNA"
+      },
+      {
+        "type": "artifact",
+        "scope": "assay",
+        "kind": "cluster_labels",
+        "artifact_id": "b5c24faf44fb5ca2096e927d7cdb5ad416f78c10dee657b8cb9380061c8278b5",
+        "assay": "RNA"
+      },
+      {
+        "type": "artifact",
+        "scope": "assay",
+        "kind": "cluster_labels",
+        "artifact_id": "78583fcd243001d472abe1ca26ea2da25b1ce7d258534daaf2ed99b7de584560",
+        "assay": "RNA"
+      },
+      {
+        "type": "artifact",
+        "scope": "assay",
+        "kind": "cluster_labels",
+        "artifact_id": "6ac13ed0304dd3e93729df3d3e77ec8edf3e369d20573c61935ce9545e2b2cd0",
+        "assay": "RNA"
+      }
+    ],
+    "invalidReasons": [
+      null,
+      null,
+      null,
+      null
+    ],
+    "selectedKey": "0.5",
+    "sampleDefinition": {
+      "seed": 4466,
+      "populationSize": 175,
+      "sampleSize": 175,
+      "maxSampleSize": 10000,
+      "sampleStrategy": "sharedClusterQuota",
+      "minClusterQuota": 2
+    },
+    "tieOrder": [
+      "0.5",
+      "0.75",
+      "1.0",
+      "1.25"
+    ]
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

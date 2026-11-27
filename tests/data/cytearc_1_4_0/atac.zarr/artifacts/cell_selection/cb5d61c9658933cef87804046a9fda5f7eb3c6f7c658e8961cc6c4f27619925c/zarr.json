@@ -1,0 +1,84 @@
+{
+  "attributes": {
+    "artifact_id": "cb5d61c9658933cef87804046a9fda5f7eb3c6f7c658e8961cc6c4f27619925c",
+    "kind": "cell_selection",
+    "provenance": {
+      "operation": "filter_pipeline_cells",
+      "parameters": {
+        "enabled": true,
+        "method": "mad",
+        "attrs": [
+          "ATAC_nCounts",
+          "ATAC_nFeatures"
+        ],
+        "minP": 0.01,
+        "maxP": 0.99,
+        "sampleColumn": null,
+        "nMads": 3.0,
+        "minCellsPerSample": 20,
+        "mad": {
+          "mad_scale": 1.4826,
+          "metric_policies": {
+            "ATAC_nCounts": {
+              "transform": "log1p",
+              "bound_direction": "two_sided"
+            },
+            "ATAC_nFeatures": {
+              "transform": "log1p",
+              "bound_direction": "two_sided"
+            }
+          },
+          "sample_sizes": {
+            "all": 200
+          },
+          "skip_reasons": {},
+          "resolved_bounds": {
+            "all": {
+              "ATAC_nCounts": {
+                "low": 483.65475634685396,
+                "high": 9171.954441859074,
+                "skip_reason": null,
+                "transform": "log1p",
+                "bound_direction": "two_sided",
+                "scaled_mad": 0.49009631734605
+              },
+              "ATAC_nFeatures": {
+                "low": 307.67020319996715,
+                "high": 810.5457773477332,
+                "skip_reason": null,
+                "transform": "log1p",
+                "bound_direction": "two_sided",
+                "scaled_mad": 0.1611112321299324
+              }
+            }
+          },
+          "warnings": []
+        }
+      },
+      "inputs": {
+        "input_cell_selection": {
+          "type": "artifact",
+          "scope": "datastore",
+          "kind": "cell_selection",
+          "artifact_id": "8c487046e7b74ddf16d950076c7cc8c1baf5d8cbf78b08660f5bd3967312976c"
+        },
+        "cell_snapshot": {
+          "type": "artifact",
+          "scope": "datastore",
+          "kind": "metadata_snapshot",
+          "artifact_id": "270bf6cc61f5dd424c1f2583bfdd29ced5355cb978260831f96113a85b4859e5"
+        },
+        "ordered_row_ids_fingerprint": "9d002ca4083c27796dd0665940fe87d84a845f82b99c85539fb9a5dd285c6740",
+        "values_fingerprint": "9f0f1e72fcd79236f1bb176e65a02e956739e3927d7d6611b9b47754a77b217c"
+      }
+    },
+    "execution_options": {
+      "source_column": "I"
+    },
+    "created_at_ns": 1795720171787583000,
+    "cytearc_version": "1.4.0",
+    "complete": true
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

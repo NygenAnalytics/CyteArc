@@ -1,0 +1,183 @@
+{
+  "attributes": {
+    "stage": "leiden",
+    "ordinal": 15,
+    "startedAtNs": 1795720170490855000,
+    "finishedAtNs": 1795720170514643000,
+    "status": "completed",
+    "complete": true,
+    "outputs": [],
+    "plans": [
+      {
+        "operation": "run_leiden_clustering",
+        "ref": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "cluster_labels",
+          "artifact_id": "591a30b1f554d4248af4669e432da158a6c6a3d00e0af3865262b33afbb38b3a",
+          "assay": "RNA"
+        },
+        "disposition": "reused"
+      },
+      {
+        "operation": "run_leiden_clustering",
+        "ref": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "cluster_labels",
+          "artifact_id": "b5c24faf44fb5ca2096e927d7cdb5ad416f78c10dee657b8cb9380061c8278b5",
+          "assay": "RNA"
+        },
+        "disposition": "reused"
+      },
+      {
+        "operation": "run_leiden_clustering",
+        "ref": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "cluster_labels",
+          "artifact_id": "78583fcd243001d472abe1ca26ea2da25b1ce7d258534daaf2ed99b7de584560",
+          "assay": "RNA"
+        },
+        "disposition": "reused"
+      },
+      {
+        "operation": "run_leiden_clustering",
+        "ref": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "cluster_labels",
+          "artifact_id": "6ac13ed0304dd3e93729df3d3e77ec8edf3e369d20573c61935ce9545e2b2cd0",
+          "assay": "RNA"
+        },
+        "disposition": "reused"
+      }
+    ],
+    "metrics": {
+      "wallSeconds": 0.02555979194585234,
+      "rssBaselineBytes": null,
+      "rssPeakBytes": null,
+      "rssIncrementalPeakBytes": null,
+      "sampleIntervalSeconds": 0.1,
+      "sampleCount": 0,
+      "samplingErrorCount": 0,
+      "rssUnavailableReason": "process-tree RSS requires the Linux /proc filesystem",
+      "cpuSeconds": 0.02864700000000031,
+      "threadsPeak": null,
+      "rssHighWaterStartBytes": 418168832,
+      "rssHighWaterEndBytes": 418201600,
+      "networkRxBytes": null,
+      "networkTxBytes": null,
+      "resources": {
+        "workers": 2,
+        "memoryBudgetBytes": 2147483648,
+        "cpusAvailable": 8,
+        "cpuQuotaCores": null,
+        "memoryLimitBytes": 17179869184
+      },
+      "trace": {
+        "seconds": [
+          0.0,
+          0.019
+        ],
+        "cpuSeconds": [
+          0.0,
+          0.029
+        ],
+        "rssBytes": null,
+        "threads": null,
+        "networkRxBytes": null,
+        "networkTxBytes": null
+      },
+      "unavailable": {
+        "threadsPeak": "OS thread counts require the Linux /proc filesystem",
+        "networkRxBytes": "network counters require the Linux /proc filesystem",
+        "networkTxBytes": "network counters require the Linux /proc filesystem"
+      }
+    },
+    "error": null,
+    "interruption": null,
+    "summary": {
+      "candidates": [
+        {
+          "resolution": 0.5,
+          "clusters": 4,
+          "largestCluster": 64,
+          "smallestCluster": 22,
+          "artifact": "591a30b1f554d4248af4669e432da158a6c6a3d00e0af3865262b33afbb38b3a"
+        },
+        {
+          "resolution": 0.75,
+          "clusters": 5,
+          "largestCluster": 64,
+          "smallestCluster": 18,
+          "artifact": "b5c24faf44fb5ca2096e927d7cdb5ad416f78c10dee657b8cb9380061c8278b5"
+        },
+        {
+          "resolution": 1.0,
+          "clusters": 6,
+          "largestCluster": 49,
+          "smallestCluster": 16,
+          "artifact": "78583fcd243001d472abe1ca26ea2da25b1ce7d258534daaf2ed99b7de584560"
+        },
+        {
+          "resolution": 1.25,
+          "clusters": 6,
+          "largestCluster": 46,
+          "smallestCluster": 18,
+          "artifact": "6ac13ed0304dd3e93729df3d3e77ec8edf3e369d20573c61935ce9545e2b2cd0"
+        }
+      ]
+    },
+    "warnings": [],
+    "outputLists": [
+      {
+        "outputKey": "leiden",
+        "artifacts": [
+          {
+            "artifact": {
+              "type": "artifact",
+              "scope": "assay",
+              "kind": "cluster_labels",
+              "artifact_id": "591a30b1f554d4248af4669e432da158a6c6a3d00e0af3865262b33afbb38b3a",
+              "assay": "RNA"
+            },
+            "reused": true
+          },
+          {
+            "artifact": {
+              "type": "artifact",
+              "scope": "assay",
+              "kind": "cluster_labels",
+              "artifact_id": "b5c24faf44fb5ca2096e927d7cdb5ad416f78c10dee657b8cb9380061c8278b5",
+              "assay": "RNA"
+            },
+            "reused": true
+          },
+          {
+            "artifact": {
+              "type": "artifact",
+              "scope": "assay",
+              "kind": "cluster_labels",
+              "artifact_id": "78583fcd243001d472abe1ca26ea2da25b1ce7d258534daaf2ed99b7de584560",
+              "assay": "RNA"
+            },
+            "reused": true
+          },
+          {
+            "artifact": {
+              "type": "artifact",
+              "scope": "assay",
+              "kind": "cluster_labels",
+              "artifact_id": "6ac13ed0304dd3e93729df3d3e77ec8edf3e369d20573c61935ce9545e2b2cd0",
+              "assay": "RNA"
+            },
+            "reused": true
+          }
+        ]
+      }
+    ]
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

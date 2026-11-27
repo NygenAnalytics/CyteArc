@@ -1,0 +1,33 @@
+{
+  "attributes": {
+    "artifact_id": "500249893fe435e113cc9bd1f8a9b3680bfc5ef240a36a149663581d82589059",
+    "kind": "embedding_initialization",
+    "provenance": {
+      "operation": "build_embedding_initialization",
+      "parameters": {
+        "n_centroids": 175,
+        "rand_state": 4466,
+        "batch_size": 175,
+        "kmeans_sampling": 0.2,
+        "kmeans_batch_size": 175
+      },
+      "inputs": {
+        "coordinates": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "reduction",
+          "artifact_id": "bd6cb726cc209891c096d9ff0050ee23fa3130f488bb12f3b3e1baa307cf41de",
+          "assay": "RNA"
+        }
+      }
+    },
+    "execution_options": {
+      "invalidate_cache": false
+    },
+    "created_at_ns": 1795720170380180000,
+    "cytearc_version": "1.4.0",
+    "complete": true
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

@@ -1,0 +1,478 @@
+{
+  "attributes": {
+    "runId": "34fe9d2591e96be2fb31661ff9ae1e6fe5e091c21bdea756b008fab1cfb271f3",
+    "recipe": "atac",
+    "requestedLabel": "atac",
+    "label": "atac",
+    "assay": "ATAC",
+    "startedAtNs": 1795720171692680000,
+    "finishedAtNs": 1795720172414768000,
+    "status": "completed",
+    "complete": true,
+    "cytearcVersion": "1.4.0",
+    "config": {
+      "cells": {
+        "column": "I"
+      },
+      "snapshotColumns": [],
+      "species": null,
+      "stages": {
+        "filtering": {
+          "enabled": true,
+          "method": "mad",
+          "attrs": [
+            "ATAC_nCounts",
+            "ATAC_nFeatures"
+          ],
+          "minP": 0.01,
+          "maxP": 0.99,
+          "sampleColumn": null,
+          "nMads": 3.0,
+          "minCellsPerSample": 20
+        },
+        "prevalent_peaks": {
+          "top_n": 200
+        },
+        "normalization": {},
+        "lsi": {
+          "dims": 10
+        },
+        "harmony": false,
+        "ann_index": {},
+        "neighbors": {},
+        "connectivity": {},
+        "embedding_initialization": {},
+        "umap": {
+          "n_epochs": 100
+        },
+        "localmap": false,
+        "tsne": false,
+        "leiden": {
+          "partitions": [
+            0.5,
+            0.75,
+            1.0,
+            1.25
+          ],
+          "selected": null
+        },
+        "paris": false,
+        "membership_strength": false,
+        "markers": false
+      },
+      "shutdown": {
+        "signalGuardAvailable": true,
+        "unavailableReason": null
+      }
+    },
+    "stageOrder": [
+      "input_snapshot",
+      "filtering",
+      "prevalent_peaks",
+      "normalization",
+      "lsi",
+      "harmony",
+      "ann_index",
+      "neighbors",
+      "connectivity",
+      "embedding_initialization",
+      "umap",
+      "localmap",
+      "leiden",
+      "paris",
+      "cluster_selection",
+      "membership_strength",
+      "tsne",
+      "markers"
+    ],
+    "outputs": [
+      {
+        "key": "input_cell_selection",
+        "artifact": {
+          "type": "artifact",
+          "scope": "datastore",
+          "kind": "cell_selection",
+          "artifact_id": "8c487046e7b74ddf16d950076c7cc8c1baf5d8cbf78b08660f5bd3967312976c"
+        }
+      },
+      {
+        "key": "analysis_cell_selection",
+        "artifact": {
+          "type": "artifact",
+          "scope": "datastore",
+          "kind": "cell_selection",
+          "artifact_id": "cb5d61c9658933cef87804046a9fda5f7eb3c6f7c658e8961cc6c4f27619925c"
+        }
+      },
+      {
+        "key": "feature_universe",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "feature_selection",
+          "artifact_id": "b12373c7d41b44a07a52375eacdb7ec63571986f2644ef20e5dc341f422ec72e",
+          "assay": "ATAC"
+        }
+      },
+      {
+        "key": "prevalent_peaks",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "feature_selection",
+          "artifact_id": "59175134081bc6779c9aa6abf8125cf2836761fdee8fa6e2627b482d92eb687a",
+          "assay": "ATAC"
+        }
+      },
+      {
+        "key": "normalized",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "normalized",
+          "artifact_id": "bd59d3a49b2004b589d865e3ec55b2782f3013dcc5843a4611ddb973b360af9f",
+          "assay": "ATAC"
+        }
+      },
+      {
+        "key": "lsi",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "reduction",
+          "artifact_id": "599f93f30be0329e974fedf6d7aeb9dfe0aa4acee1e83a2bce27dd36fdf0fcc0",
+          "assay": "ATAC"
+        }
+      },
+      {
+        "key": "ann_index",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "ann_index",
+          "artifact_id": "2d5f57a197283a0939a620e029076a13a6730630d32f7230840c4319ae9a5e93",
+          "assay": "ATAC"
+        }
+      },
+      {
+        "key": "neighbors",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "neighbors",
+          "artifact_id": "6e32f446c86dd3f0e589d5b5a184387f8a3f076b6e61428ed791943436b799d9",
+          "assay": "ATAC"
+        }
+      },
+      {
+        "key": "connectivity_map",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "connectivity_map",
+          "artifact_id": "18cd855a9467a7ef4d4cef6c6ec187e0570af42993dc06002d051db8d6325ee4",
+          "assay": "ATAC"
+        }
+      },
+      {
+        "key": "embedding_initialization",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "embedding_initialization",
+          "artifact_id": "7a4f2aa81141380f1fddb1cb4d3f03ff79c153cf29f274599258544e8f0093f0",
+          "assay": "ATAC"
+        }
+      },
+      {
+        "key": "umap",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "embedding",
+          "artifact_id": "6eb01be3e60a7569073ce4cfbf55858aa8a97fbe5eb964f3307c88c2d3f7ac55",
+          "assay": "ATAC"
+        }
+      },
+      {
+        "key": "cluster_selection",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "cluster_selection",
+          "artifact_id": "cb1aeb8cc79eff81de5ea636f8e012489969f0fd8551029b8579de598520e99f",
+          "assay": "ATAC"
+        }
+      },
+      {
+        "key": "clusters",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "cluster_labels",
+          "artifact_id": "77a1f55111c152e82a0af40694d17ed26b5c2a0c58a8d6cd7a02f21d71259892",
+          "assay": "ATAC"
+        }
+      }
+    ],
+    "fields": [
+      {
+        "key": "I",
+        "axis": "cells",
+        "artifact": {
+          "type": "artifact",
+          "scope": "datastore",
+          "kind": "cell_selection",
+          "artifact_id": "cb5d61c9658933cef87804046a9fda5f7eb3c6f7c658e8961cc6c4f27619925c"
+        },
+        "sourceValue": "values",
+        "valueIndex": null,
+        "dtype": "|b1",
+        "fill": false,
+        "missingMask": null,
+        "display": null
+      },
+      {
+        "key": "ids",
+        "axis": "cells",
+        "artifact": {
+          "type": "artifact",
+          "scope": "datastore",
+          "kind": "metadata_snapshot",
+          "artifact_id": "270bf6cc61f5dd424c1f2583bfdd29ced5355cb978260831f96113a85b4859e5"
+        },
+        "sourceValue": "ids",
+        "valueIndex": null,
+        "dtype": "<U18",
+        "fill": "",
+        "missingMask": null,
+        "display": null
+      },
+      {
+        "key": "names",
+        "axis": "cells",
+        "artifact": {
+          "type": "artifact",
+          "scope": "datastore",
+          "kind": "metadata_snapshot",
+          "artifact_id": "270bf6cc61f5dd424c1f2583bfdd29ced5355cb978260831f96113a85b4859e5"
+        },
+        "sourceValue": "names",
+        "valueIndex": null,
+        "dtype": "<U18",
+        "fill": "",
+        "missingMask": null,
+        "display": null
+      },
+      {
+        "key": "umap_1",
+        "axis": "cells",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "embedding",
+          "artifact_id": "6eb01be3e60a7569073ce4cfbf55858aa8a97fbe5eb964f3307c88c2d3f7ac55",
+          "assay": "ATAC"
+        },
+        "sourceValue": "values",
+        "valueIndex": 0,
+        "dtype": "<f4",
+        "fill": "nan",
+        "missingMask": null,
+        "display": {
+          "kind": "continuous",
+          "colormap": "viridis",
+          "minimum": -8.974431037902832,
+          "maximum": 3.519516944885254,
+          "scale": "linear"
+        }
+      },
+      {
+        "key": "umap_2",
+        "axis": "cells",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "embedding",
+          "artifact_id": "6eb01be3e60a7569073ce4cfbf55858aa8a97fbe5eb964f3307c88c2d3f7ac55",
+          "assay": "ATAC"
+        },
+        "sourceValue": "values",
+        "valueIndex": 1,
+        "dtype": "<f4",
+        "fill": "nan",
+        "missingMask": null,
+        "display": {
+          "kind": "continuous",
+          "colormap": "viridis",
+          "minimum": -1.671038269996643,
+          "maximum": 11.07066535949707,
+          "scale": "linear"
+        }
+      },
+      {
+        "key": "clusters",
+        "axis": "cells",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "cluster_labels",
+          "artifact_id": "77a1f55111c152e82a0af40694d17ed26b5c2a0c58a8d6cd7a02f21d71259892",
+          "assay": "ATAC"
+        },
+        "sourceValue": "values",
+        "valueIndex": null,
+        "dtype": "<i8",
+        "fill": -1,
+        "missingMask": null,
+        "display": {
+          "kind": "categorical",
+          "categories": [
+            {
+              "value": 1,
+              "label": "1",
+              "color": "#4e79a7"
+            },
+            {
+              "value": 2,
+              "label": "2",
+              "color": "#f28e2b"
+            },
+            {
+              "value": 3,
+              "label": "3",
+              "color": "#e15759"
+            },
+            {
+              "value": 4,
+              "label": "4",
+              "color": "#76b7b2"
+            },
+            {
+              "value": 5,
+              "label": "5",
+              "color": "#59a14f"
+            },
+            {
+              "value": 6,
+              "label": "6",
+              "color": "#edc948"
+            },
+            {
+              "value": 7,
+              "label": "7",
+              "color": "#b07aa1"
+            }
+          ]
+        }
+      },
+      {
+        "key": "I",
+        "axis": "features",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "feature_selection",
+          "artifact_id": "b12373c7d41b44a07a52375eacdb7ec63571986f2644ef20e5dc341f422ec72e",
+          "assay": "ATAC"
+        },
+        "sourceValue": "values",
+        "valueIndex": null,
+        "dtype": "|b1",
+        "fill": false,
+        "missingMask": null,
+        "display": null
+      },
+      {
+        "key": "ids",
+        "axis": "features",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "metadata_snapshot",
+          "artifact_id": "6da6175992319330a3b84373c0917efffcb4b5d76d02f530c89e41f966de51de",
+          "assay": "ATAC"
+        },
+        "sourceValue": "ids",
+        "valueIndex": null,
+        "dtype": "<U25",
+        "fill": "",
+        "missingMask": null,
+        "display": null
+      },
+      {
+        "key": "names",
+        "axis": "features",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "metadata_snapshot",
+          "artifact_id": "6da6175992319330a3b84373c0917efffcb4b5d76d02f530c89e41f966de51de",
+          "assay": "ATAC"
+        },
+        "sourceValue": "names",
+        "valueIndex": null,
+        "dtype": "<U25",
+        "fill": "",
+        "missingMask": null,
+        "display": null
+      },
+      {
+        "key": "prevalent_peaks",
+        "axis": "features",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "feature_selection",
+          "artifact_id": "59175134081bc6779c9aa6abf8125cf2836761fdee8fa6e2627b482d92eb687a",
+          "assay": "ATAC"
+        },
+        "sourceValue": "values",
+        "valueIndex": null,
+        "dtype": "|b1",
+        "fill": false,
+        "missingMask": null,
+        "display": null
+      }
+    ],
+    "error": null,
+    "interruption": null,
+    "outputLists": [
+      {
+        "key": "leiden",
+        "artifacts": [
+          {
+            "type": "artifact",
+            "scope": "assay",
+            "kind": "cluster_labels",
+            "artifact_id": "a6fe611f4d14557b5361978838f646ac560636009134d66922a1e13e8052acb0",
+            "assay": "ATAC"
+          },
+          {
+            "type": "artifact",
+            "scope": "assay",
+            "kind": "cluster_labels",
+            "artifact_id": "97a4b3c8ba683ee523702bcbdf406c04f88c478bbb9226cbe9fae5329984cbdb",
+            "assay": "ATAC"
+          },
+          {
+            "type": "artifact",
+            "scope": "assay",
+            "kind": "cluster_labels",
+            "artifact_id": "77a1f55111c152e82a0af40694d17ed26b5c2a0c58a8d6cd7a02f21d71259892",
+            "assay": "ATAC"
+          },
+          {
+            "type": "artifact",
+            "scope": "assay",
+            "kind": "cluster_labels",
+            "artifact_id": "27fdc3bc554c3ad4cf05ac4cb0a1c22fccb7a43971c4436b77781c2197bb7bb2",
+            "assay": "ATAC"
+          }
+        ]
+      }
+    ]
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

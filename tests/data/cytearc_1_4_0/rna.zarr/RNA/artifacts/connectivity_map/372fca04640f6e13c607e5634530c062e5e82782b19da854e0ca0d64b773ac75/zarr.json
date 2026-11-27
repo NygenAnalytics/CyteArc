@@ -1,0 +1,32 @@
+{
+  "attributes": {
+    "artifact_id": "372fca04640f6e13c607e5634530c062e5e82782b19da854e0ca0d64b773ac75",
+    "kind": "connectivity_map",
+    "provenance": {
+      "operation": "build_connectivity_map",
+      "parameters": {
+        "local_connectivity": 1.0,
+        "bandwidth": 1.5
+      },
+      "inputs": {
+        "neighbors": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "neighbors",
+          "artifact_id": "e0db29df565c7df6b09b20ca5e86753cab3f696dfd4052c776de7804d4e3d454",
+          "assay": "RNA"
+        }
+      }
+    },
+    "execution_options": {
+      "invalidate_cache": false
+    },
+    "created_at_ns": 1795720169170266000,
+    "cytearc_version": "1.4.0",
+    "complete": true,
+    "n_cells": 175,
+    "n_neighbors": 11
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

@@ -1,0 +1,183 @@
+{
+  "attributes": {
+    "stage": "leiden",
+    "ordinal": 12,
+    "startedAtNs": 1795720172185821000,
+    "finishedAtNs": 1795720172286777000,
+    "status": "completed",
+    "complete": true,
+    "outputs": [],
+    "plans": [
+      {
+        "operation": "run_leiden_clustering",
+        "ref": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "cluster_labels",
+          "artifact_id": "a6fe611f4d14557b5361978838f646ac560636009134d66922a1e13e8052acb0",
+          "assay": "ATAC"
+        },
+        "disposition": "created"
+      },
+      {
+        "operation": "run_leiden_clustering",
+        "ref": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "cluster_labels",
+          "artifact_id": "97a4b3c8ba683ee523702bcbdf406c04f88c478bbb9226cbe9fae5329984cbdb",
+          "assay": "ATAC"
+        },
+        "disposition": "created"
+      },
+      {
+        "operation": "run_leiden_clustering",
+        "ref": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "cluster_labels",
+          "artifact_id": "77a1f55111c152e82a0af40694d17ed26b5c2a0c58a8d6cd7a02f21d71259892",
+          "assay": "ATAC"
+        },
+        "disposition": "created"
+      },
+      {
+        "operation": "run_leiden_clustering",
+        "ref": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "cluster_labels",
+          "artifact_id": "27fdc3bc554c3ad4cf05ac4cb0a1c22fccb7a43971c4436b77781c2197bb7bb2",
+          "assay": "ATAC"
+        },
+        "disposition": "created"
+      }
+    ],
+    "metrics": {
+      "wallSeconds": 0.10276104195509106,
+      "rssBaselineBytes": null,
+      "rssPeakBytes": null,
+      "rssIncrementalPeakBytes": null,
+      "sampleIntervalSeconds": 0.1,
+      "sampleCount": 0,
+      "samplingErrorCount": 0,
+      "rssUnavailableReason": "process-tree RSS requires the Linux /proc filesystem",
+      "cpuSeconds": 0.1976009999999997,
+      "threadsPeak": null,
+      "rssHighWaterStartBytes": 880082944,
+      "rssHighWaterEndBytes": 880115712,
+      "networkRxBytes": null,
+      "networkTxBytes": null,
+      "resources": {
+        "workers": 2,
+        "memoryBudgetBytes": 2147483648,
+        "cpusAvailable": 8,
+        "cpuQuotaCores": null,
+        "memoryLimitBytes": 17179869184
+      },
+      "trace": {
+        "seconds": [
+          0.0,
+          0.096
+        ],
+        "cpuSeconds": [
+          0.0,
+          0.198
+        ],
+        "rssBytes": null,
+        "threads": null,
+        "networkRxBytes": null,
+        "networkTxBytes": null
+      },
+      "unavailable": {
+        "threadsPeak": "OS thread counts require the Linux /proc filesystem",
+        "networkRxBytes": "network counters require the Linux /proc filesystem",
+        "networkTxBytes": "network counters require the Linux /proc filesystem"
+      }
+    },
+    "error": null,
+    "interruption": null,
+    "summary": {
+      "candidates": [
+        {
+          "resolution": 0.5,
+          "clusters": 3,
+          "largestCluster": 74,
+          "smallestCluster": 31,
+          "artifact": "a6fe611f4d14557b5361978838f646ac560636009134d66922a1e13e8052acb0"
+        },
+        {
+          "resolution": 0.75,
+          "clusters": 5,
+          "largestCluster": 54,
+          "smallestCluster": 20,
+          "artifact": "97a4b3c8ba683ee523702bcbdf406c04f88c478bbb9226cbe9fae5329984cbdb"
+        },
+        {
+          "resolution": 1.0,
+          "clusters": 7,
+          "largestCluster": 32,
+          "smallestCluster": 17,
+          "artifact": "77a1f55111c152e82a0af40694d17ed26b5c2a0c58a8d6cd7a02f21d71259892"
+        },
+        {
+          "resolution": 1.25,
+          "clusters": 10,
+          "largestCluster": 29,
+          "smallestCluster": 5,
+          "artifact": "27fdc3bc554c3ad4cf05ac4cb0a1c22fccb7a43971c4436b77781c2197bb7bb2"
+        }
+      ]
+    },
+    "warnings": [],
+    "outputLists": [
+      {
+        "outputKey": "leiden",
+        "artifacts": [
+          {
+            "artifact": {
+              "type": "artifact",
+              "scope": "assay",
+              "kind": "cluster_labels",
+              "artifact_id": "a6fe611f4d14557b5361978838f646ac560636009134d66922a1e13e8052acb0",
+              "assay": "ATAC"
+            },
+            "reused": false
+          },
+          {
+            "artifact": {
+              "type": "artifact",
+              "scope": "assay",
+              "kind": "cluster_labels",
+              "artifact_id": "97a4b3c8ba683ee523702bcbdf406c04f88c478bbb9226cbe9fae5329984cbdb",
+              "assay": "ATAC"
+            },
+            "reused": false
+          },
+          {
+            "artifact": {
+              "type": "artifact",
+              "scope": "assay",
+              "kind": "cluster_labels",
+              "artifact_id": "77a1f55111c152e82a0af40694d17ed26b5c2a0c58a8d6cd7a02f21d71259892",
+              "assay": "ATAC"
+            },
+            "reused": false
+          },
+          {
+            "artifact": {
+              "type": "artifact",
+              "scope": "assay",
+              "kind": "cluster_labels",
+              "artifact_id": "27fdc3bc554c3ad4cf05ac4cb0a1c22fccb7a43971c4436b77781c2197bb7bb2",
+              "assay": "ATAC"
+            },
+            "reused": false
+          }
+        ]
+      }
+    ]
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

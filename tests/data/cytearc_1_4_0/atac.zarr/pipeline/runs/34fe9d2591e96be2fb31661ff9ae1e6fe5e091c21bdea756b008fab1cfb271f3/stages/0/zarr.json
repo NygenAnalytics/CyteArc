@@ -1,0 +1,154 @@
+{
+  "attributes": {
+    "stage": "input_snapshot",
+    "ordinal": 0,
+    "startedAtNs": 1795720171699942000,
+    "finishedAtNs": 1795720171772629000,
+    "status": "completed",
+    "complete": true,
+    "outputs": [
+      {
+        "outputKey": "input_cell_selection",
+        "artifact": {
+          "type": "artifact",
+          "scope": "datastore",
+          "kind": "cell_selection",
+          "artifact_id": "8c487046e7b74ddf16d950076c7cc8c1baf5d8cbf78b08660f5bd3967312976c"
+        },
+        "reused": false
+      },
+      {
+        "outputKey": "cell_snapshot",
+        "artifact": {
+          "type": "artifact",
+          "scope": "datastore",
+          "kind": "metadata_snapshot",
+          "artifact_id": "270bf6cc61f5dd424c1f2583bfdd29ced5355cb978260831f96113a85b4859e5"
+        },
+        "reused": false
+      },
+      {
+        "outputKey": "feature_snapshot",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "metadata_snapshot",
+          "artifact_id": "6da6175992319330a3b84373c0917efffcb4b5d76d02f530c89e41f966de51de",
+          "assay": "ATAC"
+        },
+        "reused": false
+      },
+      {
+        "outputKey": "feature_universe",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "feature_selection",
+          "artifact_id": "b12373c7d41b44a07a52375eacdb7ec63571986f2644ef20e5dc341f422ec72e",
+          "assay": "ATAC"
+        },
+        "reused": false
+      }
+    ],
+    "plans": [
+      {
+        "operation": "snapshot_pipeline_input_selection",
+        "ref": {
+          "type": "artifact",
+          "scope": "datastore",
+          "kind": "cell_selection",
+          "artifact_id": "8c487046e7b74ddf16d950076c7cc8c1baf5d8cbf78b08660f5bd3967312976c"
+        },
+        "disposition": "created"
+      },
+      {
+        "operation": "snapshot_run_metadata",
+        "ref": {
+          "type": "artifact",
+          "scope": "datastore",
+          "kind": "metadata_snapshot",
+          "artifact_id": "270bf6cc61f5dd424c1f2583bfdd29ced5355cb978260831f96113a85b4859e5"
+        },
+        "disposition": "created"
+      },
+      {
+        "operation": "snapshot_run_metadata",
+        "ref": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "metadata_snapshot",
+          "artifact_id": "6da6175992319330a3b84373c0917efffcb4b5d76d02f530c89e41f966de51de",
+          "assay": "ATAC"
+        },
+        "disposition": "created"
+      },
+      {
+        "operation": "create_all_features",
+        "ref": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "feature_selection",
+          "artifact_id": "b12373c7d41b44a07a52375eacdb7ec63571986f2644ef20e5dc341f422ec72e",
+          "assay": "ATAC"
+        },
+        "disposition": "created"
+      }
+    ],
+    "metrics": {
+      "wallSeconds": 0.07152616698294878,
+      "rssBaselineBytes": null,
+      "rssPeakBytes": null,
+      "rssIncrementalPeakBytes": null,
+      "sampleIntervalSeconds": 0.1,
+      "sampleCount": 0,
+      "samplingErrorCount": 0,
+      "rssUnavailableReason": "process-tree RSS requires the Linux /proc filesystem",
+      "cpuSeconds": 0.08645699999999934,
+      "threadsPeak": null,
+      "rssHighWaterStartBytes": 879624192,
+      "rssHighWaterEndBytes": 879706112,
+      "networkRxBytes": null,
+      "networkTxBytes": null,
+      "resources": {
+        "workers": 2,
+        "memoryBudgetBytes": 2147483648,
+        "cpusAvailable": 8,
+        "cpuQuotaCores": null,
+        "memoryLimitBytes": 17179869184
+      },
+      "trace": {
+        "seconds": [
+          0.0,
+          0.068
+        ],
+        "cpuSeconds": [
+          0.0,
+          0.086
+        ],
+        "rssBytes": null,
+        "threads": null,
+        "networkRxBytes": null,
+        "networkTxBytes": null
+      },
+      "unavailable": {
+        "threadsPeak": "OS thread counts require the Linux /proc filesystem",
+        "networkRxBytes": "network counters require the Linux /proc filesystem",
+        "networkTxBytes": "network counters require the Linux /proc filesystem"
+      }
+    },
+    "error": null,
+    "interruption": null,
+    "summary": {
+      "input_cell_selection": {
+        "cells": 200
+      },
+      "feature_universe": {
+        "features": 600
+      }
+    },
+    "warnings": [],
+    "outputLists": []
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

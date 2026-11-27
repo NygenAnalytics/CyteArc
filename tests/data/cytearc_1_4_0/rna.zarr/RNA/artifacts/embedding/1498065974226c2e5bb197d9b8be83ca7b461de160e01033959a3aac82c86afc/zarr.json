@@ -1,0 +1,61 @@
+{
+  "attributes": {
+    "artifact_id": "1498065974226c2e5bb197d9b8be83ca7b461de160e01033959a3aac82c86afc",
+    "kind": "embedding",
+    "provenance": {
+      "operation": "run_umap",
+      "parameters": {
+        "symmetric_graph": false,
+        "graph_upper_only": false,
+        "umap_dims": 2,
+        "spread": 2.0,
+        "min_dist": 1.0,
+        "n_epochs": 100,
+        "repulsion_strength": 1.0,
+        "initial_alpha": 1.0,
+        "negative_sample_rate": 5.0,
+        "use_density_map": false,
+        "dens_lambda": 2.0,
+        "dens_frac": 0.3,
+        "dens_var_shift": 0.1,
+        "random_seed": 4444,
+        "parallel": false
+      },
+      "inputs": {
+        "graph": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "connectivity_map",
+          "artifact_id": "372fca04640f6e13c607e5634530c062e5e82782b19da854e0ca0d64b773ac75",
+          "assay": "RNA"
+        },
+        "initialization": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "embedding_initialization",
+          "artifact_id": "71d6fcd3304028b29f080c1807cbddb7ac83f6a20b25d7c720327636522f67a4",
+          "assay": "RNA"
+        },
+        "cell_selection": {
+          "type": "artifact",
+          "scope": "datastore",
+          "kind": "cell_selection",
+          "artifact_id": "26fe72eafb5a078ff48fe49c95f5b8d59a3d872f2d3fb7b5fedd01877dfd6999"
+        }
+      }
+    },
+    "execution_options": {
+      "nthreads": 2,
+      "layout_threads": 1,
+      "invalidate_cache": false
+    },
+    "created_at_ns": 1795720169369749000,
+    "cytearc_version": "1.4.0",
+    "complete": true,
+    "diagnostics": {
+      "densityRadiusSpan": null
+    }
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

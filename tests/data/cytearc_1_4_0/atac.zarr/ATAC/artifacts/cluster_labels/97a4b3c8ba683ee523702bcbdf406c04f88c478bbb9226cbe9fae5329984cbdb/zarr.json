@@ -1,0 +1,40 @@
+{
+  "attributes": {
+    "artifact_id": "97a4b3c8ba683ee523702bcbdf406c04f88c478bbb9226cbe9fae5329984cbdb",
+    "kind": "cluster_labels",
+    "provenance": {
+      "operation": "run_leiden_clustering",
+      "parameters": {
+        "resolution": 0.75,
+        "backend": "cytearc",
+        "edge_weighting": "graph",
+        "symmetric_graph": false,
+        "graph_upper_only": false,
+        "random_seed": 4444
+      },
+      "inputs": {
+        "graph": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "connectivity_map",
+          "artifact_id": "18cd855a9467a7ef4d4cef6c6ec187e0570af42993dc06002d051db8d6325ee4",
+          "assay": "ATAC"
+        },
+        "cell_selection": {
+          "type": "artifact",
+          "scope": "datastore",
+          "kind": "cell_selection",
+          "artifact_id": "cb5d61c9658933cef87804046a9fda5f7eb3c6f7c658e8961cc6c4f27619925c"
+        }
+      }
+    },
+    "execution_options": {
+      "invalidate_cache": false
+    },
+    "created_at_ns": 1795720172229815000,
+    "cytearc_version": "1.4.0",
+    "complete": true
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

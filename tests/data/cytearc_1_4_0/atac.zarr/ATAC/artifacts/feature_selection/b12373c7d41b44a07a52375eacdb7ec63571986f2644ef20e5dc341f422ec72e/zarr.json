@@ -1,0 +1,22 @@
+{
+  "attributes": {
+    "artifact_id": "b12373c7d41b44a07a52375eacdb7ec63571986f2644ef20e5dc341f422ec72e",
+    "kind": "feature_selection",
+    "provenance": {
+      "operation": "create_all_features",
+      "parameters": {
+        "dataset_fingerprint": "d197c99a62014879555ed8548a218b4e42d6ab2755cb4cc597ad026d6160da7a",
+        "ordered_feature_ids_fingerprint": "44a6d42fb7eaeb08471e52d99e657da47d85a5befb23dfd355e3d48ef6af687f"
+      },
+      "inputs": {}
+    },
+    "execution_options": {},
+    "created_at_ns": 1795720171756072000,
+    "cytearc_version": "1.4.0",
+    "complete": true,
+    "ordered_feature_ids_fingerprint": "44a6d42fb7eaeb08471e52d99e657da47d85a5befb23dfd355e3d48ef6af687f",
+    "payload_fingerprint": "1b53be2e73cebd2309f8fb8321c5fb62f06ce3449e2368ae15fbd97be8e3ba0b"
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

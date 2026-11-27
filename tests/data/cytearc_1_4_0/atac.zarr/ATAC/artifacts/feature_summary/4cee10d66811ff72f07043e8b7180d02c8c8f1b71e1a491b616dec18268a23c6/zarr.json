@@ -1,0 +1,33 @@
+{
+  "attributes": {
+    "artifact_id": "4cee10d66811ff72f07043e8b7180d02c8c8f1b71e1a491b616dec18268a23c6",
+    "kind": "feature_summary",
+    "provenance": {
+      "operation": "summarize_atac_features",
+      "parameters": {
+        "normalization_method": {
+          "identity": "cytearc.assay.norm_tf_idf:selected-cell-df:total-count-tf"
+        }
+      },
+      "inputs": {
+        "cell_selection": {
+          "type": "artifact",
+          "scope": "datastore",
+          "kind": "cell_selection",
+          "artifact_id": "cb5d61c9658933cef87804046a9fda5f7eb3c6f7c658e8961cc6c4f27619925c"
+        },
+        "dataset_fingerprint": "d197c99a62014879555ed8548a218b4e42d6ab2755cb4cc597ad026d6160da7a"
+      }
+    },
+    "execution_options": {
+      "nthreads": 2
+    },
+    "created_at_ns": 1795720171813427000,
+    "cytearc_version": "1.4.0",
+    "complete": true,
+    "ordered_feature_ids_fingerprint": "44a6d42fb7eaeb08471e52d99e657da47d85a5befb23dfd355e3d48ef6af687f",
+    "payload_fingerprint": "c7f67e808b8a9a9100b970f3b3c53b2ec6f976f0d352a1c24bf8abf850f452a5"
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

@@ -1,0 +1,50 @@
+{
+  "attributes": {
+    "artifact_id": "bd6cb726cc209891c096d9ff0050ee23fa3130f488bb12f3b3e1baa307cf41de",
+    "kind": "reduction",
+    "provenance": {
+      "operation": "run_pca",
+      "parameters": {
+        "dims": 15,
+        "feat_scaling": true
+      },
+      "inputs": {
+        "normalized": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "normalized",
+          "artifact_id": "3573f9ddb91a9421aa510d261bc8a2b34eddb010cb2eb3bd5e9f4878cc401368",
+          "assay": "RNA"
+        },
+        "feature_scaling": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "feature_scaling",
+          "artifact_id": "8bc65eb5835156d937dbbfa929562fb50ba02465fc92bfa47f7b4ad851b5536f",
+          "assay": "RNA"
+        },
+        "pca_cell_selection": {
+          "type": "artifact",
+          "scope": "datastore",
+          "kind": "cell_selection",
+          "artifact_id": "26fe72eafb5a078ff48fe49c95f5b8d59a3d872f2d3fb7b5fedd01877dfd6999"
+        }
+      }
+    },
+    "execution_options": {
+      "batch_size": 175,
+      "show_elbow_plot": false,
+      "invalidate_cache": false,
+      "local_cache": "auto"
+    },
+    "created_at_ns": 1795720168655003000,
+    "cytearc_version": "1.4.0",
+    "complete": true,
+    "diagnostics": {
+      "solverPasses": null,
+      "componentShift": null
+    }
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

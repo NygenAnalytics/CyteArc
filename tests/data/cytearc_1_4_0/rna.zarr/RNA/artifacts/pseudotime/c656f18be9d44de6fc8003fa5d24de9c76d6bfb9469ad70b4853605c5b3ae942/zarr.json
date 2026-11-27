@@ -1,0 +1,52 @@
+{
+  "attributes": {
+    "artifact_id": "c656f18be9d44de6fc8003fa5d24de9c76d6bfb9469ad70b4853605c5b3ae942",
+    "kind": "pseudotime",
+    "provenance": {
+      "operation": "run_pseudotime_scoring",
+      "parameters": {
+        "method": "untruncated",
+        "sources": [
+          1
+        ],
+        "sinks": [
+          4
+        ],
+        "min_max_norm_ptime": true,
+        "component_policy": "largest"
+      },
+      "inputs": {
+        "connectivity_map": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "connectivity_map",
+          "artifact_id": "372fca04640f6e13c607e5634530c062e5e82782b19da854e0ca0d64b773ac75",
+          "assay": "RNA"
+        },
+        "source_sink": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "cluster_labels",
+          "artifact_id": "591a30b1f554d4248af4669e432da158a6c6a3d00e0af3865262b33afbb38b3a",
+          "assay": "RNA"
+        },
+        "cell_selection": {
+          "type": "artifact",
+          "scope": "datastore",
+          "kind": "cell_selection",
+          "artifact_id": "26fe72eafb5a078ff48fe49c95f5b8d59a3d872f2d3fb7b5fedd01877dfd6999"
+        }
+      },
+      "revision": 2
+    },
+    "execution_options": {
+      "invalidate_cache": false
+    },
+    "created_at_ns": 1795720170980426000,
+    "cytearc_version": "1.4.0",
+    "complete": true,
+    "payload_fingerprint": "425c27c3f9e571e87b81e28c355cf8403ce3b424e918a9bad1c2902647de8670"
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

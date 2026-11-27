@@ -1,0 +1,24 @@
+{
+  "attributes": {
+    "artifact_id": "ca899ed82c1cb0aa572e17101332c5edd1186de4eea2c0c5d1739ad3caa74a29",
+    "kind": "cell_selection",
+    "provenance": {
+      "operation": "import_cell_selection",
+      "parameters": {
+        "source": "h5ad"
+      },
+      "inputs": {
+        "ordered_row_ids_fingerprint": "7a1f35aa6ec45537c2360f48ef8f677be8152c6087645f9702eaaf74bda37f5b",
+        "values_fingerprint": "4c4d967b3a83fe1d8d2ddad4a4635bd56aef3e3ff85c5e380835f10c5ea08b07"
+      }
+    },
+    "execution_options": {
+      "source_column": "I"
+    },
+    "created_at_ns": 1795720167708287000,
+    "cytearc_version": "1.4.0",
+    "complete": true
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

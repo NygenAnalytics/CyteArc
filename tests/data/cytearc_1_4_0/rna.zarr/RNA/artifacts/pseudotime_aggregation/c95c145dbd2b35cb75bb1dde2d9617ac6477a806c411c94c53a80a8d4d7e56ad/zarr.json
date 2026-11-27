@@ -1,0 +1,81 @@
+{
+  "attributes": {
+    "artifact_id": "c95c145dbd2b35cb75bb1dde2d9617ac6477a806c411c94c53a80a8d4d7e56ad",
+    "kind": "pseudotime_aggregation",
+    "provenance": {
+      "operation": "run_pseudotime_aggregation",
+      "parameters": {
+        "normalization": {
+          "log_transform": false,
+          "renormalize_subset": false
+        },
+        "normalization_method": {
+          "module": "cytearc.assay",
+          "qualname": "norm_lib_size"
+        },
+        "size_factor": 1000.0,
+        "min_exp": 0.001,
+        "window_size": 30,
+        "chunk_size": 10,
+        "smoothen": true,
+        "z_scale": true,
+        "n_neighbours": 5,
+        "n_clusters": 3,
+        "ann_params": {
+          "space": "l2",
+          "ef_construction": 80,
+          "M": 50,
+          "random_seed": 444,
+          "ef": 80,
+          "num_threads": 1,
+          "dim": 10
+        },
+        "nan_cluster_value": -1
+      },
+      "inputs": {
+        "cell_selection": {
+          "type": "artifact",
+          "scope": "datastore",
+          "kind": "cell_selection",
+          "artifact_id": "26fe72eafb5a078ff48fe49c95f5b8d59a3d872f2d3fb7b5fedd01877dfd6999"
+        },
+        "feature_selection": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "feature_selection",
+          "artifact_id": "2c723e910ab9e4453fd1719e4d323c51f397daa3d6835346db585b4f6b5d7774",
+          "assay": "RNA"
+        },
+        "pseudotime": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "pseudotime",
+          "artifact_id": "c656f18be9d44de6fc8003fa5d24de9c76d6bfb9469ad70b4853605c5b3ae942",
+          "assay": "RNA"
+        },
+        "dataset_fingerprint": "e17310f277d4dc70fc194df1d7a964ea9c7a62a72f9c1e49e46b6ea6b5efd175",
+        "ordered_feature_ids_fingerprint": "37930d58a33f7bd15d54eb779bdfaaafa6dd283d2728dab3f9140eea82910cdd",
+        "ordered_feature_names_fingerprint": "6a69eec6caed75c777fff24069aaf8bf0c118bb5573aa1e36d951eeb545f27f0"
+      }
+    },
+    "execution_options": {
+      "batch_size": null,
+      "nthreads": 2,
+      "invalidate_cache": false
+    },
+    "created_at_ns": 1795720171075853000,
+    "cytearc_version": "1.4.0",
+    "complete": true,
+    "input_fingerprints": [
+      "2ce82dd8e0116211c562d81596aafeed",
+      "5d5e7af14bb5c18e6ed68dce840f27d2",
+      "83fd683bf5a83e01aa115acda97a1d3b"
+    ],
+    "nan_cluster_value": -1,
+    "effective_window": 30,
+    "effective_bins": 10,
+    "payload_fingerprint": "5baa38eaa3a91850e787c83a1882b348ccb9aa794e1e172417110aa81352cdb5"
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

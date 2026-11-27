@@ -1,0 +1,174 @@
+{
+  "attributes": {
+    "stage": "input_snapshot",
+    "ordinal": 0,
+    "startedAtNs": 1795720168014523000,
+    "finishedAtNs": 1795720168115250000,
+    "status": "completed",
+    "complete": true,
+    "outputs": [
+      {
+        "outputKey": "input_cell_selection",
+        "artifact": {
+          "type": "artifact",
+          "scope": "datastore",
+          "kind": "cell_selection",
+          "artifact_id": "eccc59fd7a24206ea161b8a671642dd8b9246d3ec6a980f369ff88c08c7c9788"
+        },
+        "reused": false
+      },
+      {
+        "outputKey": "cell_snapshot",
+        "artifact": {
+          "type": "artifact",
+          "scope": "datastore",
+          "kind": "metadata_snapshot",
+          "artifact_id": "faa8fd56af7153324c96f3e2195d39f7d25cdeddab80d35d2d1d4efa27791a5f"
+        },
+        "reused": false
+      },
+      {
+        "outputKey": "feature_snapshot",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "metadata_snapshot",
+          "artifact_id": "299e8946296927bb1648765e69b8172f21c566a08b8a824f31e107446069f61f",
+          "assay": "RNA"
+        },
+        "reused": false
+      },
+      {
+        "outputKey": "feature_universe",
+        "artifact": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "feature_selection",
+          "artifact_id": "e31fc41b15405d44d6a87b7f60dab0d7c594be945d2e77e1ca0684e1b393966d",
+          "assay": "RNA"
+        },
+        "reused": false
+      },
+      {
+        "outputKey": "column_snapshot",
+        "artifact": {
+          "type": "artifact",
+          "scope": "datastore",
+          "kind": "metadata_snapshot",
+          "artifact_id": "1d15e6a83aac8ebab310ce38a5fb059b99c425b075fa02df29b476c0adff7532"
+        },
+        "reused": false
+      }
+    ],
+    "plans": [
+      {
+        "operation": "snapshot_pipeline_input_selection",
+        "ref": {
+          "type": "artifact",
+          "scope": "datastore",
+          "kind": "cell_selection",
+          "artifact_id": "eccc59fd7a24206ea161b8a671642dd8b9246d3ec6a980f369ff88c08c7c9788"
+        },
+        "disposition": "created"
+      },
+      {
+        "operation": "snapshot_run_metadata",
+        "ref": {
+          "type": "artifact",
+          "scope": "datastore",
+          "kind": "metadata_snapshot",
+          "artifact_id": "faa8fd56af7153324c96f3e2195d39f7d25cdeddab80d35d2d1d4efa27791a5f"
+        },
+        "disposition": "created"
+      },
+      {
+        "operation": "snapshot_run_metadata",
+        "ref": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "metadata_snapshot",
+          "artifact_id": "299e8946296927bb1648765e69b8172f21c566a08b8a824f31e107446069f61f",
+          "assay": "RNA"
+        },
+        "disposition": "created"
+      },
+      {
+        "operation": "create_all_features",
+        "ref": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "feature_selection",
+          "artifact_id": "e31fc41b15405d44d6a87b7f60dab0d7c594be945d2e77e1ca0684e1b393966d",
+          "assay": "RNA"
+        },
+        "disposition": "created"
+      },
+      {
+        "operation": "snapshot_run_metadata",
+        "ref": {
+          "type": "artifact",
+          "scope": "datastore",
+          "kind": "metadata_snapshot",
+          "artifact_id": "1d15e6a83aac8ebab310ce38a5fb059b99c425b075fa02df29b476c0adff7532"
+        },
+        "disposition": "created"
+      }
+    ],
+    "metrics": {
+      "wallSeconds": 0.09971966699231416,
+      "rssBaselineBytes": null,
+      "rssPeakBytes": null,
+      "rssIncrementalPeakBytes": null,
+      "sampleIntervalSeconds": 0.1,
+      "sampleCount": 0,
+      "samplingErrorCount": 0,
+      "rssUnavailableReason": "process-tree RSS requires the Linux /proc filesystem",
+      "cpuSeconds": 0.11952699999999994,
+      "threadsPeak": null,
+      "rssHighWaterStartBytes": 346931200,
+      "rssHighWaterEndBytes": 347193344,
+      "networkRxBytes": null,
+      "networkTxBytes": null,
+      "resources": {
+        "workers": 2,
+        "memoryBudgetBytes": 2147483648,
+        "cpusAvailable": 8,
+        "cpuQuotaCores": null,
+        "memoryLimitBytes": 17179869184
+      },
+      "trace": {
+        "seconds": [
+          0.0,
+          0.096
+        ],
+        "cpuSeconds": [
+          0.0,
+          0.12
+        ],
+        "rssBytes": null,
+        "threads": null,
+        "networkRxBytes": null,
+        "networkTxBytes": null
+      },
+      "unavailable": {
+        "threadsPeak": "OS thread counts require the Linux /proc filesystem",
+        "networkRxBytes": "network counters require the Linux /proc filesystem",
+        "networkTxBytes": "network counters require the Linux /proc filesystem"
+      }
+    },
+    "error": null,
+    "interruption": null,
+    "summary": {
+      "input_cell_selection": {
+        "cells": 200
+      },
+      "feature_universe": {
+        "features": 389
+      }
+    },
+    "warnings": [],
+    "outputLists": []
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

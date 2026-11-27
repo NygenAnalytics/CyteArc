@@ -1,0 +1,66 @@
+{
+  "attributes": {
+    "artifact_id": "36cfc48e7a33ab73047ed99a852b23f25d268a654fdb18040c7e4021fecba8e6",
+    "kind": "immune_receptors",
+    "provenance": {
+      "operation": "import_immune_receptors",
+      "parameters": {
+        "productive_only": true
+      },
+      "inputs": {
+        "cell_selection": {
+          "type": "artifact",
+          "scope": "datastore",
+          "kind": "cell_selection",
+          "artifact_id": "26fe72eafb5a078ff48fe49c95f5b8d59a3d872f2d3fb7b5fedd01877dfd6999"
+        },
+        "sources": [
+          {
+            "format": "airr",
+            "sha256": "facbd706436b1a1994206a5253c0c15ed127d2f81f860a9ed492b328d4b7e993",
+            "barcode_prefix": null,
+            "barcode_suffix": null,
+            "barcode_pattern": null
+          }
+        ]
+      }
+    },
+    "execution_options": {
+      "invalidate_cache": false
+    },
+    "created_at_ns": 1795720171195677000,
+    "cytearc_version": "1.4.0",
+    "complete": true,
+    "fields": [
+      "sequence_id",
+      "locus",
+      "v_call",
+      "d_call",
+      "j_call",
+      "c_call",
+      "junction",
+      "junction_aa",
+      "productive",
+      "duplicate_count",
+      "consensus_count"
+    ],
+    "diagnostics": {
+      "fileBarcodes": 80,
+      "unmatchedBarcodes": 0,
+      "unselectedBarcodes": 8,
+      "unmatchedBarcodeExamples": [],
+      "unselectedBarcodeExamples": [
+        "AATCACGAGGAACTCG-1",
+        "ACTATTCTCGCGGTAC-1",
+        "CACAGATGTTCCACGG-1",
+        "GTCAAGTTCATGCCCT-1",
+        "GTGGAGAAGGCTCAAG-1"
+      ],
+      "fileContigs": 160,
+      "unmatchedContigs": 16,
+      "cellsWithChain": 72
+    }
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

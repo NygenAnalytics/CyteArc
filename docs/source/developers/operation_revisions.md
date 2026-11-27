@@ -89,7 +89,7 @@ Every artifact saves the diagnostics that its operation declares, and reuse requ
 
 An artifact that records an earlier revision and lacks the diagnostic reads it as None, not measured. `ArtifactStatus.diagnostics`, which `ds.artifacts.inspect(ref)` and `require_complete_artifact` read, applies this rule, so such an artifact still serves the calls that pass it explicitly and the runs that reference it. Reading still refuses an artifact that lacks any other declared diagnostic, one that holds a key its operation does not declare, and one without diagnostics, as releases before 1.4.0 saved them. It also refuses an artifact that records the adding revision or a later one and lacks the diagnostic: every such artifact was saved with it, so only damage or a bug can have lost it.
 
-The registry refuses a scoped revision that adds diagnostics, and `declare_diagnostics` refuses the declaration of an operation when a revision of the operation adds a diagnostic that the declaration lacks. Revision 3 of `select_hvgs` added `selectedDetectionRatio`, so a selection that CyteArc 1.4.0 saved reads the ratio as None.
+The registry refuses a scoped revision that adds diagnostics, and `declare_diagnostics` refuses the declaration of an operation when a revision of the operation adds a diagnostic that the declaration lacks. Revision 3 of `select_hvgs` added `selectedDetectionRatio`, so a selection that CyteArc 1.4.0 saved reads the ratio as None; the other layouts of earlier releases that CyteArc reads are listed in {ref}`stores written by other releases <stores_written_by_other_releases>`.
 
 ## Rules for entries
 

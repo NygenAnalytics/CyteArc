@@ -1,0 +1,62 @@
+{
+  "attributes": {
+    "artifact_id": "74d5186e7abb6a1540734c449b04af82954d838578aa72d744cfc20f4d8f044c",
+    "kind": "clones",
+    "provenance": {
+      "operation": "import_clones",
+      "parameters": {
+        "multiple": "error"
+      },
+      "inputs": {
+        "cell_selection": {
+          "type": "artifact",
+          "scope": "datastore",
+          "kind": "cell_selection",
+          "artifact_id": "26fe72eafb5a078ff48fe49c95f5b8d59a3d872f2d3fb7b5fedd01877dfd6999"
+        },
+        "sources": [
+          {
+            "format": "table",
+            "cell": [
+              "cell"
+            ],
+            "clone": "clone",
+            "probability": null,
+            "sha256": "ba86f5d09e64a58cb01ba54b59f70bd187822fbd0d831d8b7e03dba937546c2d",
+            "barcode_prefix": null,
+            "barcode_suffix": null,
+            "barcode_pattern": null,
+            "related_sha256": [],
+            "namespace": null
+          }
+        ]
+      }
+    },
+    "execution_options": {
+      "invalidate_cache": false
+    },
+    "created_at_ns": 1795720171366648000,
+    "cytearc_version": "1.4.0",
+    "complete": true,
+    "n_clones": 24,
+    "diagnostics": {
+      "fileBarcodes": 100,
+      "unmatchedBarcodes": 0,
+      "unselectedBarcodes": 10,
+      "unmatchedBarcodeExamples": [],
+      "unselectedBarcodeExamples": [
+        "AATCACGAGGAACTCG-1",
+        "ACTATTCTCGCGGTAC-1",
+        "GTCAAGTTCATGCCCT-1",
+        "GTGAGCCAGCTTAAGA-1",
+        "GTGGAGAGTGATTGGG-1"
+      ],
+      "cellsWithClone": 90,
+      "largestCloneShare": 0.08888888888888889,
+      "fileRows": 100,
+      "cellsInSeveralClones": 0
+    }
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

@@ -1,0 +1,31 @@
+{
+  "attributes": {
+    "artifact_id": "a66d81c4f4a5d53d71da0b33bd9b754c452ed945422c6a93cf45f4479b0afc14",
+    "kind": "feature_scaling",
+    "provenance": {
+      "operation": "calculate_feature_scaling",
+      "parameters": {
+        "enabled": false
+      },
+      "inputs": {
+        "normalized": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "normalized",
+          "artifact_id": "bd59d3a49b2004b589d865e3ec55b2782f3013dcc5843a4611ddb973b360af9f",
+          "assay": "ATAC"
+        }
+      }
+    },
+    "execution_options": {
+      "batch_size": 174,
+      "invalidate_cache": false,
+      "local_cache": "auto"
+    },
+    "created_at_ns": 1795720171897892000,
+    "cytearc_version": "1.4.0",
+    "complete": true
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

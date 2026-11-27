@@ -1,0 +1,86 @@
+{
+  "attributes": {
+    "artifact_id": "311e59369ea64f7f706ead103a7e7e623e3854108b95cc041becb41dc2d232a3",
+    "kind": "marker_table",
+    "provenance": {
+      "operation": "run_marker_search",
+      "parameters": {
+        "normalization": {
+          "log_transform": false,
+          "renormalize_subset": false
+        },
+        "normalization_method": {
+          "module": "cytearc.assay",
+          "qualname": "norm_lib_size"
+        },
+        "size_factor": 1000,
+        "method": "mannwhitneyu",
+        "alternative": "two-sided",
+        "tie_correction": true,
+        "continuity_correction": true,
+        "adjustment_method": "fdr_bh",
+        "adjustment_scope": "within_group_all_tested_features"
+      },
+      "inputs": {
+        "cell_selection": {
+          "type": "artifact",
+          "scope": "datastore",
+          "kind": "cell_selection",
+          "artifact_id": "26fe72eafb5a078ff48fe49c95f5b8d59a3d872f2d3fb7b5fedd01877dfd6999"
+        },
+        "feature_selection": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "feature_selection",
+          "artifact_id": "e31fc41b15405d44d6a87b7f60dab0d7c594be945d2e77e1ca0684e1b393966d",
+          "assay": "RNA"
+        },
+        "clusters": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "cluster_labels",
+          "artifact_id": "591a30b1f554d4248af4669e432da158a6c6a3d00e0af3865262b33afbb38b3a",
+          "assay": "RNA"
+        },
+        "feature_snapshot": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "metadata_snapshot",
+          "artifact_id": "299e8946296927bb1648765e69b8172f21c566a08b8a824f31e107446069f61f",
+          "assay": "RNA"
+        }
+      },
+      "revision": 2
+    },
+    "execution_options": {
+      "nthreads": 2,
+      "invalidate_cache": false
+    },
+    "created_at_ns": 1795720169937892000,
+    "cytearc_version": "1.4.0",
+    "complete": true,
+    "stat_columns": [
+      "score",
+      "mean",
+      "mean_rest",
+      "frac_exp",
+      "frac_exp_rest",
+      "fold_change",
+      "p_value",
+      "auc",
+      "p_value_adjusted",
+      "neg_log10_p_value"
+    ],
+    "method": "mannwhitneyu",
+    "alternative": "two-sided",
+    "tie_correction": true,
+    "continuity_correction": true,
+    "adjustment_method": "fdr_bh",
+    "adjustment_scope": "within_group_all_tested_features",
+    "fold_change_policy": "ratio_of_means_inf_when_rest_zero_nan_when_undefined",
+    "p_value_policy": "exact_permutation_up_to_100000_splits",
+    "skipped_groups": {}
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

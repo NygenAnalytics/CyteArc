@@ -1,0 +1,44 @@
+{
+  "attributes": {
+    "artifact_id": "6e32f446c86dd3f0e589d5b5a184387f8a3f076b6e61428ed791943436b799d9",
+    "kind": "neighbors",
+    "provenance": {
+      "operation": "query_neighbors",
+      "parameters": {
+        "k": 11,
+        "distance_metric": "l2"
+      },
+      "inputs": {
+        "ann_index": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "ann_index",
+          "artifact_id": "2d5f57a197283a0939a620e029076a13a6730630d32f7230840c4319ae9a5e93",
+          "assay": "ATAC"
+        },
+        "coordinates": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "reduction",
+          "artifact_id": "599f93f30be0329e974fedf6d7aeb9dfe0aa4acee1e83a2bce27dd36fdf0fcc0",
+          "assay": "ATAC"
+        }
+      }
+    },
+    "execution_options": {
+      "nthreads": 2,
+      "batch_size": 174,
+      "invalidate_cache": false
+    },
+    "created_at_ns": 1795720171990167000,
+    "cytearc_version": "1.4.0",
+    "complete": true,
+    "n_cells": 174,
+    "n_neighbors": 11,
+    "diagnostics": {
+      "selfHitRate": 100.0
+    }
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

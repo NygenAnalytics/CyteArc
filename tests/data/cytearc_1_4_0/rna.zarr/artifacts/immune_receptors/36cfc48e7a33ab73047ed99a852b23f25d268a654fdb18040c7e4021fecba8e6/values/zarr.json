@@ -1,0 +1,48 @@
+{
+  "shape": [
+    175
+  ],
+  "data_type": {
+    "name": "fixed_length_utf32",
+    "configuration": {
+      "length_bytes": 20
+    }
+  },
+  "chunk_grid": {
+    "name": "regular",
+    "configuration": {
+      "chunk_shape": [
+        175
+      ]
+    }
+  },
+  "chunk_key_encoding": {
+    "name": "default",
+    "configuration": {
+      "separator": "/"
+    }
+  },
+  "fill_value": "",
+  "codecs": [
+    {
+      "name": "bytes",
+      "configuration": {
+        "endian": "little"
+      }
+    },
+    {
+      "name": "blosc",
+      "configuration": {
+        "typesize": 20,
+        "cname": "lz4",
+        "clevel": 5,
+        "shuffle": "bitshuffle",
+        "blocksize": 0
+      }
+    }
+  ],
+  "attributes": {},
+  "zarr_format": 3,
+  "node_type": "array",
+  "storage_transformers": []
+}

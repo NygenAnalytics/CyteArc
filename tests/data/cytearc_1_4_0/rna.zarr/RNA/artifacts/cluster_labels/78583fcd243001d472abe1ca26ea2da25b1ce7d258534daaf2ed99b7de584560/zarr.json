@@ -1,0 +1,40 @@
+{
+  "attributes": {
+    "artifact_id": "78583fcd243001d472abe1ca26ea2da25b1ce7d258534daaf2ed99b7de584560",
+    "kind": "cluster_labels",
+    "provenance": {
+      "operation": "run_leiden_clustering",
+      "parameters": {
+        "resolution": 1.0,
+        "backend": "cytearc",
+        "edge_weighting": "graph",
+        "symmetric_graph": false,
+        "graph_upper_only": false,
+        "random_seed": 4444
+      },
+      "inputs": {
+        "graph": {
+          "type": "artifact",
+          "scope": "assay",
+          "kind": "connectivity_map",
+          "artifact_id": "372fca04640f6e13c607e5634530c062e5e82782b19da854e0ca0d64b773ac75",
+          "assay": "RNA"
+        },
+        "cell_selection": {
+          "type": "artifact",
+          "scope": "datastore",
+          "kind": "cell_selection",
+          "artifact_id": "26fe72eafb5a078ff48fe49c95f5b8d59a3d872f2d3fb7b5fedd01877dfd6999"
+        }
+      }
+    },
+    "execution_options": {
+      "invalidate_cache": false
+    },
+    "created_at_ns": 1795720169517178000,
+    "cytearc_version": "1.4.0",
+    "complete": true
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}
