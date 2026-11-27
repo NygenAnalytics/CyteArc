@@ -422,8 +422,7 @@ def test_the_counters_totals_follow_the_rows_it_holds() -> None:
         n_rows = sum(len(part) for part in parts)
         n_text = sum(len(part.barcode_values) + len(part.umi_values) for part in parts)
         assert counter.n_rows == n_rows
-        # Each chunk held takes 1,300 bytes beside its rows and text.
-        assert counter.nbytes == sum(part.nbytes for part in parts) + 1_300 * len(parts)
+        assert counter.nbytes == sum(part.nbytes for part in parts)
         assert counter.peak_bytes == counter.nbytes + 110 * n_rows + 48 * n_text
 
 
