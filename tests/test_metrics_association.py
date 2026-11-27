@@ -695,3 +695,48 @@ def test_coefficient_estimability_ignores_constant_technicals() -> None:
     assert result == baseline
     assert result["encodedColumns"] == 2
     assert result["coefficientEstimable"] is True
+
+
+def test_coefficient_estimability_excludes_non_finite_continuous_technicals() -> None:
+    disease = np.array(["case", "ctrl", "case", "ctrl", "case", "ctrl"])
+    depth = np.array([1.0, 2.0, np.inf, 4.0, -np.inf, 6.0])
+    finite = np.isfinite(depth)
+
+    expected = coefficient_estimability(
+        disease[finite],
+        coefficientKind="categorical",
+        technicals={"depth": depth[finite]},
+        technicalKinds={"depth": "continuous"},
+    )
+    result = coefficient_estimability(
+        disease,
+        coefficientKind="categorical",
+        technicals={"depth": depth},
+        technicalKinds={"depth": "continuous"},
+    )
+
+    assert result == expected
+    assert result["status"] == "ok"
+    assert result["rowsUsed"] == 4
+    assert result["rankTechnical"] == 2
+    assert result["rankWithCoefficient"] == 3
+    assert result["coefficientEstimable"] is True
+
+    # Object arrays mixing pd.NA and non-finite floats must also drop both.
+    mixed_depth = np.array([1.0, 2.0, pd.NA, 4.0, np.inf, 6.0], dtype=object)
+    mixed_result = coefficient_estimability(
+        disease,
+        coefficientKind="categorical",
+        technicals={"depth": mixed_depth},
+        technicalKinds={"depth": "continuous"},
+    )
+    assert mixed_result == expected
+
+    design = pd.DataFrame({"disease": disease, "depth": depth})
+    report = report_confounding(
+        design,
+        coefficient="disease",
+        technicalColumns=["depth"],
+        columnKinds={"disease": "categorical", "depth": "continuous"},
+    )
+    assert report["estimability"] == expected
