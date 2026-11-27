@@ -25,7 +25,7 @@ separate `cytebase` package, documented at <https://docs.nygen.io/CyteBase/>.
 
 ## Memory budget refusals
 
-A call that would hold more than its memory budget at a step raises `MemoryBudgetError`, a `MemoryError` whose `needed_bytes` is the budget that passes the step, `budget_bytes` the budget and `item` the step ([what a refusal names](../concepts/memory-and-execution)).
+A call that would hold more than its memory budget at a step raises `MemoryBudgetError`, a `MemoryError` whose message closes naming `suggested_budget_bytes`, the budget at which a rerun passes the step; `needed_bytes` is what the call needs at the step, `budget_bytes` the budget and `item` the step ([what a refusal names](../concepts/memory-and-execution)).
 
 ```{eval-rst}
 .. autoclass:: cytearc.MemoryBudgetError

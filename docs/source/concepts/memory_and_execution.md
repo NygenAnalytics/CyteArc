@@ -67,20 +67,19 @@ A stream that closes early, such as one whose consumer stops or fails, can leave
 (memory_refusals)=
 #### What a refusal names
 
-A step that would pass the budget raises `MemoryBudgetError`, a `MemoryError`, before it reads or writes. Its message names the step, the bytes that the call needs at that step and the budget, and closes with a budget that runs the step:
+A step that would pass the budget raises `MemoryBudgetError`, a `MemoryError`, before it reads or writes. Its message names the step, the bytes that the call needs at that step and the budget, and closes with a budget at which a rerun of the call passes the step:
 
 ```text
 Importing contigs for 8 selected cells holds about 1154586 bytes for a chunk of 1000 contig rows
-as parsed, more than the memory budget of 1000000 bytes. Raise mem_budget to at least 1154586
-bytes, or pass a smaller cell_selection.
+as parsed, more than the memory budget of 1000000 bytes. Raise mem_budget to at least 2 MiB, or
+pass a smaller cell_selection.
 ```
 
-The error holds the same numbers as `needed_bytes` and `budget_bytes`, and the step as `item`. Planners and other checks word their refusals in their own terms, with the same three fields. To act on a refusal:
+The budget that a refusal names is the bytes that the step needs and a quarter more, rounded up to a whole MiB, such as `mem_budget="2M"`. The quarter leaves room for a step whose blocks take a share of the budget, and so grow when the budget does, and for the steps after it, which often need a little more than the refused one. A step whose blocks can grow by more than the quarter, such as an import's count layout, checks its plan at the budget it names before naming it. The error holds the named budget as `suggested_budget_bytes`, the bytes that the call needs at the step as `needed_bytes`, the budget as `budget_bytes`, the step as `item`, and the other way to fit the budget, if any, as `remedy`. Planners and other checks word their refusals in their own terms and close with the same budget. To act on a refusal:
 
-- Rerun with `mem_budget` of at least `needed_bytes`, which runs the refused step. A later step can need more and refuses the same way, so a call can be refused more than once as its budget rises.
+- Rerun with the budget that the message names, which runs the refused step. A later step can need more and names its own budget, so a call can be refused once by each of several steps as its budget rises.
 - Or take the remedy that the message names after "or", such as a smaller `cell_selection`, which makes the step fit the same budget.
-- `needed_bytes` is always a whole `mem_budget`, also where a step plans with part of the budget, as normalization's producer does beside its writer.
-- A step whose blocks take a share of the room, such as a file's chunks, reads larger blocks at a larger budget, and can also run a little below the named budget, with smaller blocks.
+- `needed_bytes` is in terms of the whole `mem_budget`, also where a step plans with part of the budget, as normalization's producer does beside its writer. A step whose blocks take a share of the budget can run a little below it, with smaller blocks, and can need more than it at a larger budget, with larger blocks.
 - A converter whose default count layout does not fit raises `CountLayoutMemoryError`, a `MemoryBudgetError`, whose `fittingPolicy` is the largest smaller layout that fits; `policy="fit"` writes it.
 
 A count write handed a batch larger than its producer reserved names what the write would reserve with that batch, which can be below the budget, since the producer broke its own reservation. The checks of the variant operations raise a `MemoryError` of their own, and the screen's `efficiency`, `edistance`, `signature`, `mixscape`, `associations`, `profiles` and `cluster` raise a `MemoryBudgetError` in their own words.
